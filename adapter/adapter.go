@@ -33,14 +33,22 @@ type internalProxyState struct {
 
 type Proxy struct {
 	C.ProxyAdapter
-	alive   atomic.Bool
-	history *queue.Queue[C.DelayHistory]
-	extra   xsync.Map[string, *internalProxyState]
+	alive              atomic.Bool
+	history            *queue.Queue[C.DelayHistory]
+	extra              xsync.Map[string, *internalProxyState]
+	persistentIdentity string
 }
 
 // Adapter implements C.Proxy
 func (p *Proxy) Adapter() C.ProxyAdapter {
 	return p.ProxyAdapter
+}
+
+// PersistentIdentity returns a credentials-safe digest of the normalized
+// proxy configuration. Sage learning uses it to avoid applying evidence
+// from a same-named but replaced endpoint after reload or restart.
+func (p *Proxy) PersistentIdentity() string {
+	return p.persistentIdentity
 }
 
 // AliveForTestUrl implements C.Proxy
@@ -285,9 +293,10 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 
 func NewProxy(adapter C.ProxyAdapter) *Proxy {
 	return &Proxy{
-		ProxyAdapter: adapter,
-		history:      queue.New[C.DelayHistory](defaultHistoriesNum),
-		alive:        atomic.NewBool(true),
+		ProxyAdapter:       adapter,
+		history:            queue.New[C.DelayHistory](defaultHistoriesNum),
+		alive:              atomic.NewBool(true),
+		persistentIdentity: "instance:" + utils.NewUUIDV4().String(),
 	}
 }
 

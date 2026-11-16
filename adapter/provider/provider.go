@@ -82,6 +82,14 @@ func (bp *baseProvider) Proxies() []C.Proxy {
 	return bp.proxies
 }
 
+// ProxiesWithLock returns a stable provider snapshot and a release function.
+// Callers must release it promptly and must not call another provider method
+// while holding the lease.
+func (bp *baseProvider) ProxiesWithLock() ([]C.Proxy, func()) {
+	bp.mutex.RLock()
+	return bp.proxies, bp.mutex.RUnlock
+}
+
 func (bp *baseProvider) Count() int {
 	bp.mutex.RLock()
 	defer bp.mutex.RUnlock()

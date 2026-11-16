@@ -23,6 +23,9 @@ var (
 	bucketETag             = []byte("etag")
 	bucketSubscriptionInfo = []byte("subscriptioninfo")
 	bucketStorage          = []byte("storage")
+	bucketSageDiagnostics  = []byte("sageDiagnostics")
+	bucketSageState        = []byte("sageState")
+	bucketSageStateMeta    = []byte("sageStateMeta")
 )
 
 // CacheFile store and update the cache file

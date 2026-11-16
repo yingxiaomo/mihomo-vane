@@ -1,7 +1,6 @@
 package shadowtls
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
@@ -18,18 +17,19 @@ import (
 
 type hashReadConn struct {
 	net.Conn
-	reader *bufio.Reader
-	hmac   hash.Hash
+	hmac hash.Hash
 }
 
 func newHashReadConn(conn net.Conn, password string) *hashReadConn {
-	readHMAC := hmac.New(sha1.New, []byte(password))
-	reader := bufio.NewReaderSize(io.TeeReader(conn, readHMAC), 16*1024)
-	return &hashReadConn{Conn: conn, reader: reader, hmac: readHMAC}
+	return &hashReadConn{Conn: conn, hmac: hmac.New(sha1.New, []byte(password))}
 }
 
 func (c *hashReadConn) Read(p []byte) (int, error) {
-	return c.reader.Read(p)
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		_, _ = c.hmac.Write(p[:n])
+	}
+	return n, err
 }
 
 func (c *hashReadConn) Sum() []byte {

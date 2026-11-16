@@ -1,7 +1,14 @@
 package adapter
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
+	"hash"
+	"math"
+	"reflect"
+	"sort"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/common/structure"
@@ -246,7 +253,105 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	}
 
 	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
-	return NewProxy(proxy), nil
+	parsed := NewProxy(proxy)
+	// Persistent identity is derived exclusively from the normalized raw mapping
+	// and provider scope. Runtime API wiring is not part of the proxy entity and
+	// must not disable identity generation: production config parsing always
+	// supplies TunnelForAPI.
+	identity, err := persistentProxyIdentity(mapping, opt.ProviderName)
+	if err != nil {
+		return nil, fmt.Errorf("derive proxy identity: %w", err)
+	}
+	parsed.persistentIdentity = "proxy-config-v1:" + identity
+	return parsed, nil
+}
+
+func writeProxyIdentityBytes(h hash.Hash, value []byte) {
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+	_, _ = h.Write(size[:])
+	_, _ = h.Write(value)
+}
+
+func writeCanonicalProxyIdentity(h hash.Hash, value reflect.Value) error {
+	if !value.IsValid() || ((value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) && value.IsNil()) {
+		_, _ = h.Write([]byte{'n'})
+		return nil
+	}
+	if value.Kind() == reflect.Interface {
+		return writeCanonicalProxyIdentity(h, value.Elem())
+	}
+	switch value.Kind() {
+	case reflect.Bool:
+		if value.Bool() {
+			_, _ = h.Write([]byte("b1"))
+		} else {
+			_, _ = h.Write([]byte("b0"))
+		}
+	case reflect.String:
+		_, _ = h.Write([]byte{'s'})
+		writeProxyIdentityBytes(h, []byte(value.String()))
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		_, _ = h.Write([]byte{'i'})
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], uint64(value.Int()))
+		_, _ = h.Write(encoded[:])
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		_, _ = h.Write([]byte{'u'})
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], value.Uint())
+		_, _ = h.Write(encoded[:])
+	case reflect.Float32:
+		_, _ = h.Write([]byte{'f', '4'})
+		var encoded [4]byte
+		binary.BigEndian.PutUint32(encoded[:], math.Float32bits(float32(value.Float())))
+		_, _ = h.Write(encoded[:])
+	case reflect.Float64:
+		_, _ = h.Write([]byte{'f', '8'})
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], math.Float64bits(value.Float()))
+		_, _ = h.Write(encoded[:])
+	case reflect.Slice, reflect.Array:
+		_, _ = h.Write([]byte{'a'})
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(value.Len()))
+		_, _ = h.Write(size[:])
+		for i := 0; i < value.Len(); i++ {
+			if err := writeCanonicalProxyIdentity(h, value.Index(i)); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return fmt.Errorf("unsupported map key type %s", value.Type().Key())
+		}
+		_, _ = h.Write([]byte{'m'})
+		keys := value.MapKeys()
+		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(keys)))
+		_, _ = h.Write(size[:])
+		for _, key := range keys {
+			writeProxyIdentityBytes(h, []byte(key.String()))
+			if err := writeCanonicalProxyIdentity(h, value.MapIndex(key)); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported value type %s", value.Type())
+	}
+	return nil
+}
+
+func persistentProxyIdentity(mapping map[string]any, providerName string) (string, error) {
+	h := sha256.New()
+	_, _ = h.Write([]byte("proxy-config-v1\x00"))
+	if err := writeCanonicalProxyIdentity(h, reflect.ValueOf(mapping)); err != nil {
+		return "", err
+	}
+	writeProxyIdentityBytes(h, []byte(providerName))
+	sum := h.Sum(nil)
+	return base64.RawURLEncoding.EncodeToString(sum), nil
 }
 
 type proxyOption struct {

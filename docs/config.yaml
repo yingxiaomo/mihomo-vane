@@ -414,7 +414,6 @@ proxies: # socks5
     server: server
     port: 44046
     psk: yourpsk
-    # userkey: per-user-client-id # v6 only; sent as the Snell ClientID
     # version: 4 # support 1/2/3/4/5/6
     # udp: true # support UDP on version 3/4/5/6
     # reuse: false # v4/5/6 only
@@ -1808,6 +1807,22 @@ proxy-groups:
   #                   # 中途换节点、换出口 IP。未认证的请求回退到该策略原本的 key。
   #                   # 两种策略给出的一致性时长不同(前者永久、后者 10 分钟),
   #                   # 取舍见 PR #3133。
+
+  # sage 按连接场景组合在线 connect/response/throughput/failure 证据。
+  # prior-model 是显式可选项；省略时保持纯在线行为。文件必须位于 Home Dir
+  #（或 SAFE_PATHS）内，加载失败会拒绝新配置，不会发布半加载 generation。
+  - name: "sage-auto"
+    type: sage
+    proxies:
+      - ss1
+      - ss2
+      - vmess1
+    # prior-model: ./sage-prior/SagePrior.json
+    # 先验包仅补低证据维度，置信度硬上限 0.35；在线证据成熟后完全接管。
+    # 当前 bootstrap-v2 包从旧 PLD 归档训练，不作为真实在线 evidence，
+    # 不改变健康过滤、失败 cooldown、exploration 或主动媒体切换授权。
+    url: "https://cp.cloudflare.com/generate_204"
+    interval: 300
 
   # select 用户自行选择节点
   - name: Proxy

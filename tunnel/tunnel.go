@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"path/filepath"
@@ -117,15 +118,15 @@ func (t tunnel) NatTable() C.NatTable {
 }
 
 func (t tunnel) Proxies() map[string]C.Proxy {
-	return proxies
+	return Proxies()
 }
 
 func (t tunnel) Providers() map[string]P.ProxyProvider {
-	return providers
+	return Providers()
 }
 
 func (t tunnel) RuleProviders() map[string]P.RuleProvider {
-	return ruleProviders
+	return RuleProviders()
 }
 
 func (t tunnel) RuleUpdateCallback() *utils.Callback[P.RuleProvider] {
@@ -157,6 +158,8 @@ func SetSniffing(b bool) {
 }
 
 func IsSniffing() bool {
+	configMux.RLock()
+	defer configMux.RUnlock()
 	return sniffingEnable
 }
 
@@ -195,7 +198,9 @@ func NatTable() C.NatTable {
 
 // Rules return all rules
 func Rules() []C.Rule {
-	return rules
+	configMux.RLock()
+	defer configMux.RUnlock()
+	return append([]C.Rule(nil), rules...)
 }
 
 func Listeners() map[string]C.InboundListener {
@@ -203,42 +208,50 @@ func Listeners() map[string]C.InboundListener {
 }
 
 // UpdateRules handle update rules
-func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, newRuleProviders map[string]P.RuleProvider) (oldRules []C.Rule, oldSubRule map[string][]C.Rule, oldRuleProviders map[string]P.RuleProvider) {
+func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider) {
 	configMux.Lock()
-	oldRules = rules
-	oldSubRule = subRules
-	oldRuleProviders = ruleProviders
 	rules = newRules
-	ruleProviders = newRuleProviders
+	ruleProviders = rp
 	subRules = newSubRule
 	configMux.Unlock()
-	return
 }
 
 // Proxies return all proxies
 func Proxies() map[string]C.Proxy {
-	return proxies
+	configMux.RLock()
+	defer configMux.RUnlock()
+	return maps.Clone(proxies)
 }
 
 // Providers return all compatible providers
 func Providers() map[string]P.ProxyProvider {
-	return providers
+	configMux.RLock()
+	defer configMux.RUnlock()
+	return maps.Clone(providers)
 }
 
 // RuleProviders return all loaded rule providers
 func RuleProviders() map[string]P.RuleProvider {
-	return ruleProviders
+	configMux.RLock()
+	defer configMux.RUnlock()
+	return maps.Clone(ruleProviders)
 }
 
-// UpdateProxies handle update proxies
-func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider) (oldProxies map[string]C.Proxy, oldProviders map[string]P.ProxyProvider) {
+// UpdateProxies handle update proxies.
+func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider) {
+	UpdateProxiesWithCommit(newProxies, newProviders, nil)
+}
+
+// UpdateProxiesWithCommit runs commit at the proxy-map publication linearization
+// point. commit must be bounded and must not perform persistence I/O.
+func UpdateProxiesWithCommit(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, commit func()) {
 	configMux.Lock()
-	oldProxies = proxies
-	oldProviders = providers
+	if commit != nil {
+		commit()
+	}
 	proxies = newProxies
 	providers = newProviders
 	configMux.Unlock()
-	return
 }
 
 func UpdateListeners(newListeners map[string]C.InboundListener) {
@@ -324,7 +337,9 @@ func preHandleMetadata(metadata *C.Metadata) error {
 func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err error) {
 	if metadata.SpecialProxy != "" {
 		var exist bool
+		configMux.RLock()
 		proxy, exist = proxies[metadata.SpecialProxy]
+		configMux.RUnlock()
 		if !exist {
 			err = fmt.Errorf("proxy %s not found", metadata.SpecialProxy)
 		}
@@ -384,6 +399,8 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 			}
 		},
 		CheckPassRule: func(adapterName string) bool {
+			// match holds configMux.RLock for the complete rule evaluation. Do not
+			// recursively RLock here: a queued writer would deadlock RWMutex.
 			adapter, ok := proxies[adapterName]
 			if !ok {
 				return false
@@ -407,9 +424,13 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 
 	switch mode {
 	case Direct:
+		configMux.RLock()
 		proxy = proxies["DIRECT"]
+		configMux.RUnlock()
 	case Global:
+		configMux.RLock()
 		proxy = proxies["GLOBAL"]
+		configMux.RUnlock()
 	// Rule
 	default:
 		proxy, rule, err = match(metadata, helper)

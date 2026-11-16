@@ -67,7 +67,7 @@ func (hc *HealthCheck) setProxies(proxies []C.Proxy) {
 
 func (hc *HealthCheck) registerHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
 	url = strings.TrimSpace(url)
-	if len(url) == 0 || url == hc.url {
+	if len(url) == 0 {
 		log.Debugln("ignore invalid health check url: %s", url)
 		return
 	}
@@ -75,9 +75,14 @@ func (hc *HealthCheck) registerHealthCheckTask(url string, expectedStatus utils.
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 
-	// if the provider has not set up health checks, then modify it to be the same as the group's interval
-	if hc.interval == 0 {
+	// A group using the provider's primary URL may be the component that
+	// enables periodic checks. Apply its interval before primary-URL dedupe.
+	if hc.interval == 0 && interval != 0 {
 		hc.interval = time.Duration(interval) * time.Second
+	}
+	if url == hc.url {
+		log.Debugln("health check url: %s uses provider primary task", url)
+		return
 	}
 
 	if hc.extra == nil {

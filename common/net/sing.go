@@ -55,6 +55,14 @@ func NeedHandshake(conn any) bool {
 
 type CountFunc = network.CountFunc
 
+// RelayLifecycleObserver lets transparent connection wrappers defer terminal
+// observations until both Relay copy directions have quiesced. Implementations
+// must not change ownership or block Relay shutdown.
+type RelayLifecycleObserver interface {
+	RelayStarted()
+	RelayFinished()
+}
+
 var Pipe = deadline.Pipe
 
 func closeWrite(writer io.Closer) error {
@@ -70,6 +78,25 @@ func Relay(leftConn, rightConn net.Conn) {
 	defer func() {
 		_ = leftConn.Close()
 		_ = rightConn.Close()
+	}()
+
+	leftObserver, leftObserved := common.Cast[RelayLifecycleObserver](leftConn)
+	rightObserver, rightObserved := common.Cast[RelayLifecycleObserver](rightConn)
+	if leftObserved {
+		leftObserver.RelayStarted()
+	}
+	if rightObserved {
+		rightObserver.RelayStarted()
+	}
+	defer func() {
+		// This defer runs before the close defer above. Both copy directions have
+		// returned, so delivered-byte counters can no longer arrive afterwards.
+		if leftObserved {
+			leftObserver.RelayFinished()
+		}
+		if rightObserved {
+			rightObserver.RelayFinished()
+		}
 	}()
 
 	ch := make(chan struct{})

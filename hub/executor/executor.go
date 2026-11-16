@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -85,6 +86,11 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	mux.Lock()
 	defer mux.Unlock()
 	log.SetLevel(cfg.General.LogLevel)
+	sageActivation := outboundgroup.PrepareSageLearningStates(cfg.Proxies)
+	if err := sageActivation.Err(); err != nil {
+		log.Errorln("prepare Sage learning state failed: %s", err.Error())
+		return
+	}
 
 	tunnel.OnSuspend()
 
@@ -97,7 +103,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
-	updateProxies(cfg.Proxies, cfg.Providers)
+	oldProxies := updateProxies(cfg.Proxies, cfg.Providers, sageActivation)
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
 	updateSniffer(cfg.Sniffer)
 	updateHosts(cfg.Hosts)
@@ -117,6 +123,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.RuleProviders)
 	runtime.GC()
 	tunnel.OnRunning()
+	outboundgroup.ReleaseSageNativeCollectors(oldProxies)
 	updateUpdater(cfg)
 
 	resolver.ResetConnection()
@@ -307,8 +314,10 @@ func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
 	resolver.DefaultHosts = resolver.NewHosts(tree)
 }
 
-func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {
-	tunnel.UpdateProxies(proxies, providers)
+func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider, activation *outboundgroup.SageLearningActivation) map[string]C.Proxy {
+	oldProxies := tunnel.Proxies()
+	tunnel.UpdateProxiesWithCommit(proxies, providers, activation.Commit)
+	return oldProxies
 }
 
 func updateRules(rules []C.Rule, subRules map[string][]C.Rule, ruleProviders map[string]P.RuleProvider) {
@@ -533,6 +542,14 @@ func Shutdown() {
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := outboundgroup.FlushSageLearningStatesContext(ctx); err != nil {
+		log.Warnln("flush Sage node state on shutdown failed: %s", err.Error())
+	}
+	if err := outboundgroup.FlushSageNativeCollectorsContext(ctx); err != nil {
+		log.Warnln("flush Sage native collector on shutdown failed: %s", err.Error())
+	}
 
 	log.Warnln("Mihomo shutting down")
 }
