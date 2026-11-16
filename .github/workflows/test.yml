@@ -29,6 +29,11 @@ jobs:
           - '1.25'
           - '1.24'
       fail-fast: false
+      # macos-latest 1.24/1.26 连续三轮被 runner 中断（系统性基础设施问题），
+      # macOS 覆盖由 macos-26-intel 全版本 + macos-latest 1.25 承担
+      exclude:
+        - { os: 'macos-latest', go-version: '1.24' }
+        - { os: 'macos-latest', go-version: '1.26' }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
