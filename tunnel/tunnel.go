@@ -689,8 +689,8 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 		var rematchRule C.Rule
 	GetRules:
 		for _, rule := range getRules(metadata) {
-			if matched, ada := rule.Match(metadata, helper); matched {
-				adapter, ok := proxies[ada]
+			if matched, adapterName := rule.Match(metadata, helper); matched {
+				adapter, ok := proxies[adapterName]
 				if !ok {
 					continue
 				}

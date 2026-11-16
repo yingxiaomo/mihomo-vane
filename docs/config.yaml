@@ -1808,19 +1808,15 @@ proxy-groups:
   #                   # 两种策略给出的一致性时长不同(前者永久、后者 10 分钟),
   #                   # 取舍见 PR #3133。
 
-  # sage 按连接场景组合在线 connect/response/throughput/failure 证据。
-  # prior-model 是显式可选项；省略时保持纯在线行为。文件必须位于 Home Dir
-  #（或 SAFE_PATHS）内，加载失败会拒绝新配置，不会发布半加载 generation。
-  - name: "sage-auto"
-    type: sage
+  # vane 按连接场景组合在线 connect/response/throughput/failure 证据。
+  # 仅使用在线证据；collect-events 是独立观察能力，默认关闭。
+  - name: "vane-auto"
+    type: vane
     proxies:
       - ss1
       - ss2
       - vmess1
-    # prior-model: ./sage-prior/SagePrior.json
-    # 先验包仅补低证据维度，置信度硬上限 0.35；在线证据成熟后完全接管。
-    # 当前 bootstrap-v2 包从旧 PLD 归档训练，不作为真实在线 evidence，
-    # 不改变健康过滤、失败 cooldown、exploration 或主动媒体切换授权。
+    # collect-events: true
     url: "https://cp.cloudflare.com/generate_204"
     interval: 300
 

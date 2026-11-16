@@ -55,8 +55,8 @@ const (
 	ZeroTier
 	EasyTier
 	GostRelay
-	// Sage is appended to preserve every existing AdapterType value.
-	Sage
+	// Vane is appended to preserve every existing AdapterType value.
+	Vane
 )
 
 const (
@@ -254,8 +254,8 @@ func (at AdapterType) String() string {
 		return "URLTest"
 	case LoadBalance:
 		return "LoadBalance"
-	case Sage:
-		return "Sage"
+	case Vane:
+		return "Vane"
 	default:
 		return "Unknown"
 	}

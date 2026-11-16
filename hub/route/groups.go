@@ -24,7 +24,7 @@ func groupRouter() http.Handler {
 		r.Use(parseProxyName, findProxyByName)
 		r.Get("/", getGroup)
 		r.Get("/delay", getGroupDelay)
-		r.Get("/sage", getSageDiagnostics)
+		r.Get("/vane", getVaneDiagnostics)
 	})
 	return r
 }
@@ -51,15 +51,15 @@ func getGroup(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, ErrNotFound)
 }
 
-func getSageDiagnostics(w http.ResponseWriter, r *http.Request) {
+func getVaneDiagnostics(w http.ResponseWriter, r *http.Request) {
 	proxy := r.Context().Value(CtxKeyProxy).(C.Proxy)
-	provider, ok := proxy.Adapter().(outboundgroup.SageDiagnosticsProvider)
+	provider, ok := proxy.Adapter().(outboundgroup.VaneDiagnosticsProvider)
 	if !ok {
 		render.Status(r, http.StatusNotFound)
 		render.JSON(w, r, ErrNotFound)
 		return
 	}
-	render.JSON(w, r, provider.SageDiagnostics())
+	render.JSON(w, r, provider.VaneDiagnostics())
 }
 
 func getGroupDelay(w http.ResponseWriter, r *http.Request) {

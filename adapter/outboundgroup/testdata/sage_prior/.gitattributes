@@ -1,2 +1,0 @@
-# Content-addressed models must survive Git checkout byte-for-byte.
-*.lgb binary

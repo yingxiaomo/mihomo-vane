@@ -45,7 +45,7 @@ func (p *Proxy) Adapter() C.ProxyAdapter {
 }
 
 // PersistentIdentity returns a credentials-safe digest of the normalized
-// proxy configuration. Sage learning uses it to avoid applying evidence
+// proxy configuration. Vane learning uses it to avoid applying evidence
 // from a same-named but replaced endpoint after reload or restart.
 func (p *Proxy) PersistentIdentity() string {
 	return p.persistentIdentity

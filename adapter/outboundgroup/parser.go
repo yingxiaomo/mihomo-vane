@@ -128,10 +128,10 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		status = "*"
 	}
 	groupOption.ExpectedStatus = status
-	// Sage must resolve its interval before registering any provider task.
+	// Vane must resolve its interval before registering any provider task.
 	// A provider can intentionally start with auto health checks disabled, and
 	// the group registration is what enables the concrete URL used by ranking.
-	if groupOption.Type == "sage" && groupOption.Interval == 0 {
+	if groupOption.Type == "vane" && groupOption.Interval == 0 {
 		groupOption.Interval = 300
 	}
 
@@ -152,7 +152,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			if groupOption.URL == "" {
 				groupOption.URL = C.DefaultTestURL
 			}
-		} else if groupOption.Type != "sage" {
+		} else if groupOption.Type != "vane" {
 			addTestUrlToProviders(PDs, groupOption.URL, expectedStatus, groupOption.Filter, uint(groupOption.Interval))
 		}
 		providers = append(providers, PDs...)
@@ -219,20 +219,23 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			return nil, err
 		}
 		return NewLoadBalance(groupOption, opt, emptyFallback, providers)
-	case "sage":
-		// Sage always ranks against one concrete health-check URL. Ensure
+	case "vane":
+		// Vane always ranks against one concrete health-check URL. Ensure
 		// provider-only groups register the resolved URL as well; compatible
 		// providers ignore duplicate tasks for their own URL.
 		if groupOption.URL == "" {
 			groupOption.URL = C.DefaultTestURL
 		}
 		addTestUrlToProviders(providers, groupOption.URL, expectedStatus, groupOption.Filter, uint(groupOption.Interval))
-		opt := SageOption{}
+		if _, exists := config["prior-model"]; exists {
+			return nil, errors.New("prior-model is not supported by vane")
+		}
+		opt := VaneOption{}
 		err = decoder.Decode(config, &opt)
 		if err != nil {
 			return nil, err
 		}
-		return NewSage(groupOption, opt, emptyFallback, providers)
+		return NewVane(groupOption, opt, emptyFallback, providers)
 	case "relay":
 		return nil, fmt.Errorf("%w: The group [%s] with relay type was removed, please using dialer-proxy instead", errType, groupName)
 	default:
