@@ -164,6 +164,8 @@ type vaneObservedConn struct {
 	closeObserveOnce sync.Once
 	nativeCloseOnce  sync.Once
 	closeErr         error
+	directPolicy     bool
+	pendingAction    vanePolicyAction
 }
 
 type vanePolicyAction func() bool
@@ -183,6 +185,7 @@ type vaneThroughputObservation struct {
 	Duration      time.Duration
 	TotalBytes    int64
 	Age           time.Duration
+	Delivered     bool
 }
 
 // vaneConnectionCloseObservation describes only locally observable
@@ -225,6 +228,7 @@ func newVaneControlledConnWithNative(conn C.Conn, clock vaneClock, onResponse fu
 }
 
 func (c *vaneObservedConn) Write(payload []byte) (int, error) {
+	c.drainPendingAbort()
 	if len(payload) > 0 {
 		c.beginWrite()
 	}
@@ -236,6 +240,7 @@ func (c *vaneObservedConn) Write(payload []byte) (int, error) {
 }
 
 func (c *vaneObservedConn) WriteBuffer(buffer *buf.Buffer) error {
+	c.drainPendingAbort()
 	payload := buffer.Len()
 	if payload > 0 {
 		c.beginWrite()
@@ -282,6 +287,7 @@ func (w *vaneObservedWriter) WriterPossiblyReplaceable() bool {
 }
 
 func (c *vaneObservedConn) Read(payload []byte) (int, error) {
+	c.drainPendingAbort()
 	n, err := c.Conn.Read(payload)
 	if n > 0 {
 		c.observeRead(c.clock.Now(), int64(n), false)
@@ -290,6 +296,7 @@ func (c *vaneObservedConn) Read(payload []byte) (int, error) {
 }
 
 func (c *vaneObservedConn) ReadBuffer(buffer *buf.Buffer) error {
+	c.drainPendingAbort()
 	before := buffer.Len()
 	err := c.Conn.ReadBuffer(buffer)
 	read := buffer.Len() - before
@@ -533,10 +540,53 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 	if recordThroughput && c.onNativeWindow != nil {
 		c.onNativeWindow(observation, throughputReason)
 	}
-	if delivered && recordThroughput && c.onWindow != nil {
-		if action := c.onWindow(observation); action != nil {
-			c.requestAbort(action)
+	if recordThroughput && c.onWindow != nil {
+		c.mu.Lock()
+		directPolicy := c.directPolicy
+		c.mu.Unlock()
+		if !delivered && !directPolicy {
+			return
 		}
+		observation.Delivered = delivered
+		if action := c.onWindow(observation); action != nil {
+			if delivered {
+				c.requestAbort(action)
+			} else {
+				c.mu.Lock()
+				if c.pendingAction == nil {
+					c.pendingAction = action
+				}
+				c.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (c *vaneObservedConn) enableDirectPolicy() {
+	c.mu.Lock()
+	c.directPolicy = true
+	c.mu.Unlock()
+}
+
+func (c *vaneObservedConn) submitPolicyAction(action vanePolicyAction, delivered bool) {
+	if delivered {
+		c.requestAbort(action)
+		return
+	}
+	c.mu.Lock()
+	if c.pendingAction == nil {
+		c.pendingAction = action
+	}
+	c.mu.Unlock()
+}
+
+func (c *vaneObservedConn) drainPendingAbort() {
+	c.mu.Lock()
+	action := c.pendingAction
+	c.pendingAction = nil
+	c.mu.Unlock()
+	if action != nil {
+		c.requestAbort(action)
 	}
 }
 

@@ -1,0 +1,596 @@
+package outboundgroup
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	A "github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/adapter/outbound"
+	C "github.com/metacubex/mihomo/constant"
+	P "github.com/metacubex/mihomo/constant/provider"
+
+	"github.com/stretchr/testify/require"
+)
+
+type vaneNetworkTestProxy struct {
+	*vaneTestProxy
+	dials atomic.Int32
+}
+
+func newVaneNetworkTestProxy(name string) *vaneNetworkTestProxy {
+	return &vaneNetworkTestProxy{vaneTestProxy: newVaneTestProxy(name, true, true)}
+}
+
+func (p *vaneNetworkTestProxy) Adapter() C.ProxyAdapter { return p }
+func (p *vaneNetworkTestProxy) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	p.dials.Add(1)
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", metadata.RemoteAddress())
+	if err != nil {
+		return nil, err
+	}
+	return outbound.NewConn(raw, p), nil
+}
+
+func configureVaneRacingForTest(t *testing.T, group *Vane, mode vaneRacingMode) {
+	t.Helper()
+	config, err := newVaneRacingConfig(VaneOption{Racing: mode.String(), RacingBudgetMBHour: 120})
+	require.NoError(t, err)
+	group.racing = config
+}
+
+func TestVaneRacingConfig(t *testing.T) {
+	fallback := newVaneTestProxy("fallback", true, false)
+	group, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{}, fallback, nil)
+	require.NoError(t, err)
+	require.Equal(t, vaneRacingOff, group.racing.mode)
+	require.Equal(t, vaneDefaultRacingURL, group.racing.url.String())
+	require.Equal(t, int64(120*1024*1024), group.racing.budgetBytesHour)
+
+	for _, mode := range []string{"off", "shadow", "on", "SHADOW"} {
+		t.Run(mode, func(t *testing.T) {
+			configured, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{
+				Racing: mode, RacingURL: "https://example.com/download", RacingBudgetMBHour: 7,
+			}, fallback, nil)
+			require.NoError(t, err)
+			require.Equal(t, int64(7*1024*1024), configured.racing.budgetBytesHour)
+		})
+	}
+	for _, option := range []VaneOption{
+		{Racing: "invalid"},
+		{Racing: "on", RacingURL: "http://example.com/file"},
+		{Racing: "shadow", RacingURL: "https://user:pass@example.com/file"},
+		{Racing: "on", RacingURL: "https:///missing-host"},
+		{Racing: "on", RacingBudgetMBHour: -1},
+	} {
+		_, err := NewVane(GroupCommonOption{Name: "vane"}, option, fallback, nil)
+		require.Error(t, err)
+	}
+
+	proxyMap := map[string]C.Proxy{
+		"COMPATIBLE": A.NewProxy(outbound.NewBase(outbound.BaseOption{Name: "COMPATIBLE", Type: C.Compatible})),
+		"fallback":   fallback,
+		"alpha":      newVaneTestProxy("alpha", true, true),
+	}
+	parsed, err := ParseProxyGroup(map[string]any{
+		"name": "vane-racing", "type": "vane", "proxies": []string{"alpha"}, "empty-fallback": "fallback",
+		"racing": "shadow", "racing-url": "https://example.com/probe", "racing-budget-mb-hour": 9,
+	}, proxyMap, map[string]P.ProxyProvider{}, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, vaneRacingShadow, parsed.(*Vane).racing.mode)
+	require.Equal(t, int64(9*1024*1024), parsed.(*Vane).racing.budgetBytesHour)
+}
+
+func TestVaneRacingProbe(t *testing.T) {
+	payload := make([]byte, 128*1024)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/cap":
+			_, _ = writer.Write(payload)
+		case "/early":
+			_, _ = writer.Write(payload[:16*1024])
+		case "/zero":
+			return
+		case "/status":
+			writer.WriteHeader(http.StatusServiceUnavailable)
+		case "/slow":
+			writer.WriteHeader(http.StatusOK)
+			if flusher, ok := writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-request.Context().Done()
+		}
+	}))
+	server.EnableHTTP2 = false
+	server.StartTLS()
+	defer server.Close()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+	tlsConfig := &tls.Config{RootCAs: pool}
+	proxy := newVaneNetworkTestProxy("probe")
+	parse := func(path string) *url.URL {
+		endpoint, err := url.Parse(server.URL + path)
+		require.NoError(t, err)
+		return endpoint
+	}
+
+	result := probeVaneCapabilityWithTLSConfig(t.Context(), proxy, parse("/cap"), 64*1024, tlsConfig)
+	require.True(t, result.valid)
+	require.True(t, result.capHit)
+	require.Equal(t, int64(64*1024), result.bytes)
+	require.Positive(t, result.lowerBoundBPS)
+
+	result = probeVaneCapabilityWithTLSConfig(t.Context(), proxy, parse("/early"), 64*1024, tlsConfig)
+	require.False(t, result.valid)
+	require.Equal(t, "early-eof", result.reason)
+	require.Equal(t, int64(16*1024), result.bytes)
+
+	result = probeVaneCapabilityWithTLSConfig(t.Context(), proxy, parse("/zero"), 64*1024, tlsConfig)
+	require.Equal(t, "zero-bytes", result.reason)
+	result = probeVaneCapabilityWithTLSConfig(t.Context(), proxy, parse("/status"), 64*1024, tlsConfig)
+	require.Equal(t, "non-2xx", result.reason)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	result = probeVaneCapabilityWithTLSConfig(ctx, proxy, parse("/slow"), 64*1024, tlsConfig)
+	require.False(t, result.valid)
+	require.Contains(t, []string{"read-timeout", "canceled"}, result.reason)
+	require.Equal(t, int32(5), proxy.dials.Load(), "each probe must dial the selected challenger directly")
+}
+
+func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) vaneRaceRequest {
+	t.Helper()
+	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	require.Equal(t, "alpha", decision.proxy.Name())
+	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	require.True(t, ok)
+	return vaneRaceRequest{
+		targetKey: key,
+		mediaKey:  group.mediaTargetKey(metadata.Host, metadata.DstPort),
+		target:    metadata.Host,
+		port:      metadata.DstPort,
+		current: vaneMemberLease{
+			name: decision.proxy.Name(), identity: decision.identity, epoch: decision.nodeEpoch,
+		},
+		currentBPS:  1_000_000,
+		requiredBPS: 2_000_000,
+		totalBytes:  4 * 1024 * 1024,
+		age:         20 * time.Second,
+		lowWindows:  3,
+		generation:  group.learningGeneration,
+		requestedAt: group.clock.Now(),
+	}
+}
+
+func TestVaneRacingEngineFirstQualifiedWinsAndCancelsPeer(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	gamma := newVaneTestProxy("gamma", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+
+	betaCanceled := make(chan struct{})
+	group.racing.probe = func(ctx context.Context, proxy C.Proxy, _ *url.URL, limit int64) vaneProbeResult {
+		if proxy.Name() == "beta" {
+			<-ctx.Done()
+			close(betaCanceled)
+			return vaneProbeResult{reason: "canceled", bytes: 1024}
+		}
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: limit, duration: time.Second, lowerBoundBPS: 8 * float64(limit), capHit: true}
+	}
+	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	resultCh := make(chan vaneRaceResult, 1)
+	scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+	require.True(t, scheduled, reason)
+	result := <-resultCh
+	require.Equal(t, "gamma", result.winner.name)
+	select {
+	case <-betaCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("losing probe was not canceled")
+	}
+	require.Eventually(t, func() bool {
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		return !group.racingRuntime.inFlight && len(group.racingRuntime.activeTasks) == 0
+	}, time.Second, time.Millisecond)
+}
+
+func TestVaneRacingIdentityRejectsSameNameReplacement(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	beta.identity = "beta-old"
+	group, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		close(started)
+		<-release
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
+	}
+	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	called := atomic.Bool{}
+	scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { called.Store(true) })
+	require.True(t, scheduled)
+	<-started
+	newBeta := newVaneTestProxy("beta", true, true)
+	newBeta.identity = "beta-new"
+	provider.setProxies(alpha, newBeta)
+	group.refreshNodeIdentities(provider.Proxies())
+	close(release)
+	require.Eventually(t, func() bool {
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		return !group.racingRuntime.inFlight
+	}, time.Second, time.Millisecond)
+	require.False(t, called.Load())
+	group.racingRuntime.mu.Lock()
+	_, oldCached := group.racingRuntime.capabilities[vaneMemberLease{name: "beta", identity: "beta-old"}]
+	_, newCached := group.racingRuntime.capabilities[vaneMemberLease{name: "beta", identity: "beta-new"}]
+	group.racingRuntime.mu.Unlock()
+	require.False(t, oldCached)
+	require.False(t, newCached)
+}
+
+func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
+	t.Run("hard byte reservation", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		beta := newVaneTestProxy("beta", true, true)
+		gamma := newVaneTestProxy("gamma", true, true)
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneRacingForTest(t, group, vaneRacingOn)
+		group.racing.budgetBytesHour = vaneRacingProbeByteCap
+		var calls atomic.Int32
+		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+			calls.Add(1)
+			return vaneProbeResult{valid: false, reason: "early-eof", bytes: vaneRacingProbeByteCap / 2, duration: time.Second}
+		}
+		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+		scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		require.True(t, scheduled)
+		require.Eventually(t, func() bool {
+			group.racingRuntime.mu.Lock()
+			defer group.racingRuntime.mu.Unlock()
+			return !group.racingRuntime.inFlight
+		}, time.Second, time.Millisecond)
+		require.Equal(t, int32(1), calls.Load())
+		group.racingRuntime.mu.Lock()
+		require.LessOrEqual(t, group.racingRuntime.budget.used+group.racingRuntime.budget.reserved, group.racing.budgetBytesHour)
+		group.racingRuntime.mu.Unlock()
+	})
+
+	t.Run("close cancels in flight", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		beta := newVaneTestProxy("beta", true, true)
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneRacingForTest(t, group, vaneRacingOn)
+		started := make(chan struct{})
+		var once sync.Once
+		group.racing.probe = func(ctx context.Context, _ C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			return vaneProbeResult{reason: "canceled"}
+		}
+		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+		called := atomic.Bool{}
+		scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { called.Store(true) })
+		require.True(t, scheduled)
+		<-started
+		require.NoError(t, group.Close())
+		require.Eventually(t, func() bool {
+			group.racingRuntime.mu.Lock()
+			defer group.racingRuntime.mu.Unlock()
+			return !group.racingRuntime.inFlight && len(group.racingRuntime.activeTasks) == 0
+		}, time.Second, time.Millisecond)
+		require.False(t, called.Load())
+	})
+}
+
+func TestVaneRacingModeTruthTable(t *testing.T) {
+	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+		t.Run(mode.String(), func(t *testing.T) {
+			clock := newVaneConnTestClock()
+			alpha := newVaneTestProxy("alpha", true, true)
+			beta := newVaneTestProxy("beta", true, true)
+			beta.delay = 10
+			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+			configureVaneRacingForTest(t, group, mode)
+			group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+				return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
+			}
+			metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+			decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+			flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+			flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
+			actions := make(chan vanePolicyAction, 1)
+			flow.setPolicySubmitter(func(action vanePolicyAction, _ bool) { actions <- action })
+			sample := vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second, Delivered: true}
+			require.Nil(t, flow.observe(sample))
+			require.Nil(t, flow.observe(sample))
+			baselineAction := flow.observe(sample)
+
+			if mode == vaneRacingShadow {
+				require.NotNil(t, baselineAction)
+				require.True(t, baselineAction())
+				require.Eventually(t, func() bool { return group.VaneDiagnostics().Counters.WouldHandoff > 0 }, time.Second, time.Millisecond)
+				group.mu.Lock()
+				require.NotEmpty(t, group.mediaHints)
+				require.Empty(t, group.targetHandoffs)
+				require.Empty(t, group.targetPreferences)
+				group.mu.Unlock()
+			} else {
+				require.Nil(t, baselineAction)
+				var action vanePolicyAction
+				select {
+				case action = <-actions:
+				case <-time.After(time.Second):
+					t.Fatal("racing on did not submit a handoff action")
+				}
+				require.True(t, action())
+				group.mu.Lock()
+				require.Empty(t, group.mediaHints)
+				require.Len(t, group.targetHandoffs, 1)
+				group.mu.Unlock()
+			}
+		})
+	}
+}
+
+func TestVaneRacingProbeCancellationChargesReadBytes(t *testing.T) {
+	// Budget settlement is intentionally based on returned actual bytes even
+	// when the probe is canceled or invalid.
+	clock := newVaneConnTestClock()
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		return vaneProbeResult{reason: "canceled", bytes: 12345, duration: time.Millisecond}
+	}
+	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("unexpected winner") })
+	require.True(t, scheduled)
+	require.Eventually(t, func() bool {
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		return !group.racingRuntime.inFlight
+	}, time.Second, time.Millisecond)
+	group.racingRuntime.mu.Lock()
+	used := group.racingRuntime.budget.used
+	group.racingRuntime.mu.Unlock()
+	require.Equal(t, int64(12345), used)
+}
+
+func TestVaneRacingNoWinnerDoesNotCommitPolicyState(t *testing.T) {
+	clock := newVaneConnTestClock()
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 1, capHit: true}
+	}
+	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("unexpected winner") })
+	require.True(t, scheduled)
+	require.Eventually(t, func() bool {
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		return !group.racingRuntime.inFlight
+	}, time.Second, time.Millisecond)
+	group.mu.Lock()
+	require.Empty(t, group.targetHandoffs)
+	require.Empty(t, group.targetPreferences)
+	require.Empty(t, group.mediaSlowCooldowns)
+	require.Empty(t, group.mediaBudgets)
+	group.mu.Unlock()
+	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
+}
+
+var _ C.Proxy = (*vaneNetworkTestProxy)(nil)
+var _ = errors.Is
+
+func TestVaneRacingCapabilityPrune(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+
+	t.Run("ttl expiry removes stale capability", func(t *testing.T) {
+		lease := vaneMemberLease{name: "stale", identity: "stale-id", epoch: 1}
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{
+			member: lease, lowerBoundBPS: 1000, bytes: 1000,
+			observedAt: clock.Now().Add(-vaneRacingCapabilityTTL - time.Minute),
+		}
+		group.pruneCapabilitiesLocked(clock.Now())
+		_, ok := group.racingRuntime.capabilities[lease]
+		group.racingRuntime.mu.Unlock()
+		require.False(t, ok, "stale capability must be pruned")
+	})
+
+	t.Run("fresh capability retained", func(t *testing.T) {
+		lease := vaneMemberLease{name: "fresh", identity: "fresh-id", epoch: 1}
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{
+			member: lease, lowerBoundBPS: 1000, bytes: 1000, observedAt: clock.Now(),
+		}
+		group.pruneCapabilitiesLocked(clock.Now())
+		_, ok := group.racingRuntime.capabilities[lease]
+		group.racingRuntime.mu.Unlock()
+		require.True(t, ok, "fresh capability must survive pruning")
+	})
+
+	t.Run("zero observedAt removed", func(t *testing.T) {
+		lease := vaneMemberLease{name: "zero", identity: "zero-id", epoch: 1}
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{member: lease}
+		group.pruneCapabilitiesLocked(clock.Now())
+		_, ok := group.racingRuntime.capabilities[lease]
+		group.racingRuntime.mu.Unlock()
+		require.False(t, ok, "zero-time record must be pruned")
+	})
+
+	t.Run("lru eviction over state limit", func(t *testing.T) {
+		group.racingRuntime.mu.Lock()
+		base := clock.Now()
+		for i := 0; i < vaneTargetStateLimit+8; i++ {
+			lease := vaneMemberLease{name: fmt.Sprintf("n%d", i), identity: fmt.Sprintf("i%d", i), epoch: uint64(i)}
+			// 全部新鲜（TTL 内），仅 observedAt 错开——触发 LRU 而非 TTL 分支
+			group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{
+				member: lease, lowerBoundBPS: float64(i), bytes: 1, observedAt: base.Add(-time.Duration(i) * time.Millisecond),
+			}
+		}
+		before := len(group.racingRuntime.capabilities)
+		group.pruneCapabilitiesLocked(clock.Now())
+		after := len(group.racingRuntime.capabilities)
+		// observedAt 随 i 递减：最旧 = i 最大（n1031..n1024），最新 = i=0
+		oldest := vaneMemberLease{name: fmt.Sprintf("n%d", vaneTargetStateLimit+7), identity: fmt.Sprintf("i%d", vaneTargetStateLimit+7), epoch: uint64(vaneTargetStateLimit + 7)}
+		_, oldestKept := group.racingRuntime.capabilities[oldest]
+		newest := vaneMemberLease{name: "n0", identity: "i0", epoch: 0}
+		_, newestKept := group.racingRuntime.capabilities[newest]
+		group.racingRuntime.mu.Unlock()
+		require.Less(t, after, before, "over-limit state must shrink")
+		require.Equal(t, vaneTargetStateLimit, after, "state must be trimmed to the limit")
+		require.False(t, oldestKept, "oldest capability must be evicted")
+		require.True(t, newestKept, "newest capability must be retained")
+	})
+}
+
+func TestVaneRacingBudgetSettle(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+	group.racing.budgetBytesHour = vaneRacingProbeByteCap * 4
+
+	t.Run("normal settle", func(t *testing.T) {
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.budget.reserved = 1000
+		group.racingRuntime.budget.used = 0
+		group.racingRuntime.mu.Unlock()
+		group.settleRaceBudget(1000, 600)
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		require.Equal(t, int64(0), group.racingRuntime.budget.reserved)
+		require.Equal(t, int64(600), group.racingRuntime.budget.used)
+	})
+
+	t.Run("negative actual clamps to zero", func(t *testing.T) {
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.budget.reserved = 500
+		group.racingRuntime.budget.used = 100
+		group.racingRuntime.mu.Unlock()
+		group.settleRaceBudget(500, -50)
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		require.Equal(t, int64(0), group.racingRuntime.budget.reserved)
+		require.Equal(t, int64(100), group.racingRuntime.budget.used, "negative actual must not reduce used")
+	})
+
+	t.Run("actual above reserved clamps to reserved", func(t *testing.T) {
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.budget.reserved = 400
+		group.racingRuntime.budget.used = 0
+		group.racingRuntime.mu.Unlock()
+		group.settleRaceBudget(400, 900)
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		require.Equal(t, int64(0), group.racingRuntime.budget.reserved)
+		require.Equal(t, int64(400), group.racingRuntime.budget.used, "actual must clamp to reserved cap")
+	})
+
+	t.Run("reserved underflow floors at zero", func(t *testing.T) {
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.budget.reserved = 100
+		group.racingRuntime.budget.used = 0
+		group.racingRuntime.mu.Unlock()
+		group.settleRaceBudget(500, 500)
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		require.Equal(t, int64(0), group.racingRuntime.budget.reserved)
+		// 实现语义：used += min(actual, 本次预留请求)——保持 used+outstanding ≤ 预算不变量
+		require.Equal(t, int64(500), group.racingRuntime.budget.used)
+	})
+}
+
+func TestVaneRacingScheduleGuards(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	metadata := &C.Metadata{Host: "rr.guard.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+
+	t.Run("racing off rejects", func(t *testing.T) {
+		configureVaneRacingForTest(t, group, vaneRacingOff)
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		require.False(t, scheduled)
+		require.Equal(t, "racing-off", reason)
+	})
+
+	t.Run("closed group rejects", func(t *testing.T) {
+		configureVaneRacingForTest(t, group, vaneRacingShadow)
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.closed = true
+		group.racingRuntime.mu.Unlock()
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		require.False(t, scheduled)
+		require.Equal(t, "group-closed", reason)
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.closed = false
+		group.racingRuntime.mu.Unlock()
+	})
+
+	t.Run("in-flight rejects second race", func(t *testing.T) {
+		configureVaneRacingForTest(t, group, vaneRacingShadow)
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.inFlight = true
+		group.racingRuntime.mu.Unlock()
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		require.False(t, scheduled)
+		require.Equal(t, "race-in-flight", reason)
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.inFlight = false
+		group.racingRuntime.mu.Unlock()
+	})
+
+	t.Run("no-winner suppression window rejects", func(t *testing.T) {
+		configureVaneRacingForTest(t, group, vaneRacingShadow)
+		key := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: "googlevideo.com", port: 443}
+		group.racingRuntime.mu.Lock()
+		group.racingRuntime.noWinnerUntil[key] = clock.Now().Add(time.Minute)
+		group.racingRuntime.mu.Unlock()
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		require.False(t, scheduled)
+		require.Contains(t, reason, "no-winner")
+		group.racingRuntime.mu.Lock()
+		delete(group.racingRuntime.noWinnerUntil, key)
+		group.racingRuntime.mu.Unlock()
+	})
+}

@@ -1,0 +1,519 @@
+package outboundgroup
+
+import (
+	"sort"
+	"time"
+
+	C "github.com/metacubex/mihomo/constant"
+)
+
+const (
+	vaneTargetPreferenceTTL = 10 * time.Minute
+	vaneTargetEvidenceTTL   = 10 * time.Minute
+	vaneTargetStateLimit    = 1024
+)
+
+var vaneTargetFailureBackoff = [...]time.Duration{
+	30 * time.Second,
+	1 * time.Minute,
+	2 * time.Minute,
+	4 * time.Minute,
+	8 * time.Minute,
+	15 * time.Minute,
+}
+
+type vaneTargetKey struct {
+	transport   vaneTransport
+	scene       vaneScene
+	targetScope string
+	port        uint16
+}
+
+type vaneMemberLease struct {
+	name     string
+	identity string
+	epoch    uint64
+}
+
+type vaneHandoffLease struct {
+	id        uint64
+	key       vaneTargetKey
+	from      vaneMemberLease
+	to        vaneMemberLease
+	expiresAt time.Time
+	updatedAt time.Time
+	claimed   bool
+	token     *vaneHandoffToken
+}
+
+type vaneTargetPreference struct {
+	to        vaneMemberLease
+	expiresAt time.Time
+	updatedAt time.Time
+}
+
+type vaneTargetEvidenceKey struct {
+	target vaneTargetKey
+	member vaneMemberLease
+}
+
+type vaneTargetEvidence struct {
+	bitsPerSecond float64
+	observedAt    time.Time
+}
+
+type vaneTargetFailureKey struct {
+	target vaneTargetKey
+	member vaneMemberLease
+}
+
+type vaneTargetFailureState struct {
+	streak        uint8
+	blockUntil    time.Time
+	lastFailureAt time.Time
+}
+
+func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, bool) {
+	key := a.mediaTargetKey(target, port)
+	if key.target == "" {
+		return vaneTargetKey{}, false
+	}
+	return vaneTargetKey{
+		transport:   vaneTransportTCP,
+		scene:       vaneSceneMedia,
+		targetScope: key.target,
+		port:        port,
+	}, true
+}
+
+func (a *Vane) memberLeaseLocked(name, identity string) vaneMemberLease {
+	lease := vaneMemberLease{name: name, identity: identity}
+	if state := a.nodes[name]; state != nil && state.identity == identity {
+		lease.epoch = state.epoch
+	}
+	return lease
+}
+
+func (a *Vane) memberLeaseCurrentLocked(lease vaneMemberLease) bool {
+	if lease.name == "" || lease.identity == "" || a.nodeIdentities[lease.name] != lease.identity {
+		return false
+	}
+	if lease.epoch == 0 {
+		return true
+	}
+	state := a.nodes[lease.name]
+	return state != nil && state.identity == lease.identity && state.epoch == lease.epoch
+}
+
+func (a *Vane) targetMemberBlockedLocked(key vaneTargetKey, member vaneMemberLease, now time.Time) (time.Time, bool) {
+	state, ok := a.targetFailures[vaneTargetFailureKey{target: key, member: member}]
+	if !ok || !state.blockUntil.After(now) {
+		return time.Time{}, false
+	}
+	return state.blockUntil, true
+}
+
+func (a *Vane) recordTargetFailureLocked(key vaneTargetKey, member vaneMemberLease, now time.Time) vaneTargetFailureState {
+	failureKey := vaneTargetFailureKey{target: key, member: member}
+	state := a.targetFailures[failureKey]
+	if state.streak < uint8(len(vaneTargetFailureBackoff)) {
+		state.streak++
+	}
+	index := int(state.streak) - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(vaneTargetFailureBackoff) {
+		index = len(vaneTargetFailureBackoff) - 1
+	}
+	state.lastFailureAt = now
+	state.blockUntil = now.Add(vaneTargetFailureBackoff[index])
+	a.targetFailures[failureKey] = state
+	return state
+}
+
+func (a *Vane) clearTargetFailureLocked(key vaneTargetKey, member vaneMemberLease) {
+	delete(a.targetFailures, vaneTargetFailureKey{target: key, member: member})
+}
+
+func (a *Vane) recordTargetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64, now time.Time) {
+	if bitsPerSecond <= 0 || !a.memberLeaseCurrentLocked(member) {
+		return
+	}
+	a.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}] = vaneTargetEvidence{
+		bitsPerSecond: bitsPerSecond,
+		observedAt:    now,
+	}
+}
+
+func (a *Vane) recordTargetEvidence(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64) {
+	if a.racing.mode == vaneRacingOff || bitsPerSecond <= 0 {
+		return
+	}
+	now := a.clock.Now()
+	a.mu.Lock()
+	a.recordTargetEvidenceLocked(key, member, bitsPerSecond, now)
+	a.pruneTargetStateLocked(now)
+	a.mu.Unlock()
+}
+
+func (a *Vane) targetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, now time.Time) (float64, bool) {
+	record, ok := a.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}]
+	if !ok || record.observedAt.IsZero() || now.Sub(record.observedAt) > vaneTargetEvidenceTTL || !a.memberLeaseCurrentLocked(member) {
+		return 0, false
+	}
+	return record.bitsPerSecond, true
+}
+
+func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, now time.Time, claimHandoff bool) (C.Proxy, *vaneHandoffToken, string) {
+	if a.racing.mode != vaneRacingOn {
+		return nil, nil, ""
+	}
+	find := func(member vaneMemberLease) C.Proxy {
+		if !a.memberLeaseCurrentLocked(member) {
+			return nil
+		}
+		if _, blocked := a.targetMemberBlockedLocked(key, member, now); blocked {
+			return nil
+		}
+		for _, proxy := range proxies {
+			if proxy.Name() != member.name || vaneProxyPersistentIdentity(proxy) != member.identity {
+				continue
+			}
+			legacyKey := vaneMediaCandidateKey{
+				vaneMediaTargetKey: vaneMediaTargetKey{target: key.targetScope, port: key.port},
+				candidate:          member.name,
+				identity:           member.identity,
+			}
+			if a.mediaSlowCooldowns[legacyKey].After(now) {
+				return nil
+			}
+			return proxy
+		}
+		return nil
+	}
+
+	if lease, ok := a.targetHandoffs[key]; ok {
+		if lease.expiresAt.After(now) {
+			if proxy := find(lease.to); proxy != nil {
+				var token *vaneHandoffToken
+				if claimHandoff && !lease.claimed {
+					lease.claimed = true
+					a.targetHandoffs[key] = lease
+					token = lease.token
+				}
+				return proxy, token, "handoff"
+			}
+		}
+		delete(a.targetHandoffs, key)
+	}
+	if preference, ok := a.targetPreferences[key]; ok {
+		if preference.expiresAt.After(now) {
+			if proxy := find(preference.to); proxy != nil {
+				return proxy, nil, "preference"
+			}
+		}
+		delete(a.targetPreferences, key)
+	}
+	return nil, nil, ""
+}
+
+func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
+	memberHealthy := false
+	var challengerProxy C.Proxy
+	for _, proxy := range a.GetProxies(false) {
+		if proxy.Name() == plan.challenger && vaneProxyPersistentIdentity(proxy) == plan.challengerIdentity && proxy.AliveForTestUrl(a.testURL) {
+			memberHealthy = true
+			challengerProxy = proxy
+			break
+		}
+	}
+	if !memberHealthy {
+		return "challenger-unhealthy"
+	}
+	release, current := a.lockVaneMediaIdentities(map[string]string{
+		plan.current:    plan.identity,
+		plan.challenger: plan.challengerIdentity,
+	})
+	if !current {
+		return "stale-node-identity"
+	}
+	defer release()
+
+	now := a.clock.Now()
+	a.mu.Lock()
+	a.learning.mu.Lock()
+	defer func() {
+		a.learning.mu.Unlock()
+		a.mu.Unlock()
+	}()
+	if a.learningGeneration != a.learning.generation || plan.generation != a.learningGeneration {
+		return "stale-generation"
+	}
+	currentState := a.nodes[plan.current]
+	if currentState == nil || currentState.identity != plan.identity || currentState.epoch != plan.nodeEpoch {
+		return "stale-node-identity"
+	}
+	challengerState := a.ensureProxyNodeLocked(challengerProxy, now)
+	if challengerState == nil || challengerState.identity != plan.challengerIdentity {
+		return "stale-node-identity"
+	}
+	if plan.challengerEpoch != 0 && challengerState.epoch != plan.challengerEpoch {
+		return "stale-node-identity"
+	}
+	key := plan.targetStateKey
+	if key.targetScope == "" {
+		return "invalid-target"
+	}
+	a.pruneMediaLocked(now)
+	a.pruneTargetStateLocked(now)
+	if now.Sub(plan.preparedAt) > a.media.hintTTL {
+		return "plan-expired"
+	}
+	if a.mediaReconnects[plan.targetKey].After(now) {
+		return "reconnect-cooldown"
+	}
+	to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: challengerState.epoch}
+	if _, blocked := a.targetMemberBlockedLocked(key, to, now); blocked {
+		return "candidate-cooldown"
+	}
+	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: plan.target, port: plan.port, candidate: plan.challenger, identity: plan.challengerIdentity}
+	if a.cooldownUntilLocked(dialKey, now, false).After(now) {
+		return "candidate-cooldown"
+	}
+	challengerKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity}
+	if a.mediaSlowCooldowns[challengerKey].After(now) {
+		return "challenger-slow-cooldown"
+	}
+	budget := a.mediaBudgets[plan.targetKey]
+	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
+		budget = vaneMediaBudget{startedAt: now}
+	}
+	if budget.count >= a.media.budgetMax {
+		return "budget-exhausted"
+	}
+	budget.count++
+	a.mediaBudgets[plan.targetKey] = budget
+	from := vaneMemberLease{name: plan.current, identity: plan.identity, epoch: plan.nodeEpoch}
+	currentKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.current, identity: plan.identity}
+	a.mediaSlowCooldowns[currentKey] = now.Add(a.media.slowCooldown)
+	token := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
+		kind:       "handoff-committed",
+		target:     plan.target,
+		bucket:     plan.targetKey.target,
+		port:       plan.port,
+		from:       plan.current,
+		to:         plan.challenger,
+		bps:        plan.currentBPS,
+		totalBytes: plan.totalBytes,
+		age:        plan.age,
+		lowWindows: plan.lowWindows,
+		force:      true,
+	})
+	if token == nil {
+		return "diagnostics-unavailable"
+	}
+	token.targetKey = key
+	token.fromLease = from
+	token.toLease = to
+	a.targetHandoffs[key] = vaneHandoffLease{
+		id:        token.id,
+		key:       key,
+		from:      from,
+		to:        to,
+		expiresAt: now.Add(a.media.hintTTL),
+		updatedAt: now,
+		token:     token,
+	}
+	a.mediaReconnects[plan.targetKey] = now.Add(a.media.reconnectCooldown)
+	return ""
+}
+
+func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLease, sample vaneThroughputObservation) {
+	if token == nil || token.targetKey.targetScope == "" || sample.BitsPerSecond <= 0 {
+		return
+	}
+	now := a.clock.Now()
+	required := token.previousBPS * a.media.challengerRatio
+	if required < a.media.demandBPS {
+		required = a.media.demandBPS
+	}
+	kind := "handoff-no-gain"
+	a.mu.Lock()
+	lease, ok := a.targetHandoffs[token.targetKey]
+	if !ok || lease.id != token.id || lease.to != member || !a.memberLeaseCurrentLocked(member) {
+		a.mu.Unlock()
+		return
+	}
+	delete(a.targetHandoffs, token.targetKey)
+	a.recordTargetEvidenceLocked(token.targetKey, member, sample.BitsPerSecond, now)
+	if sample.BitsPerSecond >= required {
+		a.targetPreferences[token.targetKey] = vaneTargetPreference{
+			to: member, expiresAt: now.Add(vaneTargetPreferenceTTL), updatedAt: now,
+		}
+		a.clearTargetFailureLocked(token.targetKey, member)
+		kind = "handoff-improved"
+	} else {
+		delete(a.targetPreferences, token.targetKey)
+		legacyKey := vaneMediaCandidateKey{
+			vaneMediaTargetKey: vaneMediaTargetKey{target: token.targetKey.targetScope, port: token.targetKey.port},
+			candidate:          member.name,
+			identity:           member.identity,
+		}
+		a.mediaSlowCooldowns[legacyKey] = now.Add(a.media.slowCooldown)
+	}
+	a.pruneTargetStateLocked(now)
+	a.mu.Unlock()
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind:        kind,
+		handoffID:   token.id,
+		target:      token.target,
+		bucket:      token.bucket,
+		port:        token.port,
+		from:        token.from,
+		to:          token.to,
+		bps:         sample.BitsPerSecond,
+		previousBPS: token.previousBPS,
+		totalBytes:  sample.TotalBytes,
+		age:         sample.Age,
+		force:       true,
+	})
+}
+
+func (a *Vane) failTargetHandoff(token *vaneHandoffToken, reason string, hard bool) {
+	if token == nil || token.targetKey.targetScope == "" {
+		return
+	}
+	now := a.clock.Now()
+	a.mu.Lock()
+	if lease, ok := a.targetHandoffs[token.targetKey]; ok && lease.id == token.id {
+		delete(a.targetHandoffs, token.targetKey)
+	}
+	delete(a.targetPreferences, token.targetKey)
+	if hard && a.memberLeaseCurrentLocked(token.toLease) {
+		a.recordTargetFailureLocked(token.targetKey, token.toLease, now)
+	}
+	a.pruneTargetStateLocked(now)
+	a.mu.Unlock()
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind:        "handoff-failed",
+		reason:      reason,
+		handoffID:   token.id,
+		target:      token.target,
+		bucket:      token.bucket,
+		port:        token.port,
+		from:        token.from,
+		to:          token.to,
+		previousBPS: token.previousBPS,
+		force:       true,
+	})
+}
+
+func (a *Vane) discardTargetHandoff(token *vaneHandoffToken) {
+	if token == nil || token.targetKey.targetScope == "" {
+		return
+	}
+	a.mu.Lock()
+	if lease, ok := a.targetHandoffs[token.targetKey]; ok && lease.id == token.id {
+		delete(a.targetHandoffs, token.targetKey)
+	}
+	a.mu.Unlock()
+}
+
+func (a *Vane) refreshTargetPreference(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64) {
+	if a.racing.mode != vaneRacingOn || bitsPerSecond <= 0 {
+		return
+	}
+	now := a.clock.Now()
+	a.mu.Lock()
+	a.recordTargetEvidenceLocked(key, member, bitsPerSecond, now)
+	if preference, ok := a.targetPreferences[key]; ok && preference.to == member && a.memberLeaseCurrentLocked(member) {
+		preference.expiresAt = now.Add(vaneTargetPreferenceTTL)
+		preference.updatedAt = now
+		a.targetPreferences[key] = preference
+	}
+	a.pruneTargetStateLocked(now)
+	a.mu.Unlock()
+}
+
+func (a *Vane) invalidateTargetPreference(key vaneTargetKey, member vaneMemberLease) {
+	if a.racing.mode != vaneRacingOn {
+		return
+	}
+	a.mu.Lock()
+	if preference, ok := a.targetPreferences[key]; ok && preference.to == member {
+		delete(a.targetPreferences, key)
+	}
+	a.mu.Unlock()
+}
+
+func (a *Vane) pruneTargetStateLocked(now time.Time) {
+	for key, lease := range a.targetHandoffs {
+		if !lease.expiresAt.After(now) || !a.memberLeaseCurrentLocked(lease.to) || !a.memberLeaseCurrentLocked(lease.from) {
+			delete(a.targetHandoffs, key)
+		}
+	}
+	for key, preference := range a.targetPreferences {
+		if !preference.expiresAt.After(now) || !a.memberLeaseCurrentLocked(preference.to) {
+			delete(a.targetPreferences, key)
+		}
+	}
+	for key, evidence := range a.targetEvidence {
+		if evidence.observedAt.IsZero() || now.Sub(evidence.observedAt) > vaneTargetEvidenceTTL || !a.memberLeaseCurrentLocked(key.member) {
+			delete(a.targetEvidence, key)
+		}
+	}
+	for key := range a.targetFailures {
+		if !a.memberLeaseCurrentLocked(key.member) {
+			delete(a.targetFailures, key)
+		}
+	}
+	trimTargetMap(a.targetHandoffs, vaneTargetStateLimit, func(value vaneHandoffLease) time.Time { return value.updatedAt })
+	trimTargetMap(a.targetPreferences, vaneTargetStateLimit, func(value vaneTargetPreference) time.Time { return value.updatedAt })
+	if len(a.targetEvidence) > vaneTargetStateLimit {
+		type entry struct {
+			key  vaneTargetEvidenceKey
+			time time.Time
+		}
+		entries := make([]entry, 0, len(a.targetEvidence))
+		for key, value := range a.targetEvidence {
+			entries = append(entries, entry{key: key, time: value.observedAt})
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].time.Before(entries[j].time) })
+		for i := 0; i < len(entries)-vaneTargetStateLimit; i++ {
+			delete(a.targetEvidence, entries[i].key)
+		}
+	}
+	if len(a.targetFailures) > vaneTargetStateLimit {
+		type entry struct {
+			key  vaneTargetFailureKey
+			time time.Time
+		}
+		entries := make([]entry, 0, len(a.targetFailures))
+		for key, value := range a.targetFailures {
+			entries = append(entries, entry{key: key, time: value.lastFailureAt})
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].time.Before(entries[j].time) })
+		for i := 0; i < len(entries)-vaneTargetStateLimit; i++ {
+			delete(a.targetFailures, entries[i].key)
+		}
+	}
+}
+
+func trimTargetMap[K comparable, V any](values map[K]V, limit int, timestamp func(V) time.Time) {
+	if len(values) <= limit {
+		return
+	}
+	type entry struct {
+		key  K
+		time time.Time
+	}
+	entries := make([]entry, 0, len(values))
+	for key, value := range values {
+		entries = append(entries, entry{key: key, time: timestamp(value)})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].time.Before(entries[j].time) })
+	for i := 0; i < len(entries)-limit; i++ {
+		delete(values, entries[i].key)
+	}
+}

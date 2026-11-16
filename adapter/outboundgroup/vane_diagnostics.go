@@ -43,6 +43,21 @@ type VaneDiagnosticCounters struct {
 	ExplorationSucceeded  uint64 `json:"explorationSucceeded"`
 	ExplorationFailed     uint64 `json:"explorationFailed"`
 	ExplorationNeutral    uint64 `json:"explorationNeutral"`
+	ProbeCount            uint64 `json:"probeCount"`
+	ProbeSuccess          uint64 `json:"probeSuccess"`
+	ProbeInvalid          uint64 `json:"probeInvalid"`
+	ProbeCanceled         uint64 `json:"probeCanceled"`
+	ProbeBytes            uint64 `json:"probeBytes"`
+	WouldHandoff          uint64 `json:"wouldHandoff"`
+	HandoffCommitted      uint64 `json:"handoffCommitted"`
+	ReconnectSelected     uint64 `json:"reconnectSelected"`
+	ReconnectPositive     uint64 `json:"reconnectPositive"`
+	HandoffImproved       uint64 `json:"handoffImproved"`
+	HandoffNoGain         uint64 `json:"handoffNoGain"`
+	HandoffFailed         uint64 `json:"handoffFailed"`
+	RaceBudgetDenied      uint64 `json:"raceBudgetDenied"`
+	RaceNoWinner          uint64 `json:"raceNoWinner"`
+	RaceStaleGeneration   uint64 `json:"raceStaleGeneration"`
 }
 
 type VaneDiagnosticPersistence struct {
@@ -100,6 +115,9 @@ type VaneDiagnosticConfig struct {
 	ExplorationEnabled            bool     `json:"explorationEnabled"`
 	ExplorationInterval           int      `json:"explorationInterval"`
 	GrayFailureObservationEnabled bool     `json:"grayFailureObservationEnabled"`
+	RacingMode                    string   `json:"racingMode"`
+	RacingURL                     string   `json:"racingUrl,omitempty"`
+	RacingBudgetBytesHour         int64    `json:"racingBudgetBytesHour"`
 }
 
 type VaneDiagnosticExplorationScope struct {
@@ -119,6 +137,10 @@ type VaneDiagnosticRuntime struct {
 	ActiveChurnStates        int                              `json:"activeChurnStates"`
 	ExplorationSince         time.Time                        `json:"explorationSince,omitempty"`
 	ExplorationScopes        []VaneDiagnosticExplorationScope `json:"explorationScopes,omitempty"`
+	CapabilityCache          int                              `json:"capabilityCache"`
+	ActiveHandoffLeases      int                              `json:"activeHandoffLeases"`
+	ActiveTargetPreferences  int                              `json:"activeTargetPreferences"`
+	ActiveTargetCooldowns    int                              `json:"activeTargetCooldowns"`
 }
 
 // VaneDiagnosticsSnapshot is returned by GET /group/{name}/vane.
@@ -171,6 +193,9 @@ type vaneHandoffToken struct {
 	from        string
 	to          string
 	previousBPS float64
+	targetKey   vaneTargetKey
+	fromLease   vaneMemberLease
+	toLease     vaneMemberLease
 }
 
 type vaneDiagnostics struct {
@@ -517,7 +542,9 @@ func (d *vaneDiagnostics) recordReconnectCommit(record vaneDiagnosticRecord) *va
 			d.mu.Unlock()
 			return nil
 		}
-		record.kind = "reconnect-committed"
+		if record.kind == "" {
+			record.kind = "reconnect-committed"
+		}
 		record.force = true
 		record.handoffID = uint64(1)
 		if events := d.snapshotData.RecentEvents; len(events) > 0 {
@@ -638,6 +665,43 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		d.snapshotData.Counters.ExplorationFailed++
 	case "exploration-neutral":
 		d.snapshotData.Counters.ExplorationNeutral++
+	case "race-probe-success":
+		d.snapshotData.Counters.ProbeCount++
+		d.snapshotData.Counters.ProbeSuccess++
+		d.snapshotData.Counters.ProbeBytes += vaneDiagnosticBytes(record.totalBytes)
+	case "race-probe-invalid":
+		d.snapshotData.Counters.ProbeCount++
+		d.snapshotData.Counters.ProbeInvalid++
+		d.snapshotData.Counters.ProbeBytes += vaneDiagnosticBytes(record.totalBytes)
+	case "race-probe-canceled":
+		d.snapshotData.Counters.ProbeCount++
+		d.snapshotData.Counters.ProbeCanceled++
+		d.snapshotData.Counters.ProbeBytes += vaneDiagnosticBytes(record.totalBytes)
+	case "handoff-would-commit":
+		d.snapshotData.Counters.WouldHandoff++
+	case "handoff-committed":
+		d.snapshotData.Counters.HandoffCommitted++
+	case "handoff-reconnect-selected":
+		d.snapshotData.Counters.ReconnectSelected++
+	case "handoff-reconnect-positive":
+		d.snapshotData.Counters.ReconnectPositive++
+	case "handoff-improved":
+		d.snapshotData.Counters.HandoffImproved++
+	case "handoff-no-gain":
+		d.snapshotData.Counters.HandoffNoGain++
+	case "handoff-failed":
+		d.snapshotData.Counters.HandoffFailed++
+	case "race-budget-denied":
+		d.snapshotData.Counters.RaceBudgetDenied++
+	case "race-no-winner":
+		d.snapshotData.Counters.RaceNoWinner++
+		if record.reason == "stale-generation" {
+			d.snapshotData.Counters.RaceStaleGeneration++
+		}
+	case "race-canceled":
+		if record.reason == "stale-generation" {
+			d.snapshotData.Counters.RaceStaleGeneration++
+		}
 	case "gray-attempt-succeeded":
 		d.snapshotData.GrayFailure.Counters.AttemptEligible++
 		d.snapshotData.GrayFailure.Counters.AttemptSucceeded++
@@ -669,6 +733,13 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		d.queuePersistenceLocked(now, record.force)
 	}
 	return event
+}
+
+func vaneDiagnosticBytes(value int64) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	return uint64(value)
 }
 
 func (d *vaneDiagnostics) appendEventLocked(record vaneDiagnosticRecord, now time.Time) VaneDiagnosticEvent {

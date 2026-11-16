@@ -58,6 +58,9 @@ type VaneOption struct {
 	MediaChallengerRatio   float64  `group:"media-challenger-ratio,omitempty"`
 	MediaReconnectBudget   int      `group:"media-reconnect-budget,omitempty"`
 	MediaBudgetWindow      int      `group:"media-budget-window,omitempty"`
+	Racing                 string   `group:"racing,omitempty"`
+	RacingURL              string   `group:"racing-url,omitempty"`
+	RacingBudgetMBHour     int64    `group:"racing-budget-mb-hour,omitempty"`
 }
 
 type vaneTransport uint8
@@ -152,6 +155,8 @@ type Vane struct {
 	maxStates          int
 	clock              vaneClock
 	media              vaneMediaConfig
+	racing             vaneRacingConfig
+	racingRuntime      vaneRacingRuntime
 	exploration        vaneExplorationConfig
 	collectorSpec      *vaneNativeCollectorSpec
 	collector          *vaneNativeCollector
@@ -174,6 +179,10 @@ type Vane struct {
 	mediaReconnects    map[vaneMediaTargetKey]time.Time
 	mediaSlowCooldowns map[vaneMediaCandidateKey]time.Time
 	mediaBudgets       map[vaneMediaTargetKey]vaneMediaBudget
+	targetHandoffs     map[vaneTargetKey]vaneHandoffLease
+	targetPreferences  map[vaneTargetKey]vaneTargetPreference
+	targetEvidence     map[vaneTargetEvidenceKey]vaneTargetEvidence
+	targetFailures     map[vaneTargetFailureKey]vaneTargetFailureState
 	explorationScopes  [vaneExplorationScopeCount]vaneExplorationScopeState
 	explorationOrdinal uint64
 
@@ -222,6 +231,10 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 	if err != nil {
 		return nil, err
 	}
+	racing, err := newVaneRacingConfig(vaneOption)
+	if err != nil {
+		return nil, err
+	}
 	collectorSpec, err := newVaneNativeCollectorSpec(
 		vaneOption.CollectEvents,
 		vaneOption.CollectorDir,
@@ -235,6 +248,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 	}
 	group := newVaneWithClock(option, emptyFallback, providers, rules, switchMargin, targetCooldown, stateTTL, maxStates, vaneSystemClock{})
 	group.media = media
+	group.racing = racing
 	group.exploration = exploration
 	group.collectorSpec = collectorSpec
 	group.gray = newVaneGrayObserver(vaneOption.GrayFailureObservation, group.clock, group.diagnostics)
@@ -279,6 +293,8 @@ func newVaneWithClock(
 		maxStates:          maxStates,
 		clock:              clock,
 		media:              defaultVaneMediaConfig(),
+		racing:             vaneRacingConfig{mode: vaneRacingOff},
+		racingRuntime:      newVaneRacingRuntime(),
 		explorationSince:   clock.Now().UTC(),
 		diagnostics:        newVaneDiagnostics(option.Name, clock, nil),
 		anchors:            make(map[vaneAnchorKey]vaneAnchor),
@@ -287,6 +303,10 @@ func newVaneWithClock(
 		mediaReconnects:    make(map[vaneMediaTargetKey]time.Time),
 		mediaSlowCooldowns: make(map[vaneMediaCandidateKey]time.Time),
 		mediaBudgets:       make(map[vaneMediaTargetKey]vaneMediaBudget),
+		targetHandoffs:     make(map[vaneTargetKey]vaneHandoffLease),
+		targetPreferences:  make(map[vaneTargetKey]vaneTargetPreference),
+		targetEvidence:     make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
+		targetFailures:     make(map[vaneTargetFailureKey]vaneTargetFailureState),
 		nodes:              make(map[string]*vaneNodeState),
 		nodeControls:       make(map[string]*vaneNodeControlState),
 		nodeIdentities:     make(map[string]string),
@@ -437,6 +457,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 			exploration.settle("exploration-failed", "dial-failed")
 		}
 		if handoff != nil && !vaneNeutralDialError(ctx, err) {
+			a.failTargetHandoff(handoff, "dial-failed", true)
 			a.diagnostics.record(vaneDiagnosticRecord{
 				kind:        "handoff-dial-failed",
 				reason:      "dial-failed",
@@ -521,7 +542,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 			NetWork: metadata.NetWork,
 		}
 	}
-	return newVaneControlledConnWithNative(conn, a.clock,
+	controlled := newVaneControlledConnWithNative(conn, a.clock,
 		func(elapsed time.Duration) {
 			now := a.clock.Now()
 			a.observeResponseEpochIdentity(proxy.Name(), identity, nodeEpoch, vaneTransportTCP, now, elapsed)
@@ -547,7 +568,16 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		},
 		func(observation vaneThroughputObservation, reason string) {
 			attempt.throughput(a.clock.Now(), observation, reason)
-		}), nil
+		})
+	if observed, ok := controlled.(*vaneObservedConn); ok {
+		if a.racing.mode == vaneRacingOn {
+			observed.enableDirectPolicy()
+		}
+		if mediaFlow != nil {
+			mediaFlow.setPolicySubmitter(observed.submitPolicyAction)
+		}
+	}
+	return controlled, nil
 }
 
 func (a *Vane) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
@@ -661,6 +691,10 @@ func (a *Vane) MarshalJSON() ([]byte, error) {
 
 func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 	snapshot := a.diagnostics.snapshot()
+	racingURL := ""
+	if a.racing.url != nil {
+		racingURL = a.racing.url.String()
+	}
 	snapshot.Config = VaneDiagnosticConfig{
 		MediaEnabled:                  a.media.enabled,
 		MediaDomains:                  append([]string(nil), a.media.domains...),
@@ -684,6 +718,9 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		ExplorationEnabled:            a.exploration.enabled,
 		ExplorationInterval:           int(a.exploration.interval),
 		GrayFailureObservationEnabled: a.gray.isEnabled(),
+		RacingMode:                    a.racing.mode.String(),
+		RacingURL:                     racingURL,
+		RacingBudgetBytesHour:         a.racing.budgetBytesHour,
 	}
 
 	now := a.clock.Now()
@@ -708,6 +745,21 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 			snapshot.Runtime.ActiveBudgets++
 		}
 	}
+	for _, lease := range a.targetHandoffs {
+		if lease.expiresAt.After(now) {
+			snapshot.Runtime.ActiveHandoffLeases++
+		}
+	}
+	for _, preference := range a.targetPreferences {
+		if preference.expiresAt.After(now) {
+			snapshot.Runtime.ActiveTargetPreferences++
+		}
+	}
+	for _, failure := range a.targetFailures {
+		if failure.blockUntil.After(now) {
+			snapshot.Runtime.ActiveTargetCooldowns++
+		}
+	}
 	if a.exploration.enabled {
 		snapshot.Runtime.ExplorationSince = a.explorationSince
 		snapshot.Runtime.ExplorationScopes = make([]VaneDiagnosticExplorationScope, 0, vaneExplorationScopeCount)
@@ -725,6 +777,13 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		}
 	}
 	a.mu.Unlock()
+	a.racingRuntime.mu.Lock()
+	for _, capability := range a.racingRuntime.capabilities {
+		if !capability.observedAt.IsZero() && now.Sub(capability.observedAt) <= vaneRacingCapabilityTTL {
+			snapshot.Runtime.CapabilityCache++
+		}
+	}
+	a.racingRuntime.mu.Unlock()
 	snapshot.Runtime.ActiveChurnStates = a.activeChurnStates(now)
 	snapshot.GrayFailure = a.gray.snapshot(snapshot.GrayFailure)
 	snapshot.LearningPersistence = a.learning.status()
@@ -745,6 +804,7 @@ func (a *Vane) Close() error {
 		a.collectorReleased = true
 	}
 	a.activationMu.Unlock()
+	a.stopRacing()
 	releaseVaneNativeCollector(collector)
 	return nil
 }
@@ -800,6 +860,33 @@ func (a *Vane) pickInternalDecision(metadata *C.Metadata, transport vaneTranspor
 	a.mu.Lock()
 	a.learning.mu.Lock()
 	if commit && transport == vaneTransportTCP && scene == vaneSceneMedia {
+		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
+			if selected, handoff, source := a.takeTargetSelectionLocked(targetKey, compatible, now, claimHandoff); selected != nil {
+				state := a.ensureProxyNodeLocked(selected, now)
+				a.pruneLocked(now, proxies)
+				a.learning.markDirtyLocked(now)
+				a.learning.mu.Unlock()
+				a.mu.Unlock()
+				record := vaneDiagnosticRecord{
+					kind:      "handoff-reconnect-selected",
+					reason:    source,
+					target:    target,
+					bucket:    targetKey.targetScope,
+					port:      port,
+					to:        selected.Name(),
+					transport: vaneTransportTCP.String(),
+					scene:     vaneSceneMedia.String(),
+					force:     true,
+				}
+				if handoff != nil {
+					record.handoffID = handoff.id
+					record.from = handoff.from
+					record.previousBPS = handoff.previousBPS
+				}
+				a.diagnostics.record(record)
+				return vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
+			}
+		}
 		if hinted, handoff := a.takeMediaHintLocked(target, port, compatible, now, claimHandoff); hinted != nil {
 			state := a.ensureProxyNodeLocked(hinted, now)
 			a.pruneLocked(now, proxies)

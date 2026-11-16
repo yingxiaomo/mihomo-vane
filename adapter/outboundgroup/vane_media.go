@@ -169,18 +169,20 @@ type vaneMediaBudget struct {
 }
 
 type vaneMediaFlow struct {
-	group     *Vane
-	candidate string
-	identity  string
-	nodeEpoch uint64
-	target    string
-	port      uint16
-	targetKey vaneMediaTargetKey
+	group          *Vane
+	candidate      string
+	identity       string
+	nodeEpoch      uint64
+	target         string
+	port           uint16
+	targetKey      vaneMediaTargetKey
+	targetStateKey vaneTargetKey
 
-	mu         sync.Mutex
-	lowWindows int
-	aborted    bool
-	handoff    *vaneHandoffToken
+	mu              sync.Mutex
+	lowWindows      int
+	aborted         bool
+	handoff         *vaneHandoffToken
+	policySubmitter func(vanePolicyAction, bool)
 }
 
 func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, handoff ...*vaneHandoffToken) *vaneMediaFlow {
@@ -195,7 +197,11 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 	if targetKey.target == "" {
 		return nil
 	}
-	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey}
+	targetStateKey, ok := group.targetKeyForMedia(target, port)
+	if !ok {
+		return nil
+	}
+	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey}
 	if len(handoff) > 0 {
 		flow.handoff = handoff[0]
 	}
@@ -220,6 +226,7 @@ func (f *vaneMediaFlow) failHandoff(reason string) {
 	if handoff == nil {
 		return
 	}
+	f.group.failTargetHandoff(handoff, reason, true)
 	f.group.diagnostics.record(vaneDiagnosticRecord{
 		kind:        "handoff-dial-failed",
 		reason:      reason,
@@ -239,8 +246,32 @@ func (f *vaneMediaFlow) discardHandoff() {
 		return
 	}
 	f.mu.Lock()
+	handoff := f.handoff
 	f.handoff = nil
 	f.mu.Unlock()
+	f.group.discardTargetHandoff(handoff)
+}
+
+func (f *vaneMediaFlow) setPolicySubmitter(submitter func(vanePolicyAction, bool)) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	f.policySubmitter = submitter
+	f.mu.Unlock()
+}
+
+func (f *vaneMediaFlow) submitPolicyAction(action vanePolicyAction, delivered bool) {
+	if f == nil || action == nil {
+		return
+	}
+	f.mu.Lock()
+	submitter := f.policySubmitter
+	aborted := f.aborted
+	f.mu.Unlock()
+	if !aborted && submitter != nil {
+		submitter(action, delivered)
+	}
 }
 
 func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
@@ -252,6 +283,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		return nil
 	}
 	config := f.group.media
+	member := vaneMemberLease{name: f.candidate, identity: f.identity, epoch: f.nodeEpoch}
 
 	f.mu.Lock()
 	if f.aborted {
@@ -281,7 +313,26 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		lowWindows: lowWindows,
 		low:        low,
 	})
+	f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond)
+	if low {
+		f.group.invalidateTargetPreference(f.targetStateKey, member)
+	} else {
+		f.group.refreshTargetPreference(f.targetStateKey, member, sample.BitsPerSecond)
+	}
 	if handoff != nil {
+		f.group.diagnostics.record(vaneDiagnosticRecord{
+			kind:       "handoff-reconnect-positive",
+			handoffID:  handoff.id,
+			target:     handoff.target,
+			bucket:     handoff.bucket,
+			port:       handoff.port,
+			from:       handoff.from,
+			to:         handoff.to,
+			bps:        sample.BitsPerSecond,
+			totalBytes: sample.TotalBytes,
+			age:        sample.Age,
+			force:      true,
+		})
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:        "handoff-measured",
 			handoffID:   handoff.id,
@@ -297,6 +348,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 			lowWindows:  lowWindows,
 			force:       true,
 		})
+		f.group.settleTargetHandoff(handoff, member, sample)
 	}
 	if lowWindows < config.lowWindows || sample.Age < config.minAge || sample.TotalBytes < config.minBytes {
 		return nil
@@ -322,71 +374,145 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	}
 
 	plan, reason := f.group.prepareMediaReconnectForNodeDetailed(f.targetKey, f.target, f.port, f.candidate, f.identity, f.nodeEpoch, sample.BitsPerSecond)
-	if reason != "" {
-		f.group.diagnostics.record(vaneDiagnosticRecord{
-			kind:       "reconnect-suppressed",
-			reason:     reason,
-			target:     f.target,
-			bucket:     f.targetKey.target,
-			port:       f.port,
-			from:       f.candidate,
-			bps:        sample.BitsPerSecond,
-			totalBytes: sample.TotalBytes,
-			age:        sample.Age,
-			lowWindows: lowWindows,
-			force:      true,
-		})
+	mode := f.group.racing.mode
+	if reason != "" && !(mode != vaneRacingOff && reason == "no-challenger") {
+		f.recordReconnectSuppressed(reason, sample, lowWindows)
 		return nil
 	}
+
+	if mode == vaneRacingOff {
+		if reason != "" {
+			f.recordReconnectSuppressed(reason, sample, lowWindows)
+			return nil
+		}
+		f.completeMediaPlan(&plan, sample, lowWindows)
+		return f.policyActionForPlan(plan, sample, lowWindows, false)
+	}
+
+	if mode == vaneRacingShadow {
+		if reason == "" && !plan.knownGood {
+			f.scheduleRace(sample, lowWindows)
+		} else if reason == "no-challenger" {
+			f.scheduleRace(sample, lowWindows)
+		}
+		// Shadow preserves the frozen baseline action and every baseline media
+		// state mutation. Racing contributes only capability and diagnostics.
+		if reason != "" {
+			f.recordReconnectSuppressed(reason, sample, lowWindows)
+			return nil
+		}
+		f.completeMediaPlan(&plan, sample, lowWindows)
+		return f.policyActionForPlan(plan, sample, lowWindows, false)
+	}
+
+	if reason == "" && plan.knownGood {
+		f.completeMediaPlan(&plan, sample, lowWindows)
+		return f.policyActionForPlan(plan, sample, lowWindows, true)
+	}
+	f.scheduleRace(sample, lowWindows)
+	return nil
+}
+
+func (f *vaneMediaFlow) recordReconnectSuppressed(reason string, sample vaneThroughputObservation, lowWindows int) {
+	f.group.diagnostics.record(vaneDiagnosticRecord{
+		kind: "reconnect-suppressed", reason: reason, target: f.target, bucket: f.targetKey.target,
+		port: f.port, from: f.candidate, bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
+		age: sample.Age, lowWindows: lowWindows, force: true,
+	})
+}
+
+func (f *vaneMediaFlow) completeMediaPlan(plan *vaneMediaPlan, sample vaneThroughputObservation, lowWindows int) {
 	plan.totalBytes = sample.TotalBytes
 	plan.age = sample.Age
 	plan.lowWindows = lowWindows
 	f.group.diagnostics.record(vaneDiagnosticRecord{
-		kind:       "reconnect-prepared",
-		target:     f.target,
-		bucket:     f.targetKey.target,
-		port:       f.port,
-		from:       f.candidate,
-		to:         plan.challenger,
-		bps:        sample.BitsPerSecond,
-		totalBytes: sample.TotalBytes,
-		age:        sample.Age,
-		lowWindows: lowWindows,
-		force:      true,
+		kind: "reconnect-prepared", target: f.target, bucket: f.targetKey.target, port: f.port,
+		from: f.candidate, to: plan.challenger, bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
+		age: sample.Age, lowWindows: lowWindows, force: true,
 	})
+}
+
+func (f *vaneMediaFlow) raceRequest(sample vaneThroughputObservation, lowWindows int) vaneRaceRequest {
+	required := sample.BitsPerSecond * f.group.media.challengerRatio
+	if required < f.group.media.demandBPS {
+		required = f.group.media.demandBPS
+	}
+	f.group.mu.Lock()
+	f.group.learning.mu.Lock()
+	generation := f.group.learningGeneration
+	f.group.learning.mu.Unlock()
+	f.group.mu.Unlock()
+	return vaneRaceRequest{
+		targetKey: f.targetStateKey, mediaKey: f.targetKey, target: f.target, port: f.port,
+		current:    vaneMemberLease{name: f.candidate, identity: f.identity, epoch: f.nodeEpoch},
+		currentBPS: sample.BitsPerSecond, requiredBPS: required, totalBytes: sample.TotalBytes,
+		age: sample.Age, lowWindows: lowWindows, generation: generation, requestedAt: f.group.clock.Now(),
+	}
+}
+
+func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindows int) {
+	request := f.raceRequest(sample, lowWindows)
+	scheduled, reason := f.group.scheduleMediaRace(request, func(result vaneRaceResult) {
+		if f.group.racing.mode == vaneRacingShadow {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind: "handoff-would-commit", reason: result.source, target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
+				bps: result.lowerBoundBPS, previousBPS: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
+				age: sample.Age, lowWindows: lowWindows, force: true,
+			})
+			return
+		}
+		if f.group.racing.mode != vaneRacingOn {
+			return
+		}
+		plan := vaneMediaPlan{
+			targetKey: f.targetKey, targetStateKey: f.targetStateKey, target: f.target, port: f.port,
+			current: f.candidate, identity: f.identity, nodeEpoch: f.nodeEpoch,
+			challenger: result.winner.name, challengerIdentity: result.winner.identity, challengerEpoch: result.winner.epoch,
+			generation: result.request.generation, currentBPS: sample.BitsPerSecond,
+			preparedAt: f.group.clock.Now(), totalBytes: sample.TotalBytes, age: sample.Age, lowWindows: lowWindows,
+		}
+		f.group.diagnostics.record(vaneDiagnosticRecord{
+			kind: "handoff-would-commit", reason: result.source, target: f.target,
+			bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
+			bps: result.lowerBoundBPS, previousBPS: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
+			age: sample.Age, lowWindows: lowWindows,
+		})
+		f.submitPolicyAction(f.policyActionForPlan(plan, sample, lowWindows, true), sample.Delivered)
+	})
+	if !scheduled && reason != "race-in-flight" && reason != "no-winner-cooldown" {
+		f.recordReconnectSuppressed(reason, sample, lowWindows)
+	}
+}
+
+func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThroughputObservation, lowWindows int, targetCommit bool) vanePolicyAction {
 	return func() bool {
 		f.mu.Lock()
 		if f.aborted {
 			f.mu.Unlock()
 			f.group.diagnostics.record(vaneDiagnosticRecord{
-				kind:   "reconnect-rejected",
-				reason: "already-committed",
-				target: f.target,
-				bucket: f.targetKey.target,
-				port:   f.port,
-				from:   f.candidate,
-				to:     plan.challenger,
-				bps:    sample.BitsPerSecond,
-				force:  true,
+				kind: "reconnect-rejected", reason: "already-committed", target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
+				bps: sample.BitsPerSecond, force: true,
 			})
 			return false
 		}
-		commitReason := f.group.commitMediaReconnectDetailed(plan)
+		f.mu.Unlock()
+		commitReason := ""
+		if targetCommit {
+			commitReason = f.group.commitTargetHandoff(plan)
+		} else {
+			commitReason = f.group.commitMediaReconnectDetailed(plan)
+		}
 		if commitReason != "" {
-			f.mu.Unlock()
 			f.group.diagnostics.record(vaneDiagnosticRecord{
-				kind:   "reconnect-rejected",
-				reason: commitReason,
-				target: f.target,
-				bucket: f.targetKey.target,
-				port:   f.port,
-				from:   f.candidate,
-				to:     plan.challenger,
-				bps:    sample.BitsPerSecond,
-				force:  true,
+				kind: "reconnect-rejected", reason: commitReason, target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
+				bps: sample.BitsPerSecond, force: true,
 			})
 			return false
 		}
+		f.mu.Lock()
 		f.aborted = true
 		f.mu.Unlock()
 		log.Infoln("Vane: media reconnect target=%s:%d bucket=%s from=%s to=%s bps=%.0f low-windows=%d", f.target, f.port, f.targetKey.target, f.candidate, plan.challenger, sample.BitsPerSecond, lowWindows)
@@ -426,6 +552,10 @@ type vaneMediaPlan struct {
 	nodeEpoch          uint64
 	challenger         string
 	challengerIdentity string
+	challengerEpoch    uint64
+	targetStateKey     vaneTargetKey
+	generation         uint64
+	knownGood          bool
 	currentBPS         float64
 	preparedAt         time.Time
 	totalBytes         int64
@@ -573,7 +703,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		freshThroughput := recent.bitsPerSecond > 0 && !recent.observedAt.IsZero() && now.Sub(recent.observedAt) <= vaneMediaEvidenceMaxAge
 		if freshThroughput {
 			throughputBPS = recent.bitsPerSecond
-			knownGood = throughputBPS >= a.media.lowThroughputBPS && throughputBPS >= currentBPS*a.media.challengerRatio
+			knownGood = throughputBPS >= a.media.lowThroughputBPS && throughputBPS >= a.media.demandBPS && throughputBPS >= currentBPS*a.media.challengerRatio
 			if !knownGood {
 				continue
 			}
@@ -622,8 +752,20 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		nodeEpoch:          nodeEpoch,
 		challenger:         candidates[0].proxy.Name(),
 		challengerIdentity: vaneProxyPersistentIdentity(candidates[0].proxy),
-		currentBPS:         currentBPS,
-		preparedAt:         now,
+		challengerEpoch: func() uint64 {
+			if state := a.nodes[candidates[0].proxy.Name()]; state != nil && state.identity == vaneProxyPersistentIdentity(candidates[0].proxy) {
+				return state.epoch
+			}
+			return a.learning.nodeEpochs[vaneLearningNodeKey(candidates[0].proxy.Name(), vaneProxyPersistentIdentity(candidates[0].proxy))]
+		}(),
+		targetStateKey: func() vaneTargetKey {
+			key, _ := a.targetKeyForMedia(target, port)
+			return key
+		}(),
+		generation: a.learningGeneration,
+		knownGood:  candidates[0].knownGood,
+		currentBPS: currentBPS,
+		preparedAt: now,
 	}, ""
 }
 
