@@ -248,12 +248,14 @@ func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRace
 	return true, ""
 }
 
-func (a *Vane) finishRaceTask(taskID uint64, request vaneRaceRequest, noWinner bool) {
+func (a *Vane) finishRaceTask(taskID uint64, request vaneRaceRequest, noWinner, stale bool) {
 	now := a.clock.Now()
 	a.racingRuntime.mu.Lock()
 	delete(a.racingRuntime.activeTasks, taskID)
 	a.racingRuntime.inFlight = false
-	if noWinner && !a.racingRuntime.closed {
+	// A stale race says nothing about the current candidates, so it must not
+	// suppress the next race for this target.
+	if noWinner && !stale && !a.racingRuntime.closed {
 		a.racingRuntime.noWinnerUntil[request.targetKey] = now.Add(vaneRacingNoWinnerCooldown)
 	}
 	a.racingRuntime.mu.Unlock()
@@ -262,7 +264,8 @@ func (a *Vane) finishRaceTask(taskID uint64, request vaneRaceRequest, noWinner b
 func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, taskID uint64, request vaneRaceRequest, callback func(vaneRaceResult)) {
 	defer cancel()
 	noWinner := true
-	defer func() { a.finishRaceTask(taskID, request, noWinner) }()
+	stale := false
+	defer func() { a.finishRaceTask(taskID, request, noWinner, stale) }()
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind:   "race-started",
 		target: request.target,
@@ -274,13 +277,19 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 
 	candidates, reason := a.snapshotRaceCandidates(request)
 	if reason != "" {
-		a.recordRaceNoWinner(request, reason)
+		if reason == "stale-generation" {
+			stale = true
+			a.recordRaceDiscardedStale(request, "")
+		} else {
+			a.recordRaceNoWinner(request, reason)
+		}
 		return
 	}
 	for _, candidate := range candidates {
 		if candidate.targetFresh && candidate.targetBPS >= request.requiredBPS {
 			if !a.validateRaceWinner(request, candidate.member) {
-				a.recordRaceNoWinner(request, "stale-generation")
+				stale = true
+				a.recordRaceDiscardedStale(request, candidate.member.name)
 				return
 			}
 			noWinner = false
@@ -292,7 +301,8 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 	for _, candidate := range candidates {
 		if candidate.capFresh && candidate.capabilityBPS >= request.requiredBPS {
 			if !a.validateRaceWinner(request, candidate.member) {
-				a.recordRaceNoWinner(request, "stale-generation")
+				stale = true
+				a.recordRaceDiscardedStale(request, candidate.member.name)
 				return
 			}
 			noWinner = false
@@ -385,7 +395,8 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 				continue
 			}
 			if !a.validateRaceWinner(request, outcome.candidate.member) {
-				a.diagnostics.record(vaneDiagnosticRecord{kind: "race-canceled", reason: "stale-generation", target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name, to: outcome.candidate.member.name, force: true})
+				stale = true
+				a.recordRaceDiscardedStale(request, outcome.candidate.member.name)
 				continue
 			}
 			probeCancel()
@@ -615,6 +626,22 @@ func (a *Vane) recordRaceNoWinner(request vaneRaceRequest, reason string) {
 		port:   request.port,
 		from:   request.current.name,
 		bps:    request.currentBPS,
+		force:  true,
+	})
+}
+
+// recordRaceDiscardedStale marks a race whose result belonged to a superseded
+// generation. It never suppresses future races: a stale outcome says nothing
+// about the current candidates.
+func (a *Vane) recordRaceDiscardedStale(request vaneRaceRequest, to string) {
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind:   "race-canceled",
+		reason: "stale-generation",
+		target: request.target,
+		bucket: request.targetKey.targetScope,
+		port:   request.port,
+		from:   request.current.name,
+		to:     to,
 		force:  true,
 	})
 }

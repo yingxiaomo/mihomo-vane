@@ -324,9 +324,8 @@ func TestVaneRacingCloseIsIdempotent(t *testing.T) {
 }
 
 func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
-	group, _, _, beta, _ := newVaneRacingEvidenceGroup(t)
-	_ = beta
-	var probes int32
+	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
+	var probes int
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		probes++
 		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
@@ -335,12 +334,40 @@ func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 	request.generation = group.learningGeneration - 1
 	called := false
 	scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) { called = true })
-	if scheduled {
-		waitVaneRaceIdle(t, group)
-	}
+	require.True(t, scheduled, reason)
+	waitVaneRaceIdle(t, group)
 	require.False(t, called)
 	require.Zero(t, probes)
-	require.Positive(t, group.VaneDiagnostics().Counters.RaceStaleGeneration, reason)
+	require.Positive(t, group.VaneDiagnostics().Counters.RaceStaleGeneration)
+
+	// A stale race must not suppress the next race for this target: the very
+	// next schedule with a current generation goes through.
+	fresh := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	scheduled, reason = group.scheduleMediaRace(fresh, func(vaneRaceResult) {})
+	require.True(t, scheduled, reason)
+	waitVaneRaceIdle(t, group)
+}
+
+func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
+	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
+	var probes int
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probes++
+		return vaneProbeResult{reason: "tls-error"}
+	}
+	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {
+		t.Fatal("a race without a qualified challenger must not produce a winner")
+	})
+	require.True(t, scheduled, reason)
+	waitVaneRaceIdle(t, group)
+	require.Positive(t, probes)
+	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
+
+	// A genuine no-winner result still installs the suppression window.
+	scheduled, reason = group.scheduleMediaRace(request, func(vaneRaceResult) {})
+	require.False(t, scheduled)
+	require.Equal(t, "no-winner-cooldown", reason)
 }
 
 func TestVaneRaceSnapshotWithoutChallengers(t *testing.T) {
