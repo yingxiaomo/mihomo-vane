@@ -60,6 +60,8 @@ type VaneDiagnosticCounters struct {
 	RaceStaleGeneration   uint64 `json:"raceStaleGeneration"`
 	B2LossSamples         uint64 `json:"b2LossSamples"`
 	B2LossUnsupported     uint64 `json:"b2LossUnsupported"`
+	B2StallSuspected      uint64 `json:"b2StallSuspected"`
+	B2StallAttempts       uint64 `json:"b2StallAttempts"`
 }
 
 type VaneDiagnosticPersistence struct {
@@ -145,6 +147,7 @@ type VaneDiagnosticRuntime struct {
 	ActiveTargetPreferences  int                              `json:"activeTargetPreferences"`
 	ActiveTargetCooldowns    int                              `json:"activeTargetCooldowns"`
 	B2LossTargets            int                              `json:"b2LossTargets"`
+	B2StallTargets           int                              `json:"b2StallTargets"`
 }
 
 // VaneDiagnosticsSnapshot is returned by GET /group/{name}/vane.
@@ -718,6 +721,10 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		d.snapshotData.Counters.B2LossSamples++
 	case "b2-loss-unsupported":
 		d.snapshotData.Counters.B2LossUnsupported++
+	case "b2-stall-attempt":
+		d.snapshotData.Counters.B2StallAttempts++
+	case "b2-stall-suspected":
+		d.snapshotData.Counters.B2StallSuspected++
 	case "gray-attempt-succeeded":
 		d.snapshotData.GrayFailure.Counters.AttemptEligible++
 		d.snapshotData.GrayFailure.Counters.AttemptSucceeded++

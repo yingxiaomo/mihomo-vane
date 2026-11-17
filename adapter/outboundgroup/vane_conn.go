@@ -149,6 +149,8 @@ type vaneObservedConn struct {
 	provisionalRead  time.Time
 	wrotePayload     bool
 	responseRecorded bool
+	responseBytes    int64
+	responseAt       time.Time
 	segmentStart     time.Time
 	segmentLastRead  time.Time
 	segmentBytes     int64
@@ -201,6 +203,12 @@ type vaneConnectionCloseObservation struct {
 	// LossSupported=false and must never be mistaken for zero loss.
 	LossRate      float64
 	LossSupported bool
+	// B2 observation (round5 item 3): the first-response snapshot, taken at
+	// whichever write/read site recorded the response first. Zero bytes read
+	// after that point plus a long quiet tail is the header-stall signature.
+	ResponseRecorded bool
+	ResponseBytes    int64
+	ResponseAt       time.Time
 }
 
 func newVaneObservedConn(conn C.Conn, clock vaneClock, onResponse func(time.Duration), onThroughput func(float64)) C.Conn {
@@ -408,6 +416,9 @@ func (c *vaneObservedConn) closeObservationLocked(closedAt time.Time) vaneConnec
 		PolicyClosed:   c.policyClosed,
 	}
 	observation.LossRate, observation.LossSupported = c.b2Stats.lossRate()
+	observation.ResponseRecorded = c.responseRecorded
+	observation.ResponseBytes = c.responseBytes
+	observation.ResponseAt = c.responseAt
 	return observation
 }
 
@@ -439,6 +450,8 @@ func (c *vaneObservedConn) observeWrite(now time.Time) {
 		c.firstWriteAt = now
 		if !c.provisionalRead.IsZero() && !c.responseRecorded {
 			c.responseRecorded = true
+			c.responseBytes = c.totalReadBytes
+			c.responseAt = now
 			response = vaneElapsed(now, c.provisionalRead)
 			recordResponse = true
 			c.provisionalRead = time.Time{}
@@ -468,6 +481,8 @@ func (c *vaneObservedConn) finishWrite(now time.Time, success bool) {
 		c.firstWriteAt = now
 		if !c.provisionalRead.IsZero() && !c.responseRecorded {
 			c.responseRecorded = true
+			c.responseBytes = c.totalReadBytes
+			c.responseAt = now
 			response = vaneElapsed(now, c.provisionalRead)
 			recordResponse = true
 			c.provisionalRead = time.Time{}
@@ -498,6 +513,8 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 	c.totalReadBytes += count
 	if c.wrotePayload && !c.responseRecorded {
 		c.responseRecorded = true
+		c.responseBytes = c.totalReadBytes
+		c.responseAt = now
 		response = vaneElapsed(c.firstWriteAt, now)
 		recordResponse = true
 	} else if !c.wrotePayload && c.pendingWrites > 0 && c.provisionalRead.IsZero() {

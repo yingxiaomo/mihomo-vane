@@ -76,16 +76,21 @@ type vaneTargetFailureState struct {
 	// B2 observation fields (round5 item 2): passive loss telemetry that never
 	// participates in selection. A record holding only these fields keeps its
 	// zero streak/blockUntil/lastFailureAt, so it can never act as a failure.
-	lossEMA        float64
-	lossSamples    int64
-	lastObservedAt time.Time
+	lossEMA             float64
+	lossSamples         int64
+	attemptCount        int64
+	suspectedStallCount int64
+	lastObservedAt      time.Time
 }
 
 // B2 loss EMA weights early evidence more heavily and stabilizes the estimate
-// as samples accumulate.
+// as samples accumulate. The stall signature window and minimum attempt count
+// are internal starting values — the shadow data decides the final thresholds.
 const (
-	vaneB2LossAlphaBase  = 0.4
-	vaneB2LossAlphaDecay = 0.05
+	vaneB2LossAlphaBase    = 0.4
+	vaneB2LossAlphaDecay   = 0.05
+	vaneB2StallMinAge      = 10 * time.Second
+	vaneB2StallMinAttempts = 5
 )
 
 func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, bool) {
@@ -206,6 +211,72 @@ func (a *Vane) recordB2MediaLoss(flow *vaneMediaFlow, observation vaneConnection
 		kind: "b2-loss-sample", target: flow.target, bucket: flow.targetKey.target,
 		port: flow.port, from: flow.candidate,
 	})
+}
+
+// vaneB2StallSignature reports the header-then-stall signature: the flow wrote
+// payload, saw its first response, and then stayed silent until settlement —
+// no byte read after the response snapshot and a quiet tail of at least
+// vaneB2StallMinAge. A client that keeps reading (or gives up before the
+// window) does not match. This is distinct from churn, which only recognizes
+// short connections.
+func vaneB2StallSignature(observation vaneConnectionCloseObservation, closedAt time.Time) bool {
+	return observation.WrotePayload && observation.ResponseRecorded &&
+		observation.TotalReadBytes == observation.ResponseBytes &&
+		closedAt.Sub(observation.ResponseAt) >= vaneB2StallMinAge
+}
+
+// b2StallRate returns the suspected-stall ratio once at least
+// vaneB2StallMinAttempts settled attempts exist; below that the ratio is
+// meaningless and reads as zero. The clamp guards a future caller against
+// suspected exceeding attempts (stalls are observed while the connection is
+// alive, attempts only count at settlement).
+func (s *vaneTargetFailureState) b2StallRate() float64 {
+	if s.attemptCount < vaneB2StallMinAttempts {
+		return 0
+	}
+	rate := float64(s.suspectedStallCount) / float64(s.attemptCount)
+	if rate < 0 {
+		return 0
+	}
+	if rate > 1 {
+		return 1
+	}
+	return rate
+}
+
+// recordB2MediaStall counts one media-flow settlement (round5 B2 item 3):
+// AttemptCount always, SuspectedStallCount when the header-stall signature
+// matched. Observation only, same record as the loss EMA, same racing-mode
+// independence.
+func (a *Vane) recordB2MediaStall(flow *vaneMediaFlow, observation vaneConnectionCloseObservation, now time.Time) {
+	if flow == nil {
+		return
+	}
+	stalled := vaneB2StallSignature(observation, now)
+	failureKey := vaneTargetFailureKey{
+		target: flow.targetStateKey,
+		member: vaneMemberLease{name: flow.candidate, identity: flow.identity, epoch: flow.nodeEpoch},
+	}
+	a.mu.Lock()
+	state := a.targetFailures[failureKey]
+	state.attemptCount++
+	if stalled {
+		state.suspectedStallCount++
+	}
+	state.lastObservedAt = now
+	a.targetFailures[failureKey] = state
+	a.pruneTargetStateLocked(now)
+	a.mu.Unlock()
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind: "b2-stall-attempt", target: flow.target, bucket: flow.targetKey.target,
+		port: flow.port, from: flow.candidate,
+	})
+	if stalled {
+		a.diagnostics.record(vaneDiagnosticRecord{
+			kind: "b2-stall-suspected", reason: "header-stall", target: flow.target,
+			bucket: flow.targetKey.target, port: flow.port, from: flow.candidate,
+		})
+	}
 }
 
 func (a *Vane) recordTargetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64, now time.Time) {

@@ -567,9 +567,11 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 			}
 			attempt.end(a.clock.Now(), reason, observation)
 			if mediaFlow != nil {
-				// B2 item 2: passive loss telemetry rides on media-flow
-				// settlement regardless of the racing mode.
-				a.recordB2MediaLoss(mediaFlow, observation, a.clock.Now())
+				// B2 items 2+3: passive loss and stall telemetry ride on
+				// media-flow settlement regardless of the racing mode.
+				now := a.clock.Now()
+				a.recordB2MediaLoss(mediaFlow, observation, now)
+				a.recordB2MediaStall(mediaFlow, observation, now)
 			}
 		},
 		func(observation vaneThroughputObservation, reason string) {
@@ -767,6 +769,9 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		}
 		if failure.lossSamples > 0 {
 			snapshot.Runtime.B2LossTargets++
+		}
+		if failure.attemptCount > 0 {
+			snapshot.Runtime.B2StallTargets++
 		}
 	}
 	if a.exploration.enabled {
