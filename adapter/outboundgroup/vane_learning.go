@@ -71,6 +71,9 @@ type vanePersistedMetrics struct {
 	Connect    vanePersistedDualMetric `json:"connect"`
 	Response   vanePersistedDualMetric `json:"response"`
 	Throughput vanePersistedDualMetric `json:"throughput"`
+	// P5 (round6 item 2) is passive per-node telemetry; its presence never
+	// affects node validity on restore.
+	P5 *vanePersistedP5 `json:"p5,omitempty"`
 }
 
 type vanePersistedNode struct {
@@ -358,7 +361,9 @@ func restoreVaneMetrics(metrics vanePersistedMetrics, now time.Time) (vaneMetric
 	connect, connectValid, connectInvalid := restoreVaneDualMetric(metrics.Connect, now)
 	response, responseValid, responseInvalid := restoreVaneDualMetric(metrics.Response, now)
 	throughput, throughputValid, throughputInvalid := restoreVaneDualMetric(metrics.Throughput, now)
-	return vaneMetrics{failure: failure, connect: connect, response: response, throughput: throughput},
+	// P5 restores but never decides validity: a node kept alive only by its
+	// P5 profile would resurrect selection state from telemetry.
+	return vaneMetrics{failure: failure, connect: connect, response: response, throughput: throughput, p5: restoreVaneP5(metrics.P5, now)},
 		failureValid || connectValid || responseValid || throughputValid,
 		failureInvalid || connectInvalid || responseInvalid || throughputInvalid
 }
@@ -390,12 +395,13 @@ func persistVaneDualMetric(metric vaneDualMetric) vanePersistedDualMetric {
 	return vanePersistedDualMetric{Fast: persistVaneDecayLayer(metric.fast), Slow: persistVaneDecayLayer(metric.slow)}
 }
 
-func persistVaneMetrics(metrics vaneMetrics) vanePersistedMetrics {
+func persistVaneMetrics(metrics vaneMetrics, now time.Time) vanePersistedMetrics {
 	return vanePersistedMetrics{
 		Failure:    persistVaneDualMetric(metrics.failure),
 		Connect:    persistVaneDualMetric(metrics.connect),
 		Response:   persistVaneDualMetric(metrics.response),
 		Throughput: persistVaneDualMetric(metrics.throughput),
+		P5:         persistVaneP5(&metrics.p5, now),
 	}
 }
 
@@ -468,8 +474,8 @@ func (s *vaneLearningState) snapshotLocked(now time.Time) vaneLearningSnapshot {
 			Name:     state.name,
 			Identity: state.identity,
 			LastSeen: state.lastObservedAt,
-			TCP:      persistVaneMetrics(state.tcp),
-			UDP:      persistVaneMetrics(state.udp),
+			TCP:      persistVaneMetrics(state.tcp, now),
+			UDP:      persistVaneMetrics(state.udp, now),
 		})
 	}
 	return vaneLearningSnapshot{
