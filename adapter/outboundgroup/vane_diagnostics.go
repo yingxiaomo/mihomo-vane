@@ -149,6 +149,21 @@ type VaneDiagnosticRuntime struct {
 	B2LossTargets            int                              `json:"b2LossTargets"`
 	B2StallTargets           int                              `json:"b2StallTargets"`
 	B2ActiveMediaFlows       map[string]int                   `json:"b2ActiveMediaFlows,omitempty"`
+	P5Nodes                  map[string]VaneDiagnosticP5Node  `json:"p5Nodes,omitempty"`
+}
+
+// VaneDiagnosticP5Node is the passive per-node throughput profile (round6
+// item 1). Only nodes that have seen throughput samples appear in the map.
+type VaneDiagnosticP5Node struct {
+	TCP VaneDiagnosticP5Transport `json:"tcp"`
+	UDP VaneDiagnosticP5Transport `json:"udp"`
+}
+
+type VaneDiagnosticP5Transport struct {
+	P10BPS  float64   `json:"p10Bps,omitempty"`
+	PeakBPS float64   `json:"peakBps,omitempty"`
+	PeakAt  time.Time `json:"peakAt,omitempty"`
+	Hours   []float64 `json:"hours,omitempty"`
 }
 
 // VaneDiagnosticsSnapshot is returned by GET /group/{name}/vane.

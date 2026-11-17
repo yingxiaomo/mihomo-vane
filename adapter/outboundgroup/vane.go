@@ -793,6 +793,30 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		}
 	}
 	a.mediaFlowsMu.Unlock()
+	// Round6 item 1: the passive P5 profile per node. Reads are pure — the
+	// ring is copied, never trimmed. Only nodes with throughput samples appear.
+	p5Nodes := make(map[string]VaneDiagnosticP5Node)
+	for name, state := range a.nodes {
+		if state == nil {
+			continue
+		}
+		node := VaneDiagnosticP5Node{}
+		hasData := false
+		if tcp := &state.tcp.p5; tcp.hasData() {
+			node.TCP = vaneDiagnosticP5Transport(tcp, now)
+			hasData = true
+		}
+		if udp := &state.udp.p5; udp.hasData() {
+			node.UDP = vaneDiagnosticP5Transport(udp, now)
+			hasData = true
+		}
+		if hasData {
+			p5Nodes[name] = node
+		}
+	}
+	if len(p5Nodes) > 0 {
+		snapshot.Runtime.P5Nodes = p5Nodes
+	}
 	if a.exploration.enabled {
 		snapshot.Runtime.ExplorationSince = a.explorationSince
 		snapshot.Runtime.ExplorationScopes = make([]VaneDiagnosticExplorationScope, 0, vaneExplorationScopeCount)
