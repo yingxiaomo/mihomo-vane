@@ -58,6 +58,8 @@ type VaneDiagnosticCounters struct {
 	RaceBudgetDenied      uint64 `json:"raceBudgetDenied"`
 	RaceNoWinner          uint64 `json:"raceNoWinner"`
 	RaceStaleGeneration   uint64 `json:"raceStaleGeneration"`
+	B2LossSamples         uint64 `json:"b2LossSamples"`
+	B2LossUnsupported     uint64 `json:"b2LossUnsupported"`
 }
 
 type VaneDiagnosticPersistence struct {
@@ -142,6 +144,7 @@ type VaneDiagnosticRuntime struct {
 	ActiveHandoffLeases      int                              `json:"activeHandoffLeases"`
 	ActiveTargetPreferences  int                              `json:"activeTargetPreferences"`
 	ActiveTargetCooldowns    int                              `json:"activeTargetCooldowns"`
+	B2LossTargets            int                              `json:"b2LossTargets"`
 }
 
 // VaneDiagnosticsSnapshot is returned by GET /group/{name}/vane.
@@ -711,6 +714,10 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		if record.reason == "stale-generation" {
 			d.snapshotData.Counters.RaceStaleGeneration++
 		}
+	case "b2-loss-sample":
+		d.snapshotData.Counters.B2LossSamples++
+	case "b2-loss-unsupported":
+		d.snapshotData.Counters.B2LossUnsupported++
 	case "gray-attempt-succeeded":
 		d.snapshotData.GrayFailure.Counters.AttemptEligible++
 		d.snapshotData.GrayFailure.Counters.AttemptSucceeded++
@@ -735,7 +742,7 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 
 	var event VaneDiagnosticEvent
 	if record.kind != "throughput-sample" && record.kind != "churn-candidate" && record.kind != "churn-reset" && record.kind != "churn-suppressed" &&
-		!strings.HasPrefix(record.kind, "gray-") {
+		!strings.HasPrefix(record.kind, "gray-") && !strings.HasPrefix(record.kind, "b2-") {
 		event = d.appendEventLocked(record, now)
 	}
 	if d.store != nil && !d.retiring {

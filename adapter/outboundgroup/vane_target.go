@@ -2,6 +2,7 @@ package outboundgroup
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -72,7 +73,20 @@ type vaneTargetFailureState struct {
 	streak        uint8
 	blockUntil    time.Time
 	lastFailureAt time.Time
+	// B2 observation fields (round5 item 2): passive loss telemetry that never
+	// participates in selection. A record holding only these fields keeps its
+	// zero streak/blockUntil/lastFailureAt, so it can never act as a failure.
+	lossEMA        float64
+	lossSamples    int64
+	lastObservedAt time.Time
 }
+
+// B2 loss EMA weights early evidence more heavily and stabilizes the estimate
+// as samples accumulate.
+const (
+	vaneB2LossAlphaBase  = 0.4
+	vaneB2LossAlphaDecay = 0.05
+)
 
 func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, bool) {
 	key := a.mediaTargetKey(target, port)
@@ -135,6 +149,63 @@ func (a *Vane) recordTargetFailureLocked(key vaneTargetKey, member vaneMemberLea
 
 func (a *Vane) clearTargetFailureLocked(key vaneTargetKey, member vaneMemberLease) {
 	delete(a.targetFailures, vaneTargetFailureKey{target: key, member: member})
+}
+
+// b2FeedLoss folds one cumulative loss sample into the EMA. The first sample
+// becomes the estimate directly; later samples decay with the sample count so
+// early evidence weighs more and the estimate stabilizes over time. Values
+// clamp to [0, 1]; NaN and Inf are rejected as no-sample.
+func (s *vaneTargetFailureState) b2FeedLoss(sample float64, now time.Time) {
+	if math.IsNaN(sample) || math.IsInf(sample, 0) {
+		return
+	}
+	if sample < 0 {
+		sample = 0
+	} else if sample > 1 {
+		sample = 1
+	}
+	if s.lossSamples == 0 {
+		s.lossEMA = sample
+	} else {
+		alpha := vaneB2LossAlphaBase / (1 + vaneB2LossAlphaDecay*float64(s.lossSamples))
+		s.lossEMA += alpha * (sample - s.lossEMA)
+	}
+	s.lossSamples++
+	s.lastObservedAt = now
+}
+
+// recordB2MediaLoss folds one media flow's cumulative loss observation into
+// the flow's target record (round5 B2 item 2). Observation only: the failure
+// fields (streak, blockUntil, lastFailureAt) are never touched, so an
+// observation record can never block or suppress a member. Small transfers
+// stay out (a few kilobytes of loss ratio is noise), unsupported reads count
+// as unsupported instead of fabricating a sample, and the recording runs
+// regardless of the racing mode — the shadow data must not stop with it.
+func (a *Vane) recordB2MediaLoss(flow *vaneMediaFlow, observation vaneConnectionCloseObservation, now time.Time) {
+	if flow == nil || observation.TotalReadBytes < a.media.minBytes {
+		return
+	}
+	if !observation.LossSupported {
+		a.diagnostics.record(vaneDiagnosticRecord{
+			kind: "b2-loss-unsupported", target: flow.target, bucket: flow.targetKey.target,
+			port: flow.port, from: flow.candidate,
+		})
+		return
+	}
+	failureKey := vaneTargetFailureKey{
+		target: flow.targetStateKey,
+		member: vaneMemberLease{name: flow.candidate, identity: flow.identity, epoch: flow.nodeEpoch},
+	}
+	a.mu.Lock()
+	state := a.targetFailures[failureKey]
+	state.b2FeedLoss(observation.LossRate, now)
+	a.targetFailures[failureKey] = state
+	a.pruneTargetStateLocked(now)
+	a.mu.Unlock()
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind: "b2-loss-sample", target: flow.target, bucket: flow.targetKey.target,
+		port: flow.port, from: flow.candidate,
+	})
 }
 
 func (a *Vane) recordTargetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64, now time.Time) {
@@ -503,7 +574,14 @@ func (a *Vane) pruneTargetStateLocked(now time.Time) {
 		}
 		entries := make([]entry, 0, len(a.targetFailures))
 		for key, value := range a.targetFailures {
-			entries = append(entries, entry{key: key, time: value.lastFailureAt, keyText: fmt.Sprint(key)})
+			// B2 item 2 (round5), eviction-timestamp choice (b): observation
+			// records evict by observation freshness, not first-out by their
+			// zero lastFailureAt.
+			trimTime := value.lastFailureAt
+			if value.lastObservedAt.After(trimTime) {
+				trimTime = value.lastObservedAt
+			}
+			entries = append(entries, entry{key: key, time: trimTime, keyText: fmt.Sprint(key)})
 		}
 		sort.Slice(entries, func(i, j int) bool {
 			if !entries[i].time.Equal(entries[j].time) {

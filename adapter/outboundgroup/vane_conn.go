@@ -158,6 +158,7 @@ type vaneObservedConn struct {
 	relayDepth       int
 	closePending     bool
 	closedAt         time.Time
+	b2Stats          *vaneTCPStats
 	lifecycleMu      sync.Mutex
 	lifecycle        vaneConnectionLifecycle
 	closeOnce        sync.Once
@@ -195,6 +196,11 @@ type vaneConnectionCloseObservation struct {
 	TotalReadBytes int64
 	Age            time.Duration
 	PolicyClosed   bool
+	// B2 observation (round5 item 2): the socket's cumulative loss ratio read
+	// just before the underlying close. An unsupported read carries
+	// LossSupported=false and must never be mistaken for zero loss.
+	LossRate      float64
+	LossSupported bool
 }
 
 func newVaneObservedConn(conn C.Conn, clock vaneClock, onResponse func(time.Duration), onThroughput func(float64)) C.Conn {
@@ -395,12 +401,14 @@ func (c *vaneObservedConn) closeObservation(closedAt time.Time) (vaneConnectionC
 }
 
 func (c *vaneObservedConn) closeObservationLocked(closedAt time.Time) vaneConnectionCloseObservation {
-	return vaneConnectionCloseObservation{
+	observation := vaneConnectionCloseObservation{
 		WrotePayload:   c.wrotePayload,
 		TotalReadBytes: c.totalReadBytes,
 		Age:            vaneElapsed(c.createdAt, closedAt),
 		PolicyClosed:   c.policyClosed,
 	}
+	observation.LossRate, observation.LossSupported = c.b2Stats.lossRate()
+	return observation
 }
 
 func (c *vaneObservedConn) emitCloseObservation(observation vaneConnectionCloseObservation) {
@@ -645,6 +653,14 @@ func (c *vaneObservedConn) requestAbort(action vanePolicyAction) {
 
 func (c *vaneObservedConn) closeUnderlying() error {
 	c.closeOnce.Do(func() {
+		// B2 item 2: the kernel counters die with the socket — read them
+		// before Close. The read runs outside the selector lock; unsupported
+		// platforms simply get nil, which the observation carries as
+		// "unsupported", never as zero loss.
+		stats := vaneReadTCPStats(c.Conn)
+		c.mu.Lock()
+		c.b2Stats = stats
+		c.mu.Unlock()
 		c.closeErr = c.Conn.Close()
 	})
 	return c.closeErr
