@@ -148,6 +148,7 @@ type VaneDiagnosticRuntime struct {
 	ActiveTargetCooldowns    int                              `json:"activeTargetCooldowns"`
 	B2LossTargets            int                              `json:"b2LossTargets"`
 	B2StallTargets           int                              `json:"b2StallTargets"`
+	B2ActiveMediaFlows       map[string]int                   `json:"b2ActiveMediaFlows,omitempty"`
 }
 
 // VaneDiagnosticsSnapshot is returned by GET /group/{name}/vane.

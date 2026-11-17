@@ -188,6 +188,11 @@ type Vane struct {
 
 	churnMu sync.Mutex
 	churn   map[vaneChurnKey]*vaneChurnState
+
+	// B2 item 4 (round5): per-node live media-flow counts on their own lock —
+	// the counter churns per connection while a.mu guards selection state.
+	mediaFlowsMu     sync.Mutex
+	mediaActiveFlows map[string]int
 }
 
 func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (*Vane, error) {
@@ -311,6 +316,7 @@ func newVaneWithClock(
 		nodeControls:       make(map[string]*vaneNodeControlState),
 		nodeIdentities:     make(map[string]string),
 		churn:              make(map[vaneChurnKey]*vaneChurnState),
+		mediaActiveFlows:   make(map[string]int),
 	}
 	group.gray = newVaneGrayObserver(false, clock, group.diagnostics)
 	learning := newVaneLearningState(option.Name, clock, nil, stateTTL, maxStates)
@@ -572,6 +578,8 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 				now := a.clock.Now()
 				a.recordB2MediaLoss(mediaFlow, observation, now)
 				a.recordB2MediaStall(mediaFlow, observation, now)
+				// B2 item 4: release the flow's per-node count once.
+				mediaFlow.releaseActiveFlowCount()
 			}
 		},
 		func(observation vaneThroughputObservation, reason string) {
@@ -774,6 +782,17 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 			snapshot.Runtime.B2StallTargets++
 		}
 	}
+	// B2 item 4: copy the live per-node flow counts — never expose the
+	// internal map's reference. An empty counter set keeps the zero Runtime
+	// value (nil map), matching the diagnostics read contract.
+	a.mediaFlowsMu.Lock()
+	if len(a.mediaActiveFlows) > 0 {
+		snapshot.Runtime.B2ActiveMediaFlows = make(map[string]int, len(a.mediaActiveFlows))
+		for name, count := range a.mediaActiveFlows {
+			snapshot.Runtime.B2ActiveMediaFlows[name] = count
+		}
+	}
+	a.mediaFlowsMu.Unlock()
 	if a.exploration.enabled {
 		snapshot.Runtime.ExplorationSince = a.explorationSince
 		snapshot.Runtime.ExplorationScopes = make([]VaneDiagnosticExplorationScope, 0, vaneExplorationScopeCount)

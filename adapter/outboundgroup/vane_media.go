@@ -183,6 +183,37 @@ type vaneMediaFlow struct {
 	aborted         bool
 	handoff         *vaneHandoffToken
 	policySubmitter func(vanePolicyAction, bool)
+	flowCountOnce   sync.Once
+}
+
+// mediaFlowStarted and mediaFlowEnded maintain the per-node live media-flow
+// count (B2 item 4). The counter lives on its own lock: it churns per
+// connection and must never contend with a.mu selection work.
+func (a *Vane) mediaFlowStarted(name string) {
+	a.mediaFlowsMu.Lock()
+	a.mediaActiveFlows[name]++
+	a.mediaFlowsMu.Unlock()
+}
+
+func (a *Vane) mediaFlowEnded(name string) {
+	a.mediaFlowsMu.Lock()
+	if a.mediaActiveFlows[name] <= 1 {
+		delete(a.mediaActiveFlows, name)
+	} else {
+		a.mediaActiveFlows[name]--
+	}
+	a.mediaFlowsMu.Unlock()
+}
+
+// releaseActiveFlowCount drops the flow's per-node count exactly once, even if
+// a second settlement path ever appears.
+func (f *vaneMediaFlow) releaseActiveFlowCount() {
+	if f == nil {
+		return
+	}
+	f.flowCountOnce.Do(func() {
+		f.group.mediaFlowEnded(f.candidate)
+	})
 }
 
 func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, handoff ...*vaneHandoffToken) *vaneMediaFlow {
@@ -212,6 +243,11 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 		port:   port,
 		from:   candidate,
 	})
+	// B2 item 4: only successful flows hold a per-node count. The release
+	// rides on the connection settlement (releaseActiveFlowCount); a
+	// never-closing connection keeps holding its count, which is acceptable —
+	// connections eventually close.
+	group.mediaFlowStarted(candidate)
 	return flow
 }
 
