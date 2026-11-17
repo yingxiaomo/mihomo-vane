@@ -429,6 +429,84 @@ func TestVaneRaceRecoveredFlowIsNotClosed(t *testing.T) {
 	require.True(t, rejected, "the recovery guard must be visible in diagnostics")
 }
 
+// RACE-DIAG-001 (race stage): one race task ID stitches the whole lifecycle —
+// race-scheduled → race-started → race-candidate-qualified → handoff-committed
+// → handoff-improved — and the committed lease carries the readable lease ID.
+func TestVaneRaceLifecycleSharesOneIDAcrossHandoff(t *testing.T) {
+	group, clock, alpha, beta, gamma := newVaneRacingEvidenceGroup(t)
+	release := make(chan struct{})
+	var probes atomic.Int32
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probes.Add(1)
+		<-release
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
+	}
+
+	group.mu.Lock()
+	for _, proxy := range []C.Proxy{alpha, beta, gamma} {
+		group.ensureProxyNodeLocked(proxy, clock.Now())
+	}
+	alphaLease := group.memberLeaseLocked(alpha.Name(), alpha.identity)
+	generation := group.learningGeneration
+	group.mu.Unlock()
+	flow := newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	require.NotNil(t, flow)
+	flow.identity = alphaLease.identity
+	flow.nodeEpoch = alphaLease.epoch
+	flow.setPolicySubmitter(func(action vanePolicyAction, _ bool) { action() })
+
+	sample := vaneThroughputObservation{BitsPerSecond: 500_000, TotalBytes: 4 * 1024 * 1024, Age: 30 * time.Second}
+	flow.mu.Lock()
+	flow.lowWindows = 3
+	flow.mu.Unlock()
+	flow.scheduleRace(sample, 3)
+	require.Eventually(t, func() bool { return probes.Load() == 2 }, 2*time.Second, time.Millisecond,
+		"both challenger probes must launch")
+	close(release)
+	waitVaneRaceIdle(t, group)
+
+	group.mu.Lock()
+	leases := make([]vaneHandoffLease, 0, len(group.targetHandoffs))
+	for _, lease := range group.targetHandoffs {
+		leases = append(leases, lease)
+	}
+	group.mu.Unlock()
+	require.Len(t, leases, 1, "the race winner must be leased")
+	lease := leases[0]
+	raceID := lease.id
+	require.NotZero(t, raceID)
+	leaseID := fmt.Sprintf("vane-race-%d-%d", generation, raceID)
+
+	kinds := make(map[string]int)
+	for _, event := range group.VaneDiagnostics().RecentEvents {
+		if event.HandoffID != raceID {
+			continue
+		}
+		kinds[event.Kind]++
+		if event.Kind == "handoff-committed" {
+			require.Equal(t, leaseID, event.LeaseID, "the committed lease must carry the readable race lease ID")
+		}
+	}
+	require.Equal(t, 1, kinds["race-scheduled"], "race-stage events must share the handoff ID")
+	require.Equal(t, 1, kinds["race-started"])
+	require.Equal(t, 1, kinds["race-candidate-qualified"])
+	require.Equal(t, 1, kinds["handoff-committed"])
+
+	group.settleTargetHandoff(lease.token, lease.token.toLease, vaneThroughputObservation{
+		BitsPerSecond: 40_000_000, TotalBytes: 24 * 1024 * 1024, Age: 3 * time.Second,
+	})
+	improved := false
+	for _, event := range group.VaneDiagnostics().RecentEvents {
+		if event.Kind != "handoff-improved" {
+			continue
+		}
+		improved = true
+		require.Equal(t, raceID, event.HandoffID, "lifecycle events must carry the race ID")
+		require.Equal(t, leaseID, event.LeaseID)
+	}
+	require.True(t, improved, "a qualifying settle must record handoff-improved")
+}
+
 func TestVaneRaceSnapshotWithoutChallengers(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)

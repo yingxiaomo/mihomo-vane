@@ -82,6 +82,7 @@ type vaneRaceRequest struct {
 
 type vaneRaceResult struct {
 	request       vaneRaceRequest
+	taskID        uint64
 	winner        vaneMemberLease
 	lowerBoundBPS float64
 	source        string
@@ -235,6 +236,7 @@ func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRace
 
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind:       "race-scheduled",
+		handoffID:  taskID,
 		target:     request.target,
 		bucket:     request.targetKey.targetScope,
 		port:       request.port,
@@ -267,21 +269,22 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 	stale := false
 	defer func() { a.finishRaceTask(taskID, request, noWinner, stale) }()
 	a.diagnostics.record(vaneDiagnosticRecord{
-		kind:   "race-started",
-		target: request.target,
-		bucket: request.targetKey.targetScope,
-		port:   request.port,
-		from:   request.current.name,
-		bps:    request.currentBPS,
+		kind:      "race-started",
+		handoffID: taskID,
+		target:    request.target,
+		bucket:    request.targetKey.targetScope,
+		port:      request.port,
+		from:      request.current.name,
+		bps:       request.currentBPS,
 	})
 
 	candidates, reason := a.snapshotRaceCandidates(request)
 	if reason != "" {
 		if reason == "stale-generation" {
 			stale = true
-			a.recordRaceDiscardedStale(request, "")
+			a.recordRaceDiscardedStale(request, "", taskID)
 		} else {
-			a.recordRaceNoWinner(request, reason)
+			a.recordRaceNoWinner(request, reason, taskID)
 		}
 		return
 	}
@@ -289,12 +292,12 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 		if candidate.targetFresh && candidate.targetBPS >= request.requiredBPS {
 			if !a.validateRaceWinner(request, candidate.member) {
 				stale = true
-				a.recordRaceDiscardedStale(request, candidate.member.name)
+				a.recordRaceDiscardedStale(request, candidate.member.name, taskID)
 				return
 			}
 			noWinner = false
-			a.recordRaceQualified(request, candidate.member, candidate.targetBPS, "target-evidence")
-			callback(vaneRaceResult{request: request, winner: candidate.member, lowerBoundBPS: candidate.targetBPS, source: "target-evidence"})
+			a.recordRaceQualified(request, taskID, candidate.member, candidate.targetBPS, "target-evidence")
+			callback(vaneRaceResult{request: request, taskID: taskID, winner: candidate.member, lowerBoundBPS: candidate.targetBPS, source: "target-evidence"})
 			return
 		}
 	}
@@ -302,12 +305,12 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 		if candidate.capFresh && candidate.capabilityBPS >= request.requiredBPS {
 			if !a.validateRaceWinner(request, candidate.member) {
 				stale = true
-				a.recordRaceDiscardedStale(request, candidate.member.name)
+				a.recordRaceDiscardedStale(request, candidate.member.name, taskID)
 				return
 			}
 			noWinner = false
-			a.recordRaceQualified(request, candidate.member, candidate.capabilityBPS, "capability-cache")
-			callback(vaneRaceResult{request: request, winner: candidate.member, lowerBoundBPS: candidate.capabilityBPS, source: "capability-cache"})
+			a.recordRaceQualified(request, taskID, candidate.member, candidate.capabilityBPS, "capability-cache")
+			callback(vaneRaceResult{request: request, taskID: taskID, winner: candidate.member, lowerBoundBPS: candidate.capabilityBPS, source: "capability-cache"})
 			return
 		}
 	}
@@ -323,14 +326,14 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 		}
 	}
 	if len(probeCandidates) == 0 {
-		a.recordRaceNoWinner(request, "cached-below-required")
+		a.recordRaceNoWinner(request, "cached-below-required", taskID)
 		return
 	}
 
 	limits := a.reserveRaceBudget(len(probeCandidates), a.clock.Now())
 	if len(limits) == 0 {
-		a.diagnostics.record(vaneDiagnosticRecord{kind: "race-budget-denied", target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name, force: true})
-		a.recordRaceNoWinner(request, "budget-denied")
+		a.diagnostics.record(vaneDiagnosticRecord{kind: "race-budget-denied", handoffID: taskID, target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name, force: true})
+		a.recordRaceNoWinner(request, "budget-denied", taskID)
 		return
 	}
 	probeCandidates = probeCandidates[:len(limits)]
@@ -360,7 +363,7 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 	for remaining > 0 {
 		select {
 		case <-ctx.Done():
-			a.diagnostics.record(vaneDiagnosticRecord{kind: "race-canceled", reason: "group-canceled", target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name, force: true})
+			a.diagnostics.record(vaneDiagnosticRecord{kind: "race-canceled", reason: "group-canceled", handoffID: taskID, target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name, force: true})
 			return
 		case outcome := <-outcomes:
 			remaining--
@@ -374,6 +377,7 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 			a.diagnostics.record(vaneDiagnosticRecord{
 				kind:       kind,
 				reason:     result.reason,
+				handoffID:  taskID,
 				target:     request.target,
 				bucket:     request.targetKey.targetScope,
 				port:       request.port,
@@ -396,18 +400,18 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 			}
 			if !a.validateRaceWinner(request, outcome.candidate.member) {
 				stale = true
-				a.recordRaceDiscardedStale(request, outcome.candidate.member.name)
+				a.recordRaceDiscardedStale(request, outcome.candidate.member.name, taskID)
 				continue
 			}
 			probeCancel()
 			noWinner = false
-			a.recordRaceQualified(request, outcome.candidate.member, result.lowerBoundBPS, "probe")
-			callback(vaneRaceResult{request: request, winner: outcome.candidate.member, lowerBoundBPS: result.lowerBoundBPS, source: "probe"})
+			a.recordRaceQualified(request, taskID, outcome.candidate.member, result.lowerBoundBPS, "probe")
+			callback(vaneRaceResult{request: request, taskID: taskID, winner: outcome.candidate.member, lowerBoundBPS: result.lowerBoundBPS, source: "probe"})
 			for remaining > 0 {
 				canceledOutcome := <-outcomes
 				remaining--
 				a.diagnostics.record(vaneDiagnosticRecord{
-					kind: "race-probe-canceled", reason: canceledOutcome.result.reason,
+					kind: "race-probe-canceled", reason: canceledOutcome.result.reason, handoffID: taskID,
 					target: request.target, bucket: request.targetKey.targetScope, port: request.port,
 					from: request.current.name, to: canceledOutcome.candidate.member.name,
 					totalBytes: canceledOutcome.result.bytes, age: canceledOutcome.result.duration,
@@ -416,7 +420,7 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 			return
 		}
 	}
-	a.recordRaceNoWinner(request, "no-qualified-challenger")
+	a.recordRaceNoWinner(request, "no-qualified-challenger", taskID)
 }
 
 func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandidate, string) {
@@ -603,51 +607,63 @@ func (a *Vane) pruneCapabilitiesLocked(now time.Time) {
 	}
 }
 
-func (a *Vane) recordRaceQualified(request vaneRaceRequest, member vaneMemberLease, bps float64, source string) {
+func (a *Vane) recordRaceQualified(request vaneRaceRequest, taskID uint64, member vaneMemberLease, bps float64, source string) {
 	a.diagnostics.record(vaneDiagnosticRecord{
-		kind:   "race-candidate-qualified",
-		reason: source,
-		target: request.target,
-		bucket: request.targetKey.targetScope,
-		port:   request.port,
-		from:   request.current.name,
-		to:     member.name,
-		bps:    bps,
-		force:  true,
+		kind:      "race-candidate-qualified",
+		reason:    source,
+		handoffID: taskID,
+		target:    request.target,
+		bucket:    request.targetKey.targetScope,
+		port:      request.port,
+		from:      request.current.name,
+		to:        member.name,
+		bps:       bps,
+		force:     true,
 	})
 }
 
-func (a *Vane) recordRaceNoWinner(request vaneRaceRequest, reason string) {
+func (a *Vane) recordRaceNoWinner(request vaneRaceRequest, reason string, taskID uint64) {
 	a.diagnostics.record(vaneDiagnosticRecord{
-		kind:   "race-no-winner",
-		reason: reason,
-		target: request.target,
-		bucket: request.targetKey.targetScope,
-		port:   request.port,
-		from:   request.current.name,
-		bps:    request.currentBPS,
-		force:  true,
+		kind:      "race-no-winner",
+		reason:    reason,
+		handoffID: taskID,
+		target:    request.target,
+		bucket:    request.targetKey.targetScope,
+		port:      request.port,
+		from:      request.current.name,
+		bps:       request.currentBPS,
+		force:     true,
 	})
 }
 
 // recordRaceDiscardedStale marks a race whose result belonged to a superseded
 // generation. It never suppresses future races: a stale outcome says nothing
 // about the current candidates.
-func (a *Vane) recordRaceDiscardedStale(request vaneRaceRequest, to string) {
+func (a *Vane) recordRaceDiscardedStale(request vaneRaceRequest, to string, taskID uint64) {
 	a.diagnostics.record(vaneDiagnosticRecord{
-		kind:   "race-canceled",
-		reason: "stale-generation",
-		target: request.target,
-		bucket: request.targetKey.targetScope,
-		port:   request.port,
-		from:   request.current.name,
-		to:     to,
-		force:  true,
+		kind:      "race-canceled",
+		reason:    "stale-generation",
+		handoffID: taskID,
+		target:    request.target,
+		bucket:    request.targetKey.targetScope,
+		port:      request.port,
+		from:      request.current.name,
+		to:        to,
+		force:     true,
 	})
 }
 
 func probeVaneCapability(ctx context.Context, proxy C.Proxy, endpoint *url.URL, byteLimit int64) vaneProbeResult {
 	return probeVaneCapabilityWithTLSConfig(ctx, proxy, endpoint, byteLimit, nil)
+}
+
+// vaneRaceLeaseID renders the log-friendly lease ID of a race-sourced handoff
+// so one string identifies the race behind a committed lease.
+func vaneRaceLeaseID(generation, taskID uint64) string {
+	if taskID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("vane-race-%d-%d", generation, taskID)
 }
 
 func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoint *url.URL, byteLimit int64, tlsConfig *tls.Config) vaneProbeResult {

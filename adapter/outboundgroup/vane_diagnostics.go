@@ -72,6 +72,7 @@ type VaneDiagnosticPersistence struct {
 type VaneDiagnosticEvent struct {
 	Sequence               uint64    `json:"sequence"`
 	HandoffID              uint64    `json:"handoffId,omitempty"`
+	LeaseID                string    `json:"leaseId,omitempty"`
 	ExplorationID          uint64    `json:"explorationId,omitempty"`
 	Time                   time.Time `json:"time"`
 	Kind                   string    `json:"kind"`
@@ -187,6 +188,7 @@ func (vaneCacheDiagnosticsStore) Save(key string, payload []byte) error {
 
 type vaneHandoffToken struct {
 	id          uint64
+	leaseID     string
 	target      string
 	bucket      string
 	port        uint16
@@ -232,6 +234,7 @@ type vaneDiagnosticRecord struct {
 	from                   string
 	to                     string
 	handoffID              uint64
+	leaseID                string
 	explorationID          uint64
 	transport              string
 	scene                  string
@@ -546,14 +549,20 @@ func (d *vaneDiagnostics) recordReconnectCommit(record vaneDiagnosticRecord) *va
 			record.kind = "reconnect-committed"
 		}
 		record.force = true
-		record.handoffID = uint64(1)
-		if events := d.snapshotData.RecentEvents; len(events) > 0 {
-			record.handoffID = events[len(events)-1].Sequence + 1
+		// A caller-supplied handoffID (a race task ID) wins: it stitches the
+		// race-stage events to every handoff lifecycle event. Otherwise the
+		// commit event derives its own sequence-based ID as before.
+		if record.handoffID == 0 {
+			record.handoffID = uint64(1)
+			if events := d.snapshotData.RecentEvents; len(events) > 0 {
+				record.handoffID = events[len(events)-1].Sequence + 1
+			}
 		}
 		event := d.recordLocked(record)
 		d.mu.Unlock()
 		return &vaneHandoffToken{
-			id:          event.Sequence,
+			id:          event.HandoffID,
+			leaseID:     record.leaseID,
 			target:      normalizeVaneMediaTarget(record.target),
 			bucket:      record.bucket,
 			port:        record.port,
@@ -750,6 +759,7 @@ func (d *vaneDiagnostics) appendEventLocked(record vaneDiagnosticRecord, now tim
 	event := VaneDiagnosticEvent{
 		Sequence:               sequence,
 		HandoffID:              record.handoffID,
+		LeaseID:                record.leaseID,
 		ExplorationID:          record.explorationID,
 		Time:                   now,
 		Kind:                   record.kind,

@@ -299,6 +299,8 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	a.mediaSlowCooldowns[currentKey] = now.Add(a.media.slowCooldown)
 	token := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
 		kind:       "handoff-committed",
+		handoffID:  plan.raceID,
+		leaseID:    vaneRaceLeaseID(plan.generation, plan.raceID),
 		target:     plan.target,
 		bucket:     plan.targetKey.target,
 		port:       plan.port,
@@ -367,6 +369,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind:        kind,
 		handoffID:   token.id,
+		leaseID:     token.leaseID,
 		target:      token.target,
 		bucket:      token.bucket,
 		port:        token.port,
@@ -399,6 +402,7 @@ func (a *Vane) failTargetHandoff(token *vaneHandoffToken, reason string, hard bo
 		kind:        "handoff-failed",
 		reason:      reason,
 		handoffID:   token.id,
+		leaseID:     token.leaseID,
 		target:      token.target,
 		bucket:      token.bucket,
 		port:        token.port,

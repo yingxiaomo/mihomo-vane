@@ -462,6 +462,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 				kind:        "handoff-dial-failed",
 				reason:      "dial-failed",
 				handoffID:   handoff.id,
+				leaseID:     handoff.leaseID,
 				target:      handoff.target,
 				bucket:      handoff.bucket,
 				port:        handoff.port,
@@ -880,6 +881,7 @@ func (a *Vane) pickInternalDecision(metadata *C.Metadata, transport vaneTranspor
 				}
 				if handoff != nil {
 					record.handoffID = handoff.id
+					record.leaseID = handoff.leaseID
 					record.from = handoff.from
 					record.previousBPS = handoff.previousBPS
 				}
@@ -904,6 +906,7 @@ func (a *Vane) pickInternalDecision(metadata *C.Metadata, transport vaneTranspor
 			}
 			if handoff != nil {
 				record.handoffID = handoff.id
+				record.leaseID = handoff.leaseID
 				record.from = handoff.from
 				record.previousBPS = handoff.previousBPS
 			}

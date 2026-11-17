@@ -231,6 +231,7 @@ func (f *vaneMediaFlow) failHandoff(reason string) {
 		kind:        "handoff-dial-failed",
 		reason:      reason,
 		handoffID:   handoff.id,
+		leaseID:     handoff.leaseID,
 		target:      handoff.target,
 		bucket:      handoff.bucket,
 		port:        handoff.port,
@@ -323,6 +324,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:       "handoff-reconnect-positive",
 			handoffID:  handoff.id,
+			leaseID:    handoff.leaseID,
 			target:     handoff.target,
 			bucket:     handoff.bucket,
 			port:       handoff.port,
@@ -336,6 +338,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:        "handoff-measured",
 			handoffID:   handoff.id,
+			leaseID:     handoff.leaseID,
 			target:      handoff.target,
 			bucket:      handoff.bucket,
 			port:        handoff.port,
@@ -458,7 +461,7 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 		// and its would-commit must not pollute shadow statistics.
 		if f.flowRecovered() {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
-				kind: "reconnect-rejected", reason: "flow-recovered", target: f.target,
+				kind: "reconnect-rejected", reason: "flow-recovered", handoffID: result.taskID, target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
 				bps: result.lowerBoundBPS, force: true,
 			})
@@ -466,7 +469,8 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 		}
 		if f.group.racing.mode == vaneRacingShadow {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
-				kind: "handoff-would-commit", reason: result.source, target: f.target,
+				kind: "handoff-would-commit", reason: result.source, handoffID: result.taskID,
+				leaseID: vaneRaceLeaseID(result.request.generation, result.taskID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
 				bps: result.lowerBoundBPS, previousBPS: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
 				age: sample.Age, lowWindows: lowWindows, force: true,
@@ -480,11 +484,12 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 			targetKey: f.targetKey, targetStateKey: f.targetStateKey, target: f.target, port: f.port,
 			current: f.candidate, identity: f.identity, nodeEpoch: f.nodeEpoch,
 			challenger: result.winner.name, challengerIdentity: result.winner.identity, challengerEpoch: result.winner.epoch,
-			generation: result.request.generation, currentBPS: sample.BitsPerSecond,
+			generation: result.request.generation, raceID: result.taskID, currentBPS: sample.BitsPerSecond,
 			preparedAt: f.group.clock.Now(), totalBytes: sample.TotalBytes, age: sample.Age, lowWindows: lowWindows,
 		}
 		f.group.diagnostics.record(vaneDiagnosticRecord{
-			kind: "handoff-would-commit", reason: result.source, target: f.target,
+			kind: "handoff-would-commit", reason: result.source, handoffID: result.taskID,
+			leaseID: vaneRaceLeaseID(result.request.generation, result.taskID), target: f.target,
 			bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
 			bps: result.lowerBoundBPS, previousBPS: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
 			age: sample.Age, lowWindows: lowWindows,
@@ -502,7 +507,8 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 		if f.aborted {
 			f.mu.Unlock()
 			f.group.diagnostics.record(vaneDiagnosticRecord{
-				kind: "reconnect-rejected", reason: "already-committed", target: f.target,
+				kind: "reconnect-rejected", reason: "already-committed", handoffID: plan.raceID,
+				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
 				bps: sample.BitsPerSecond, force: true,
 			})
@@ -517,7 +523,8 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 		}
 		if commitReason != "" {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
-				kind: "reconnect-rejected", reason: commitReason, target: f.target,
+				kind: "reconnect-rejected", reason: commitReason, handoffID: plan.raceID,
+				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
 				bps: sample.BitsPerSecond, force: true,
 			})
@@ -575,6 +582,7 @@ type vaneMediaPlan struct {
 	challengerEpoch    uint64
 	targetStateKey     vaneTargetKey
 	generation         uint64
+	raceID             uint64
 	knownGood          bool
 	currentBPS         float64
 	preparedAt         time.Time
