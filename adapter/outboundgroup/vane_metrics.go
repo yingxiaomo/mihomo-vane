@@ -35,6 +35,18 @@ func (s vaneScene) String() string {
 	}
 }
 
+// parseVaneTransport is the persistence-side counterpart of
+// vaneTransport.String (round6 item 3).
+func parseVaneTransport(value string) (vaneTransport, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "tcp":
+		return vaneTransportTCP, true
+	case "udp":
+		return vaneTransportUDP, true
+	}
+	return vaneTransportTCP, false
+}
+
 func parseVaneScene(value string) (vaneScene, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "default":

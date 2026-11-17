@@ -93,6 +93,12 @@ const (
 	vaneB2StallMinAttempts = 5
 )
 
+// String renders the key for learning-state maps (round6 item 3). The format
+// is internal to this package: persisted records carry the structured fields.
+func (k vaneTargetKey) String() string {
+	return fmt.Sprintf("%s|%s|%s|%d", k.transport.String(), k.scene.String(), k.targetScope, k.port)
+}
+
 func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, bool) {
 	key := a.mediaTargetKey(target, port)
 	if key.target == "" {
@@ -203,9 +209,11 @@ func (a *Vane) recordB2MediaLoss(flow *vaneMediaFlow, observation vaneConnection
 	}
 	a.mu.Lock()
 	state := a.targetFailures[failureKey]
+	state = a.seedB2StateFromLearning(flow, state)
 	state.b2FeedLoss(observation.LossRate, now)
 	a.targetFailures[failureKey] = state
 	a.pruneTargetStateLocked(now)
+	a.learning.pushB2Target(a.b2TargetSnapshot(flow, state), now)
 	a.mu.Unlock()
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind: "b2-loss-sample", target: flow.target, bucket: flow.targetKey.target,
@@ -259,6 +267,7 @@ func (a *Vane) recordB2MediaStall(flow *vaneMediaFlow, observation vaneConnectio
 	}
 	a.mu.Lock()
 	state := a.targetFailures[failureKey]
+	state = a.seedB2StateFromLearning(flow, state)
 	state.attemptCount++
 	if stalled {
 		state.suspectedStallCount++
@@ -266,6 +275,7 @@ func (a *Vane) recordB2MediaStall(flow *vaneMediaFlow, observation vaneConnectio
 	state.lastObservedAt = now
 	a.targetFailures[failureKey] = state
 	a.pruneTargetStateLocked(now)
+	a.learning.pushB2Target(a.b2TargetSnapshot(flow, state), now)
 	a.mu.Unlock()
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind: "b2-stall-attempt", target: flow.target, bucket: flow.targetKey.target,
@@ -277,6 +287,48 @@ func (a *Vane) recordB2MediaStall(flow *vaneMediaFlow, observation vaneConnectio
 			bucket: flow.targetKey.target, port: flow.port, from: flow.candidate,
 		})
 	}
+}
+
+// b2TargetSnapshot renders the live record's B2 telemetry for the learning
+// mirror (round6 item 3). Only observation fields — never streak, blockUntil
+// or lastFailureAt.
+func (a *Vane) b2TargetSnapshot(flow *vaneMediaFlow, state vaneTargetFailureState) vanePersistedB2Target {
+	return vanePersistedB2Target{
+		Transport:           flow.targetStateKey.transport.String(),
+		Scene:               flow.targetStateKey.scene.String(),
+		TargetScope:         flow.targetStateKey.targetScope,
+		Port:                flow.targetStateKey.port,
+		Candidate:           flow.candidate,
+		Identity:            flow.identity,
+		LossEMA:             state.lossEMA,
+		LossSamples:         state.lossSamples,
+		AttemptCount:        state.attemptCount,
+		SuspectedStallCount: state.suspectedStallCount,
+		LastObservedAt:      state.lastObservedAt,
+	}
+}
+
+// seedB2StateFromLearning starts a B2-empty live record from the restored
+// learning copy (round6 item 3). A record holding any B2 data — even a single
+// attempt — is never overwritten. Called with a.mu held.
+func (a *Vane) seedB2StateFromLearning(flow *vaneMediaFlow, state vaneTargetFailureState) vaneTargetFailureState {
+	if state.lossSamples != 0 || state.attemptCount != 0 {
+		return state
+	}
+	seed, ok := a.learning.seedB2Target(
+		flow.targetStateKey.transport, flow.targetStateKey.scene,
+		flow.targetStateKey.targetScope, flow.targetStateKey.port,
+		flow.candidate, flow.identity,
+	)
+	if !ok {
+		return state
+	}
+	state.lossEMA = seed.LossEMA
+	state.lossSamples = seed.LossSamples
+	state.attemptCount = seed.AttemptCount
+	state.suspectedStallCount = seed.SuspectedStallCount
+	state.lastObservedAt = seed.LastObservedAt
+	return state
 }
 
 func (a *Vane) recordTargetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64, now time.Time) {
