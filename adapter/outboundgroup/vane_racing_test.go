@@ -49,6 +49,7 @@ func configureVaneRacingForTest(t *testing.T, group *Vane, mode vaneRacingMode) 
 	group.racing = config
 }
 
+// RACE-CONFIG-001: defaults and option parsing stay behind the explicit racing opt-in.
 func TestVaneRacingConfig(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	group, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{}, fallback, nil)
@@ -91,6 +92,7 @@ func TestVaneRacingConfig(t *testing.T) {
 	require.Equal(t, int64(9*1024*1024), parsed.(*Vane).racing.budgetBytesHour)
 }
 
+// RACE-PROBE-001: probe byte/time boundaries are repeatable and charge real bytes.
 func TestVaneRacingProbe(t *testing.T) {
 	payload := make([]byte, 128*1024)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -173,6 +175,7 @@ func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) 
 	}
 }
 
+// RACE-ENGINE-001: the first qualified challenger wins and its peers are canceled.
 func TestVaneRacingEngineFirstQualifiedWinsAndCancelsPeer(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -209,6 +212,7 @@ func TestVaneRacingEngineFirstQualifiedWinsAndCancelsPeer(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+// RACE-IDENTITY-001: a same-name replacement must not inherit probe results.
 func TestVaneRacingIdentityRejectsSameNameReplacement(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -248,6 +252,7 @@ func TestVaneRacingIdentityRejectsSameNameReplacement(t *testing.T) {
 	require.False(t, newCached)
 }
 
+// RACE-BUDGET-001 + RACE-LIFECYCLE-001: hard byte reservation and close-time cancellation.
 func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 	t.Run("hard byte reservation", func(t *testing.T) {
 		clock := newVaneConnTestClock()
@@ -306,6 +311,7 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 	})
 }
 
+// RACE-MODE-001: shadow never changes baseline selection or policy state.
 func TestVaneRacingModeTruthTable(t *testing.T) {
 	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
 		t.Run(mode.String(), func(t *testing.T) {
@@ -357,6 +363,7 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 	}
 }
 
+// RACE-PROBE-001 + RACE-BUDGET-001: canceled probes still charge the bytes they read.
 func TestVaneRacingProbeCancellationChargesReadBytes(t *testing.T) {
 	// Budget settlement is intentionally based on returned actual bytes even
 	// when the probe is canceled or invalid.
@@ -381,6 +388,7 @@ func TestVaneRacingProbeCancellationChargesReadBytes(t *testing.T) {
 	require.Equal(t, int64(12345), used)
 }
 
+// RACE-ENGINE-001: a race without a qualified winner must not mutate selection state.
 func TestVaneRacingNoWinnerDoesNotCommitPolicyState(t *testing.T) {
 	clock := newVaneConnTestClock()
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
@@ -409,6 +417,7 @@ func TestVaneRacingNoWinnerDoesNotCommitPolicyState(t *testing.T) {
 var _ C.Proxy = (*vaneNetworkTestProxy)(nil)
 var _ = errors.Is
 
+// TARGET-BOUND-001: the capability cache is bounded and stale entries are pruned.
 func TestVaneRacingCapabilityPrune(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -477,6 +486,7 @@ func TestVaneRacingCapabilityPrune(t *testing.T) {
 	})
 }
 
+// RACE-BUDGET-001: settle refunds the reserved-but-unused difference.
 func TestVaneRacingBudgetSettle(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -535,6 +545,7 @@ func TestVaneRacingBudgetSettle(t *testing.T) {
 	})
 }
 
+// RACE-LIFECYCLE-001: schedule guards keep exactly one race in flight per group.
 func TestVaneRacingScheduleGuards(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)

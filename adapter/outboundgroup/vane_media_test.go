@@ -55,6 +55,7 @@ func readVaneLowWindows(t *testing.T, conn C.Conn, clock *vaneConnTestClock, win
 	}
 }
 
+// RACE-HANDOFF-001 + TARGET-LEASE-001: close-once with a prepared winner handoff.
 func TestVaneMediaReconnectClosesOnceAndHandsOffTarget(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alphaConn := &vaneConnTestConn{readFunc: func(payload []byte) (int, error) {
@@ -113,6 +114,7 @@ func TestVaneMediaReconnectClosesOnceAndHandsOffTarget(t *testing.T) {
 	require.InDelta(t, 0, snapshot.failure.value, 1e-12, "policy reconnect is not a node failure")
 }
 
+// TARGET-BOUND-001: a replaced node's old flow cannot cool down the replacement.
 func TestVaneMediaOldFlowCannotCoolDownSameNameReplacement(t *testing.T) {
 	clock := newVaneConnTestClock()
 	oldConn := &vaneConnTestConn{readFunc: func(payload []byte) (int, error) {
@@ -154,6 +156,7 @@ func TestVaneMediaOldFlowCannotCoolDownSameNameReplacement(t *testing.T) {
 	require.NoError(t, conn.Close())
 }
 
+// TARGET-BOUND-001: prepared plans reject same-name replacements.
 func TestVaneMediaPreparedPlanRejectsSameNameReplacement(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -181,6 +184,7 @@ func TestVaneMediaPreparedPlanRejectsSameNameReplacement(t *testing.T) {
 	require.Equal(t, "stale-node-identity", group.commitMediaReconnectDetailed(plan))
 }
 
+// TARGET-BOUND-001: commits reject replacements observed during health check.
 func TestVaneMediaCommitRejectsReplacementDuringHealthCheck(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -209,6 +213,7 @@ func TestVaneMediaCommitRejectsReplacementDuringHealthCheck(t *testing.T) {
 	require.Equal(t, "stale-node-identity", group.commitMediaReconnectDetailed(plan))
 }
 
+// TARGET-LEASE-001: repeated provider entries deduplicate to one lease.
 func TestVaneMediaProviderLeaseDeduplicatesRepeatedProvider(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -223,6 +228,7 @@ func TestVaneMediaProviderLeaseDeduplicatesRepeatedProvider(t *testing.T) {
 	require.Equal(t, 1, calls)
 }
 
+// TARGET-BOUND-001: a delayed failure cooldown does not contaminate the replacement.
 func TestVaneDelayedFailureCooldownDoesNotAffectSameNameReplacement(t *testing.T) {
 	clock := newVaneConnTestClock()
 	oldAlpha := newVaneTestProxy("alpha", true, true)
@@ -247,6 +253,7 @@ func TestVaneDelayedFailureCooldownDoesNotAffectSameNameReplacement(t *testing.T
 	require.False(t, newCooling)
 }
 
+// TARGET-BOUND-001: hints reject same-name challenger replacements.
 func TestVaneMediaHintRejectsSameNameChallengerReplacement(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -282,6 +289,7 @@ func TestVaneMediaHintRejectsSameNameChallengerReplacement(t *testing.T) {
 	require.True(t, newAlphaCooldown.IsZero())
 }
 
+// TARGET-SCOPE-001: reconnect never cuts web or small traffic.
 func TestVaneMediaReconnectNeverCutsWebOrSmallTraffic(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -315,6 +323,7 @@ func TestVaneMediaReconnectNeverCutsWebOrSmallTraffic(t *testing.T) {
 	}
 }
 
+// RACE-HANDOFF-001: reconnect safety gates hold before any close.
 func TestVaneMediaReconnectSafetyGates(t *testing.T) {
 	t.Run("no health-qualified challenger", func(t *testing.T) {
 		clock := newVaneConnTestClock()
@@ -357,6 +366,7 @@ func TestVaneMediaReconnectSafetyGates(t *testing.T) {
 	})
 }
 
+// RACE-ATOMIC-001: concurrent close is exactly once.
 func TestVaneControlledConnConcurrentCloseIsExactlyOnce(t *testing.T) {
 	clock := newVaneConnTestClock()
 	underlying := &vaneConnTestConn{}
@@ -382,6 +392,7 @@ func TestVaneControlledConnConcurrentCloseIsExactlyOnce(t *testing.T) {
 	require.Equal(t, 1, closeCalls)
 }
 
+// RACE-DELIVERY-001: direct reads never policy-close before delivery.
 func TestVaneControlledConnDirectReadNeverPolicyClosesBeforeDelivery(t *testing.T) {
 	clock := newVaneConnTestClock()
 	underlying := &vaneConnTestConn{readFunc: func(payload []byte) (int, error) { return len(payload), nil }}
@@ -408,6 +419,7 @@ func TestVaneControlledConnDirectReadNeverPolicyClosesBeforeDelivery(t *testing.
 	require.NoError(t, wrapped.Close())
 }
 
+// RACE-ATOMIC-001: natural close cancels the policy transaction.
 func TestVaneControlledConnNaturalCloseCancelsPolicyTransaction(t *testing.T) {
 	clock := newVaneConnTestClock()
 	underlying := &vaneConnTestConn{}
@@ -424,6 +436,7 @@ func TestVaneControlledConnNaturalCloseCancelsPolicyTransaction(t *testing.T) {
 	require.Equal(t, 1, closeCalls)
 }
 
+// RACE-DELIVERY-001: sing-copy closes only after payload delivery.
 func TestVaneControlledConnSingCopyClosesOnlyAfterPayloadDelivery(t *testing.T) {
 	clock := newVaneConnTestClock()
 	payload := bytes.Repeat([]byte{1}, 64*1024)
@@ -470,6 +483,7 @@ func TestVaneControlledConnSingCopyClosesOnlyAfterPayloadDelivery(t *testing.T) 
 	require.Equal(t, 1, closeCalls)
 }
 
+// RACE-HANDOFF-001: buffer credit defers reconnect until the escape limit.
 func TestVaneMediaBufferCreditEventuallyDefersToEscapeLimit(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -497,6 +511,7 @@ func TestVaneMediaBufferCreditEventuallyDefersToEscapeLimit(t *testing.T) {
 	require.False(t, nilFlow.policyAborted())
 }
 
+// TARGET-FEEDBACK-001: fresh evidence of a slower challenger blocks the handoff.
 func TestVaneMediaRejectsFreshKnownSlowerChallenger(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -516,6 +531,7 @@ func TestVaneMediaRejectsFreshKnownSlowerChallenger(t *testing.T) {
 	require.Nil(t, flow.observe(sample))
 }
 
+// RACE-ATOMIC-001: commits reject challengers that failed after prepare.
 func TestVaneMediaCommitRejectsChallengerThatFailedAfterPrepare(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -561,6 +577,7 @@ func TestVaneMediaReconnectBudgetIsBounded(t *testing.T) {
 	require.False(t, ok)
 }
 
+// TARGET-BOUND-001: candidate cooldowns prune expired entries.
 func TestVaneMediaCandidateCooldownPrunesExpiredEntries(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -636,6 +653,7 @@ func TestVaneMediaConfigValidation(t *testing.T) {
 	}
 }
 
+// TARGET-SCOPE-001: hints expire and only apply to allowed domains.
 func TestVaneMediaHintExpiresAndOnlyAffectsAllowedDomain(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)

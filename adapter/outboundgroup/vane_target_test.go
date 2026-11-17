@@ -49,6 +49,7 @@ func newTargetGroupForTest(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestPr
 	return group, clock, alpha, beta, metadata
 }
 
+// TARGET-LEASE-001 + TARGET-SCOPE-001: lease scope isolation and single-outcome tokens.
 func TestVaneTargetHandoffLeaseScopeAndSingleOutcomeToken(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
@@ -71,6 +72,7 @@ func TestVaneTargetHandoffLeaseScopeAndSingleOutcomeToken(t *testing.T) {
 	require.Equal(t, "alpha", group.pickDecision(interactive, vaneTransportTCP, false, true).proxy.Name())
 }
 
+// TARGET-FEEDBACK-001: preference forms only after real improvement.
 func TestVaneTargetFeedbackCreatesPreferenceOnlyAfterImprovement(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
@@ -94,6 +96,7 @@ func TestVaneTargetFeedbackCreatesPreferenceOnlyAfterImprovement(t *testing.T) {
 	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffImproved)
 }
 
+// TARGET-COOLDOWN-003 + TARGET-FEEDBACK-001: no-gain uses slow cooldown, never hard failure.
 func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
@@ -118,6 +121,7 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffNoGain)
 }
 
+// TARGET-FEEDBACK-001: ordinary success only refreshes an existing preference.
 func TestVaneTargetOrdinarySuccessOnlyRefreshesExistingPreference(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
 	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
@@ -139,6 +143,7 @@ func TestVaneTargetOrdinarySuccessOnlyRefreshesExistingPreference(t *testing.T) 
 	require.True(t, after.After(before))
 }
 
+// TARGET-COOLDOWN-001 + TARGET-COOLDOWN-002: progression plus expiry-vs-success reset.
 func TestVaneTargetCooldownProgressionExpiryAndSuccessReset(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
 	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
@@ -169,6 +174,7 @@ func TestVaneTargetCooldownProgressionExpiryAndSuccessReset(t *testing.T) {
 	require.False(t, exists, "a proven target success clears the streak")
 }
 
+// TARGET-BOUND-001: failure state rejects replacements and stays bounded.
 func TestVaneTargetFailureRejectsReplacementAndBoundsState(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	_, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
@@ -200,6 +206,7 @@ func TestVaneTargetFailureRejectsReplacementAndBoundsState(t *testing.T) {
 	require.LessOrEqual(t, count, vaneTargetStateLimit)
 }
 
+// TARGET-LEASE-001 + RACE-ATOMIC-001: failure and discard contracts clean up leases.
 func TestVaneTargetHandoffFailureAndDiscardContracts(t *testing.T) {
 	t.Run("nil token and empty scope are no-ops", func(t *testing.T) {
 		group, _, _, _, _ := newTargetGroupForTest(t)
@@ -295,6 +302,7 @@ func TestVaneTargetHandoffFailureAndDiscardContracts(t *testing.T) {
 	})
 }
 
+// TARGET-BOUND-001: target state prune keeps the maps bounded.
 func TestVaneTargetStatePruneAndCapabilityWrapper(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
@@ -356,6 +364,7 @@ func TestVaneTargetStatePruneAndCapabilityWrapper(t *testing.T) {
 	})
 }
 
+// TARGET-BOUND-001: prune LRU and evidence branches stay bounded.
 func TestVaneTargetPruneLRUAndEvidenceBranches(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)

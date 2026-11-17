@@ -49,6 +49,7 @@ func seedVaneCapability(group *Vane, clock *vaneConnTestClock, proxy *vaneTestPr
 	group.racingRuntime.mu.Unlock()
 }
 
+// RACE-ENGINE-001: target evidence outranks capability cache and probing.
 func TestVaneRacingTargetEvidenceOutranksCapabilityAndProbing(t *testing.T) {
 	group, clock, _, beta, gamma := newVaneRacingEvidenceGroup(t)
 	var probes atomic.Int32
@@ -73,6 +74,7 @@ func TestVaneRacingTargetEvidenceOutranksCapabilityAndProbing(t *testing.T) {
 	waitVaneRaceIdle(t, group)
 }
 
+// RACE-ENGINE-001: fresh capability proofs skip probing.
 func TestVaneRacingCapabilityCacheSkipsProbing(t *testing.T) {
 	group, clock, _, _, gamma := newVaneRacingEvidenceGroup(t)
 	var probes atomic.Int32
@@ -93,6 +95,7 @@ func TestVaneRacingCapabilityCacheSkipsProbing(t *testing.T) {
 	waitVaneRaceIdle(t, group)
 }
 
+// RACE-ENGINE-001: fresh-but-slow cache entries suppress probing.
 func TestVaneRacingCachedBelowRequiredSuppressesProbe(t *testing.T) {
 	group, clock, _, beta, gamma := newVaneRacingEvidenceGroup(t)
 	var probes atomic.Int32
@@ -111,6 +114,7 @@ func TestVaneRacingCachedBelowRequiredSuppressesProbe(t *testing.T) {
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
 }
 
+// RACE-PROBE-001: probe failures fail open with classified reasons.
 func TestVaneRacingProbeFailOpenReasons(t *testing.T) {
 	payload := make([]byte, 32*1024)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

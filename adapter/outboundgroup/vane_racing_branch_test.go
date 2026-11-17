@@ -13,6 +13,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// RACE-ATOMIC-001: rejected commits leave no lease/cooldown/budget residue.
+// Vane racing/target acceptance coverage map (round3 guide item 6). Every
+// racing-related test cites the acceptance IDs it pins; this table is the
+// index. IDs come from the Phase B active-racing plan:
+//
+//	RACE-CONFIG-001    old configs gain no new behavior
+//	RACE-PROBE-001     probe byte/time boundaries repeat, real bytes are charged
+//	RACE-MODE-001      shadow never changes baseline selection or policy state
+//	RACE-ENGINE-001    first qualified challenger wins, peers cancel
+//	RACE-IDENTITY-001  same-name replacement inherits nothing from probe results
+//	RACE-BUDGET-001    concurrent and byte budgets never exceed bounds
+//	RACE-LIFECYCLE-001 no stale commit and no goroutine leak after close/reload
+//	RACE-HANDOFF-001   the slow flow closes only after the winner is ready
+//	RACE-ATOMIC-001    without close ownership nothing leaks lease/cooldown/budget
+//	RACE-DELIVERY-001  the positive bytes that triggered the close are never lost
+//	RACE-SHADOW-001    shadow matches the frozen baseline in selection, close and state
+//	RACE-DIAG-001      one handoff ID traces the whole lifecycle
+//	RACE-DIAG-002      reading the diagnostics snapshot never mutates policy
+//	RACE-DIAG-003      counters persist across restarts, the event ring stays bounded
+//	TARGET-LEASE-001   after policy-close an immediate reconnect deterministically hits the challenger
+//	TARGET-SCOPE-001   scene/target/port isolation, no cross-target pollution
+//	TARGET-FEEDBACK-001 long-term preference only after real target improvement
+//	TARGET-BOUND-001   state is bounded; expired/superseded/inactive entries are invalidated
+//	TARGET-COOLDOWN-001 30s/1m/2m/4m/8m/15m progression is exact
+//	TARGET-COOLDOWN-002 expiry keeps the streak, real success resets it
+//	TARGET-COOLDOWN-003 slow and hard-failure states never contaminate each other
 func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -143,6 +169,7 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 	}
 }
 
+// RACE-IDENTITY-001 + TARGET-COOLDOWN-001: selection skips stale identities and cooldown-bound members.
 func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -213,6 +240,7 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 	})
 }
 
+// TARGET-FEEDBACK-001 + TARGET-COOLDOWN-001: evidence and failure guards on the target path.
 func TestVaneTargetEvidenceAndFailureGuards(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
 	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
@@ -253,6 +281,7 @@ func TestVaneTargetEvidenceAndFailureGuards(t *testing.T) {
 	group.mu.Unlock()
 }
 
+// TARGET-BOUND-001: target state is bounded by trimming the oldest entries.
 func TestVaneTargetStateLimitsTrimOldestEntries(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
 	group.mu.Lock()
@@ -288,6 +317,7 @@ func TestVaneTargetStateLimitsTrimOldestEntries(t *testing.T) {
 	_ = metadata
 }
 
+// TARGET-LEASE-001 + RACE-ATOMIC-001: settle only accepts the owning, unexpired token.
 func TestVaneTargetSettleRejectsForeignAndExpiredTokens(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
@@ -309,6 +339,7 @@ func TestVaneTargetSettleRejectsForeignAndExpiredTokens(t *testing.T) {
 	group.discardTargetHandoff(nil)
 }
 
+// RACE-CONFIG-001: fragment and overflow configurations are rejected.
 func TestVaneRacingConfigRejectsFragmentAndOverflow(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	_, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{Racing: "on", RacingURL: "https://example.com/file#frag"}, fallback, nil)
@@ -317,6 +348,7 @@ func TestVaneRacingConfigRejectsFragmentAndOverflow(t *testing.T) {
 	require.Error(t, err)
 }
 
+// RACE-LIFECYCLE-001: close is idempotent.
 func TestVaneRacingCloseIsIdempotent(t *testing.T) {
 	group, _ := newVaneGroupForTest(newVaneConnTestClock(), 10, time.Hour, newVaneTestProxy("alpha", true, true))
 	require.NoError(t, group.Close())
@@ -324,6 +356,7 @@ func TestVaneRacingCloseIsIdempotent(t *testing.T) {
 	require.True(t, group.racingRuntime.closed)
 }
 
+// RACE-IDENTITY-001: a superseded generation never reaches probing.
 func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
 	var probes atomic.Int32
@@ -349,6 +382,7 @@ func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 	waitVaneRaceIdle(t, group)
 }
 
+// RACE-ENGINE-001: a genuine no-winner installs the suppression window.
 func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
 	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
 	var probes atomic.Int32
@@ -374,6 +408,7 @@ func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
 // A flow that recovers while its race is in flight must not be closed by the
 // race result (round3 item 4): the callback observes the current window state,
 // not the trigger-time snapshot.
+// RACE-HANDOFF-001: a flow that recovered mid-race must not be closed by its result.
 func TestVaneRaceRecoveredFlowIsNotClosed(t *testing.T) {
 	group, clock, alpha, beta, gamma := newVaneRacingEvidenceGroup(t)
 	release := make(chan struct{})
@@ -507,6 +542,7 @@ func TestVaneRaceLifecycleSharesOneIDAcrossHandoff(t *testing.T) {
 	require.True(t, improved, "a qualifying settle must record handoff-improved")
 }
 
+// RACE-ENGINE-001: a snapshot without challengers returns no-candidate.
 func TestVaneRaceSnapshotWithoutChallengers(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -519,6 +555,7 @@ func TestVaneRaceSnapshotWithoutChallengers(t *testing.T) {
 	require.Equal(t, "no-challenger", reason)
 }
 
+// RACE-ENGINE-001 + TARGET-COOLDOWN-001: blocked candidates race only when nothing else is available.
 func TestVaneRaceSnapshotBlockedCandidates(t *testing.T) {
 	t.Run("media slow cooldown extends the block deadline", func(t *testing.T) {
 		clock := newVaneConnTestClock()
@@ -566,6 +603,7 @@ func TestVaneRaceSnapshotBlockedCandidates(t *testing.T) {
 	})
 }
 
+// RACE-ENGINE-001: candidate ordering tie-breaks are deterministic.
 func TestVaneRaceCandidateOrderingTieBreaks(t *testing.T) {
 	group, clock, _, beta, gamma := newVaneRacingEvidenceGroup(t)
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
@@ -597,6 +635,7 @@ func TestVaneRaceCandidateOrderingTieBreaks(t *testing.T) {
 	require.False(t, candidates[0].targetFresh)
 }
 
+// RACE-BUDGET-001: reservations are atomic and bounded.
 func TestVaneRaceBudgetReservationGuards(t *testing.T) {
 	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
 	require.Empty(t, group.reserveRaceBudget(0, group.clock.Now()))
@@ -615,6 +654,7 @@ func TestVaneRaceBudgetReservationGuards(t *testing.T) {
 	require.LessOrEqual(t, total, 2*vaneRacingMinimumReservation)
 }
 
+// RACE-BUDGET-001: budget denial starts no probes.
 func TestVaneRaceBudgetDeniedStopsProbing(t *testing.T) {
 	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
 	group.racing.budgetBytesHour = vaneRacingMinimumReservation - 1
@@ -631,6 +671,7 @@ func TestVaneRaceBudgetDeniedStopsProbing(t *testing.T) {
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceBudgetDenied)
 }
 
+// RACE-IDENTITY-001: winner validation rejects superseded generations.
 func TestVaneValidateRaceWinnerRejectsStaleGeneration(t *testing.T) {
 	group, _, _, beta, _ := newVaneRacingEvidenceGroup(t)
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
@@ -643,6 +684,7 @@ func TestVaneValidateRaceWinnerRejectsStaleGeneration(t *testing.T) {
 	require.False(t, group.validateRaceWinner(staleRequest, lease))
 }
 
+// RACE-PROBE-001: invalid probe requests fail fast.
 func TestVaneProbeRejectsInvalidRequests(t *testing.T) {
 	proxy := newVaneTestProxy("probe", true, true)
 	goodURL, err := url.Parse("https://example.com/file")
@@ -656,6 +698,7 @@ func TestVaneProbeRejectsInvalidRequests(t *testing.T) {
 	require.Equal(t, "invalid-request", probeVaneCapability(context.Background(), proxy, goodURL, 0).reason)
 }
 
+// RACE-PROBE-001: canceled dials are classified, not failures.
 func TestVaneProbeClassifiesCanceledDial(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

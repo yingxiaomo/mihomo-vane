@@ -71,6 +71,7 @@ func readVaneBufferedPayload(t *testing.T, conn C.Conn, clock *vaneConnTestClock
 	}
 }
 
+// RACE-DELIVERY-001 + TARGET-LEASE-001: policy close never preempts direct payload delivery.
 func TestVaneObservedConnPolicyCloseNeverPreemptsDirectPayload(t *testing.T) {
 	t.Run("baseline direct read never evaluates policy", func(t *testing.T) {
 		clock := newVaneConnTestClock()
@@ -146,6 +147,7 @@ func TestVaneObservedConnPolicyCloseNeverPreemptsDirectPayload(t *testing.T) {
 	})
 }
 
+// RACE-DELIVERY-001: policy submission honors the delivery state.
 func TestVaneObservedConnSubmitPolicyActionHonorsDelivery(t *testing.T) {
 	clock := newVaneConnTestClock()
 	underlying, conn, _ := newVanePolicyTestConn(t, clock)
@@ -167,6 +169,7 @@ func TestVaneObservedConnSubmitPolicyActionHonorsDelivery(t *testing.T) {
 	underlying.mu.Unlock()
 }
 
+// RACE-SHADOW-001: shadow keeps the baseline direct policy disabled.
 func TestVaneRacingShadowKeepsDirectPolicyDisabled(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alphaConn := &vaneConnTestConn{readFunc: func(payload []byte) (int, error) {
@@ -190,6 +193,7 @@ func TestVaneRacingShadowKeepsDirectPolicyDisabled(t *testing.T) {
 	require.False(t, directPolicy, "shadow must not enable the racing close path")
 }
 
+// RACE-HANDOFF-001 + TARGET-FEEDBACK-001: end-to-end handoff reconnect and preference formation.
 func TestVaneRacingOnEndToEndHandoffReconnectAndPreference(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alphaConn := &vaneConnTestConn{readFunc: func(payload []byte) (int, error) {
