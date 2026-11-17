@@ -371,6 +371,64 @@ func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
 	require.Equal(t, "no-winner-cooldown", reason)
 }
 
+// A flow that recovers while its race is in flight must not be closed by the
+// race result (round3 item 4): the callback observes the current window state,
+// not the trigger-time snapshot.
+func TestVaneRaceRecoveredFlowIsNotClosed(t *testing.T) {
+	group, clock, alpha, beta, gamma := newVaneRacingEvidenceGroup(t)
+	release := make(chan struct{})
+	var probes atomic.Int32
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probes.Add(1)
+		<-release
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
+	}
+
+	// Race scheduling validates member leases against the group's node
+	// registry, so every challenger must be registered first.
+	group.mu.Lock()
+	for _, proxy := range []C.Proxy{alpha, beta, gamma} {
+		group.ensureProxyNodeLocked(proxy, clock.Now())
+	}
+	alphaLease := group.memberLeaseLocked(alpha.Name(), alpha.identity)
+	group.mu.Unlock()
+	flow := newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	require.NotNil(t, flow)
+	// Production stamps the dialing member's identity and epoch onto the flow
+	// right after newVaneMediaFlow; without them the race sees a stale lease.
+	flow.identity = alphaLease.identity
+	flow.nodeEpoch = alphaLease.epoch
+	sample := vaneThroughputObservation{BitsPerSecond: 500_000, TotalBytes: 4 * 1024 * 1024, Age: 30 * time.Second}
+	flow.mu.Lock()
+	flow.lowWindows = 3
+	flow.mu.Unlock()
+	flow.scheduleRace(sample, 3)
+	require.Eventually(t, func() bool { return probes.Load() == 2 }, 2*time.Second, time.Millisecond,
+		"both challenger probes must be in flight while the flow is still low")
+
+	// The flow recovers (a healthy window resets the streak) while the probes
+	// are still blocked.
+	flow.mu.Lock()
+	flow.lowWindows = 0
+	flow.mu.Unlock()
+	close(release)
+	waitVaneRaceIdle(t, group)
+
+	group.mu.Lock()
+	handoffs := len(group.targetHandoffs)
+	group.mu.Unlock()
+	require.Zero(t, handoffs, "a recovered flow must not get a handoff lease")
+	require.False(t, flow.policyAborted(), "a recovered flow must not be closed")
+
+	rejected := false
+	for _, event := range group.VaneDiagnostics().RecentEvents {
+		if event.Kind == "reconnect-rejected" && event.Reason == "flow-recovered" {
+			rejected = true
+		}
+	}
+	require.True(t, rejected, "the recovery guard must be visible in diagnostics")
+}
+
 func TestVaneRaceSnapshotWithoutChallengers(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)

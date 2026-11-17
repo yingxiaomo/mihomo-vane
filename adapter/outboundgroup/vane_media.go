@@ -453,6 +453,17 @@ func (f *vaneMediaFlow) raceRequest(sample vaneThroughputObservation, lowWindows
 func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindows int) {
 	request := f.raceRequest(sample, lowWindows)
 	scheduled, reason := f.group.scheduleMediaRace(request, func(result vaneRaceResult) {
+		// The race is asynchronous: the flow may have recovered between the
+		// trigger and this callback. A recovered flow must never be closed,
+		// and its would-commit must not pollute shadow statistics.
+		if f.flowRecovered() {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind: "reconnect-rejected", reason: "flow-recovered", target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
+				bps: result.lowerBoundBPS, force: true,
+			})
+			return
+		}
 		if f.group.racing.mode == vaneRacingShadow {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "handoff-would-commit", reason: result.source, target: f.target,
@@ -527,6 +538,15 @@ func (f *vaneMediaFlow) policyAborted() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.aborted
+}
+
+// flowRecovered reports whether the flow's low-window streak has fallen back
+// below the trigger threshold since the race was scheduled. The race is
+// asynchronous, so a recovered flow must never be closed by its result.
+func (f *vaneMediaFlow) flowRecovered() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lowWindows < f.group.media.lowWindows
 }
 
 type vaneMediaHealth struct {
