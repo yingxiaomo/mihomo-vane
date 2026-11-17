@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"net/url"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -403,4 +404,113 @@ func TestVaneTargetPruneLRUAndEvidenceBranches(t *testing.T) {
 	group.mu.Unlock()
 	require.False(t, oldEvidence, "stale-epoch evidence must be pruned")
 	require.False(t, oldFailure, "stale-epoch failure record must be pruned")
+}
+
+// TARGET-BOUND-001 (round3 item 8c): equal-timestamp pruning must evict the
+// same entries on every run — the key text decides, never map iteration order.
+func TestVaneTargetPruneEqualTimestampsIsDeterministic(t *testing.T) {
+	t.Run("pruneTargetStateLocked evidence and failures", func(t *testing.T) {
+		group, clock, alpha, _, _ := newVaneRacingEvidenceGroup(t)
+		now := clock.Now()
+		group.mu.Lock()
+		defer group.mu.Unlock()
+		group.ensureNodeIdentityLocked(alpha.Name(), alpha.identity, now)
+		member := group.memberLeaseLocked(alpha.Name(), alpha.identity)
+		scopes := func(limit int) []string {
+			keys := make([]string, 0, limit)
+			for index := 0; index < limit; index++ {
+				keys = append(keys, fmt.Sprintf("rr%04d.googlevideo.com", index))
+			}
+			return keys
+		}
+		seed := func() {
+			group.targetEvidence = make(map[vaneTargetEvidenceKey]vaneTargetEvidence)
+			group.targetFailures = make(map[vaneTargetFailureKey]vaneTargetFailureState)
+			for index := 0; index < vaneTargetStateLimit+8; index++ {
+				key := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("rr%04d.googlevideo.com", index), port: 443}
+				group.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}] = vaneTargetEvidence{bitsPerSecond: float64(index), observedAt: now}
+				group.targetFailures[vaneTargetFailureKey{target: key, member: member}] = vaneTargetFailureState{streak: 1, lastFailureAt: now}
+			}
+		}
+		var referenceEvidence, referenceFailures []string
+		for run := 0; run < 20; run++ {
+			seed()
+			group.pruneTargetStateLocked(now)
+			evidence := make([]string, 0, vaneTargetStateLimit)
+			for key := range group.targetEvidence {
+				evidence = append(evidence, key.target.targetScope)
+			}
+			failures := make([]string, 0, vaneTargetStateLimit)
+			for key := range group.targetFailures {
+				failures = append(failures, key.target.targetScope)
+			}
+			sort.Strings(evidence)
+			sort.Strings(failures)
+			require.Len(t, evidence, vaneTargetStateLimit)
+			require.Len(t, failures, vaneTargetStateLimit)
+			if run == 0 {
+				referenceEvidence, referenceFailures = evidence, failures
+				continue
+			}
+			require.Equal(t, referenceEvidence, evidence, "evidence eviction must be identical on every run")
+			require.Equal(t, referenceFailures, failures, "failure eviction must be identical on every run")
+		}
+		// The tie-break evicts exactly the lexicographically smallest keys.
+		evicted := scopes(8)
+		for _, scope := range evicted {
+			require.NotContains(t, referenceEvidence, scope, "the smallest key must be evicted first")
+			require.NotContains(t, referenceFailures, scope)
+		}
+	})
+
+	t.Run("trimTargetMap tie-break", func(t *testing.T) {
+		now := time.Now()
+		var reference []string
+		for run := 0; run < 50; run++ {
+			values := make(map[vaneTargetKey]int, vaneTargetStateLimit+8)
+			for index := 0; index < vaneTargetStateLimit+8; index++ {
+				key := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("rr%04d.googlevideo.com", index), port: 443}
+				values[key] = index
+			}
+			trimTargetMap(values, vaneTargetStateLimit, func(int) time.Time { return now })
+			require.Len(t, values, vaneTargetStateLimit)
+			survivors := make([]string, 0, vaneTargetStateLimit)
+			for key := range values {
+				survivors = append(survivors, key.targetScope)
+			}
+			sort.Strings(survivors)
+			if run == 0 {
+				reference = survivors
+				continue
+			}
+			require.Equal(t, reference, survivors, "trim eviction must be identical on every run")
+		}
+	})
+
+	t.Run("pruneCapabilitiesLocked tie-break", func(t *testing.T) {
+		group, clock, _, _, _ := newVaneRacingEvidenceGroup(t)
+		now := clock.Now()
+		var reference []string
+		for run := 0; run < 20; run++ {
+			group.racingRuntime.mu.Lock()
+			group.racingRuntime.capabilities = make(map[vaneMemberLease]vaneCapabilityRecord, vaneTargetStateLimit+8)
+			for index := 0; index < vaneTargetStateLimit+8; index++ {
+				member := vaneMemberLease{name: fmt.Sprintf("node%04d", index), identity: fmt.Sprintf("identity-node%04d", index), epoch: 1}
+				group.racingRuntime.capabilities[member] = vaneCapabilityRecord{member: member, lowerBoundBPS: float64(index), observedAt: now}
+			}
+			group.pruneCapabilitiesLocked(now)
+			survivors := make([]string, 0, vaneTargetStateLimit)
+			for member := range group.racingRuntime.capabilities {
+				survivors = append(survivors, member.name)
+			}
+			group.racingRuntime.mu.Unlock()
+			sort.Strings(survivors)
+			require.Len(t, survivors, vaneTargetStateLimit)
+			if run == 0 {
+				reference = survivors
+				continue
+			}
+			require.Equal(t, reference, survivors, "capability eviction must be identical on every run")
+		}
+	})
 }

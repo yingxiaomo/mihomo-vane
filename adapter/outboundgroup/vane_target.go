@@ -1,6 +1,7 @@
 package outboundgroup
 
 import (
+	"fmt"
 	"sort"
 	"time"
 
@@ -476,28 +477,40 @@ func (a *Vane) pruneTargetStateLocked(now time.Time) {
 	trimTargetMap(a.targetPreferences, vaneTargetStateLimit, func(value vaneTargetPreference) time.Time { return value.updatedAt })
 	if len(a.targetEvidence) > vaneTargetStateLimit {
 		type entry struct {
-			key  vaneTargetEvidenceKey
-			time time.Time
+			key     vaneTargetEvidenceKey
+			time    time.Time
+			keyText string
 		}
 		entries := make([]entry, 0, len(a.targetEvidence))
 		for key, value := range a.targetEvidence {
-			entries = append(entries, entry{key: key, time: value.observedAt})
+			entries = append(entries, entry{key: key, time: value.observedAt, keyText: fmt.Sprint(key)})
 		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].time.Before(entries[j].time) })
+		sort.Slice(entries, func(i, j int) bool {
+			if !entries[i].time.Equal(entries[j].time) {
+				return entries[i].time.Before(entries[j].time)
+			}
+			return entries[i].keyText < entries[j].keyText
+		})
 		for i := 0; i < len(entries)-vaneTargetStateLimit; i++ {
 			delete(a.targetEvidence, entries[i].key)
 		}
 	}
 	if len(a.targetFailures) > vaneTargetStateLimit {
 		type entry struct {
-			key  vaneTargetFailureKey
-			time time.Time
+			key     vaneTargetFailureKey
+			time    time.Time
+			keyText string
 		}
 		entries := make([]entry, 0, len(a.targetFailures))
 		for key, value := range a.targetFailures {
-			entries = append(entries, entry{key: key, time: value.lastFailureAt})
+			entries = append(entries, entry{key: key, time: value.lastFailureAt, keyText: fmt.Sprint(key)})
 		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].time.Before(entries[j].time) })
+		sort.Slice(entries, func(i, j int) bool {
+			if !entries[i].time.Equal(entries[j].time) {
+				return entries[i].time.Before(entries[j].time)
+			}
+			return entries[i].keyText < entries[j].keyText
+		})
 		for i := 0; i < len(entries)-vaneTargetStateLimit; i++ {
 			delete(a.targetFailures, entries[i].key)
 		}
@@ -509,14 +522,22 @@ func trimTargetMap[K comparable, V any](values map[K]V, limit int, timestamp fun
 		return
 	}
 	type entry struct {
-		key  K
-		time time.Time
+		key     K
+		time    time.Time
+		keyText string
 	}
 	entries := make([]entry, 0, len(values))
 	for key, value := range values {
-		entries = append(entries, entry{key: key, time: timestamp(value)})
+		entries = append(entries, entry{key: key, time: timestamp(value), keyText: fmt.Sprint(key)})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].time.Before(entries[j].time) })
+	// Equal timestamps must not leave the outcome to map iteration order:
+	// the key text decides deterministically.
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].time.Equal(entries[j].time) {
+			return entries[i].time.Before(entries[j].time)
+		}
+		return entries[i].keyText < entries[j].keyText
+	})
 	for i := 0; i < len(entries)-limit; i++ {
 		delete(values, entries[i].key)
 	}

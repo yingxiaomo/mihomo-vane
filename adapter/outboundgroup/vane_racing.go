@@ -594,14 +594,20 @@ func (a *Vane) pruneCapabilitiesLocked(now time.Time) {
 		return
 	}
 	type entry struct {
-		key  vaneMemberLease
-		time time.Time
+		key     vaneMemberLease
+		time    time.Time
+		keyText string
 	}
 	entries := make([]entry, 0, len(a.racingRuntime.capabilities))
 	for key, value := range a.racingRuntime.capabilities {
-		entries = append(entries, entry{key: key, time: value.observedAt})
+		entries = append(entries, entry{key: key, time: value.observedAt, keyText: fmt.Sprint(key)})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].time.Before(entries[j].time) })
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].time.Equal(entries[j].time) {
+			return entries[i].time.Before(entries[j].time)
+		}
+		return entries[i].keyText < entries[j].keyText
+	})
 	for i := 0; i < len(entries)-vaneTargetStateLimit; i++ {
 		delete(a.racingRuntime.capabilities, entries[i].key)
 	}
