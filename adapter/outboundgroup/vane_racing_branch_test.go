@@ -13,14 +13,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// RACE-ATOMIC-001: rejected commits leave no lease/cooldown/budget residue.
 // Vane racing/target acceptance coverage map (round3 guide item 6). Every
 // racing-related test cites the acceptance IDs it pins; this table is the
 // index. IDs come from the Phase B active-racing plan:
 //
 //	RACE-CONFIG-001    old configs gain no new behavior
 //	RACE-PROBE-001     probe byte/time boundaries repeat, real bytes are charged
-//	RACE-MODE-001      shadow never changes baseline selection or policy state
+//	RACE-MODE-001     shadow never changes baseline selection or policy state
 //	RACE-ENGINE-001    first qualified challenger wins, peers cancel
 //	RACE-IDENTITY-001  same-name replacement inherits nothing from probe results
 //	RACE-BUDGET-001    concurrent and byte budgets never exceed bounds
@@ -39,6 +38,8 @@ import (
 //	TARGET-COOLDOWN-001 30s/1m/2m/4m/8m/15m progression is exact
 //	TARGET-COOLDOWN-002 expiry keeps the streak, real success resets it
 //	TARGET-COOLDOWN-003 slow and hard-failure states never contaminate each other
+
+// RACE-ATOMIC-001: rejected commits leave no lease/cooldown/budget residue.
 func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 	cases := []struct {
 		name      string
