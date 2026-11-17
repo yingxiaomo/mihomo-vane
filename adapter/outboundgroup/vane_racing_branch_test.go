@@ -603,6 +603,107 @@ func TestVaneRaceSnapshotBlockedCandidates(t *testing.T) {
 	})
 }
 
+// RACE-ENGINE-001 (round3 item 8a): the candidate snapshot drops candidates
+// that would waste probe budget — fresh real-target evidence below the race
+// bar, no evidence plus no health-check delay, and dial-cooldown members.
+func TestVaneRaceSnapshotExcludesLowValueCandidates(t *testing.T) {
+	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+
+	t.Run("fresh real evidence below required skips probing", func(t *testing.T) {
+		group, _, _, beta, _ := newVaneRacingEvidenceGroup(t)
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		group.mu.Lock()
+		betaLease := group.memberLeaseLocked(beta.Name(), beta.identity)
+		group.mu.Unlock()
+		group.recordTargetEvidence(request.targetKey, betaLease, 1_000)
+
+		candidates, reason := group.snapshotRaceCandidates(request)
+		require.Empty(t, reason)
+		require.Len(t, candidates, 1, "fresh evidence below the bar must exclude beta")
+		require.Equal(t, "gamma", candidates[0].member.name)
+	})
+
+	t.Run("no evidence and zero delay is not a fast node", func(t *testing.T) {
+		group, _, _, beta, _ := newVaneRacingEvidenceGroup(t)
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		beta.delay = 0
+
+		candidates, reason := group.snapshotRaceCandidates(request)
+		require.Empty(t, reason)
+		require.Len(t, candidates, 1, "an unknown node with no health-check delay must not be probed")
+		require.Equal(t, "gamma", candidates[0].member.name)
+	})
+
+	t.Run("dial cooldown skips the candidate", func(t *testing.T) {
+		group, clock, _, beta, _ := newVaneRacingEvidenceGroup(t)
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		group.mu.Lock()
+		group.cooldowns[vaneCooldownKey{transport: vaneTransportTCP, target: request.target, port: request.port, candidate: beta.Name(), identity: beta.identity}] = clock.Now().Add(time.Hour)
+		group.mu.Unlock()
+
+		candidates, reason := group.snapshotRaceCandidates(request)
+		require.Empty(t, reason)
+		require.Len(t, candidates, 1, "a dial-cooldown candidate must not consume probe budget")
+		require.Equal(t, "gamma", candidates[0].member.name)
+	})
+
+	t.Run("all candidates excluded returns no-challenger without probing", func(t *testing.T) {
+		group, _, _, beta, gamma := newVaneRacingEvidenceGroup(t)
+		var probes atomic.Int32
+		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+			probes.Add(1)
+			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
+		}
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		leases := make([]vaneMemberLease, 0, 2)
+		group.mu.Lock()
+		for _, proxy := range []*vaneTestProxy{beta, gamma} {
+			leases = append(leases, group.memberLeaseLocked(proxy.Name(), proxy.identity))
+		}
+		group.mu.Unlock()
+		for _, lease := range leases {
+			group.recordTargetEvidence(request.targetKey, lease, 1_000)
+		}
+
+		candidates, reason := group.snapshotRaceCandidates(request)
+		require.Empty(t, candidates)
+		require.Equal(t, "no-challenger", reason)
+
+		scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("no race may run without candidates") })
+		require.True(t, scheduled, "scheduling succeeds and the race ends without a winner")
+		waitVaneRaceIdle(t, group)
+		require.Zero(t, probes.Load(), "an empty candidate pool must not start probes")
+		require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
+	})
+
+	t.Run("the remaining candidate still races normally", func(t *testing.T) {
+		group, _, _, beta, _ := newVaneRacingEvidenceGroup(t)
+		var probes atomic.Int32
+		release := make(chan struct{})
+		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+			probes.Add(1)
+			<-release
+			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
+		}
+		request := newVaneRaceRequestForTest(t, group, metadata)
+		group.mu.Lock()
+		betaLease := group.memberLeaseLocked(beta.Name(), beta.identity)
+		group.mu.Unlock()
+		group.recordTargetEvidence(request.targetKey, betaLease, 1_000)
+
+		resultCh := make(chan vaneRaceResult, 1)
+		scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+		require.True(t, scheduled, reason)
+		require.Eventually(t, func() bool { return probes.Load() == 1 }, 2*time.Second, time.Millisecond,
+			"only the surviving candidate may be probed")
+		close(release)
+		result := <-resultCh
+		require.Equal(t, "gamma", result.winner.name, "the surviving candidate must win the race")
+		require.Equal(t, "probe", result.source)
+		waitVaneRaceIdle(t, group)
+	})
+}
+
 // RACE-ENGINE-001: candidate ordering tie-breaks are deterministic.
 func TestVaneRaceCandidateOrderingTieBreaks(t *testing.T) {
 	group, clock, _, beta, gamma := newVaneRacingEvidenceGroup(t)

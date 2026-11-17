@@ -97,6 +97,7 @@ type vaneRaceCandidate struct {
 	capFresh      bool
 	scoreMicros   int64
 	blockUntil    time.Time
+	delayZero     bool
 }
 
 type vaneProbeResult struct {
@@ -428,10 +429,11 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 	type healthyProxy struct {
 		proxy C.Proxy
 		alive bool
+		delay uint16
 	}
 	healthy := make([]healthyProxy, 0, len(proxies))
 	for _, proxy := range proxies {
-		healthy = append(healthy, healthyProxy{proxy: proxy, alive: proxy.AliveForTestUrl(a.testURL)})
+		healthy = append(healthy, healthyProxy{proxy: proxy, alive: proxy.AliveForTestUrl(a.testURL), delay: proxy.LastDelayForTestUrl(a.testURL)})
 	}
 	now := a.clock.Now()
 	candidates := make([]vaneRaceCandidate, 0, len(proxies))
@@ -459,6 +461,18 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 			snapshot = state.snapshot(vaneTransportTCP, now)
 		}
 		targetBPS, targetFresh := a.targetEvidenceLocked(request.targetKey, member, now)
+		// Round3 item 8a: fresh real-target evidence below the race bar proves
+		// the candidate slow for this target — probing its generic capability
+		// would only spend budget on a loser.
+		if targetFresh && targetBPS < request.requiredBPS {
+			continue
+		}
+		// Round3 item 8a: a dial-cooldown candidate is rejected at commit time
+		// anyway — do not pay a probe for it.
+		dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: request.target, port: request.port, candidate: member.name, identity: member.identity}
+		if a.cooldownUntilLocked(dialKey, now, false).After(now) {
+			continue
+		}
 		blockUntil, _ := a.targetMemberBlockedLocked(request.targetKey, member, now)
 		legacyKey := vaneMediaCandidateKey{vaneMediaTargetKey: request.mediaKey, candidate: member.name, identity: member.identity}
 		if until := a.mediaSlowCooldowns[legacyKey]; until.After(blockUntil) {
@@ -466,7 +480,7 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 		}
 		candidates = append(candidates, vaneRaceCandidate{
 			proxy: proxy, member: member, targetBPS: targetBPS, targetFresh: targetFresh,
-			scoreMicros: scoreVaneMetrics(vaneSceneMedia, snapshot), blockUntil: blockUntil,
+			scoreMicros: scoreVaneMetrics(vaneSceneMedia, snapshot), blockUntil: blockUntil, delayZero: item.delay == 0,
 		})
 	}
 	a.learning.mu.Unlock()
@@ -484,6 +498,21 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 		}
 	}
 	a.racingRuntime.mu.Unlock()
+
+	// Round3 item 8a: a candidate with no evidence at all and no successful
+	// health check is not known to be fast — probing an unknown spends budget
+	// without buying information.
+	pool := candidates[:0]
+	for _, candidate := range candidates {
+		if !candidate.targetFresh && !candidate.capFresh && candidate.delayZero {
+			continue
+		}
+		pool = append(pool, candidate)
+	}
+	candidates = pool
+	if len(candidates) == 0 {
+		return nil, "no-challenger"
+	}
 
 	available := candidates[:0]
 	blocked := make([]vaneRaceCandidate, 0, len(candidates))
