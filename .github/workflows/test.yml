@@ -20,7 +20,6 @@ jobs:
         os:
           - 'ubuntu-latest' # amd64 linux
           - 'windows-latest' # amd64 windows
-          - 'macos-latest' # arm64 macos
           - 'ubuntu-24.04-arm' # arm64 linux
           - 'windows-11-arm' # arm64 windows
           - 'macos-26-intel' # amd64 macos
@@ -28,11 +27,9 @@ jobs:
           - '1.26'
           - '1.25'
           - '1.24'
-        exclude:
-          # macos-latest 1.24/1.26 连续三轮被 runner 中断（系统性基础设施问题），
-          # macOS 覆盖由 macos-26-intel 全版本 + macos-latest 1.25 承担
-          - { os: 'macos-latest', go-version: '1.24' }
-          - { os: 'macos-latest', go-version: '1.26' }
+        # macos-latest (arm64) is intentionally absent: every row was canceled by
+        # GitHub without a runner for four consecutive rounds. macOS coverage is
+        # carried by macos-26-intel across all supported Go versions.
       fail-fast: false
     runs-on: ${{ matrix.os }}
     defaults:
