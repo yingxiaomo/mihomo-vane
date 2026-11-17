@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -325,9 +326,9 @@ func TestVaneRacingCloseIsIdempotent(t *testing.T) {
 
 func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
-	var probes int
+	var probes atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
-		probes++
+		probes.Add(1)
 		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
@@ -337,7 +338,7 @@ func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 	require.True(t, scheduled, reason)
 	waitVaneRaceIdle(t, group)
 	require.False(t, called)
-	require.Zero(t, probes)
+	require.Zero(t, probes.Load())
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceStaleGeneration)
 
 	// A stale race must not suppress the next race for this target: the very
@@ -350,9 +351,9 @@ func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 
 func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
 	group, _, _, _, _ := newVaneRacingEvidenceGroup(t)
-	var probes int
+	var probes atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
-		probes++
+		probes.Add(1)
 		return vaneProbeResult{reason: "tls-error"}
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
@@ -361,7 +362,7 @@ func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
 	})
 	require.True(t, scheduled, reason)
 	waitVaneRaceIdle(t, group)
-	require.Positive(t, probes)
+	require.Positive(t, probes.Load())
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
 
 	// A genuine no-winner result still installs the suppression window.
