@@ -818,6 +818,21 @@ func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoi
 				return vaneProbeResult{reason: "canceled", bytes: total, duration: duration}
 			}
 			if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+				// A deadline that fires after bytes arrived already measured what
+				// the node delivered: those bytes are a proven lower bound, using
+				// the same formula as a cap-hit. Zero bytes stays invalid because
+				// nothing was measured. The duration guard matters here: when the
+				// header consumed most of the budget the read loop can end almost
+				// immediately, and a tiny duration would inflate the bound.
+				if total > 0 {
+					if duration <= 0 {
+						duration = time.Nanosecond
+					}
+					return vaneProbeResult{
+						valid: true, reason: "read-timeout", bytes: total, duration: duration,
+						lowerBoundBPS: 8 * float64(total) / duration.Seconds(),
+					}
+				}
 				return vaneProbeResult{reason: "read-timeout", bytes: total, duration: duration}
 			}
 			if errors.Is(readErr, io.EOF) {

@@ -151,6 +151,119 @@ func TestVaneRacingProbe(t *testing.T) {
 	require.Equal(t, int32(5), proxy.dials.Load(), "each probe must dial the selected challenger directly")
 }
 
+// PROBE-PARTIAL-001: bytes already read when the probe deadline fires are a
+// proven lower bound, while zero bytes, early-eof and read-error stay invalid.
+func TestVaneRacingProbePartialReadIsLowerBound(t *testing.T) {
+	payload := make([]byte, 128*1024)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/stall-after-bytes":
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write(payload[:64*1024])
+			if flusher, ok := writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-request.Context().Done()
+		case "/stall-before-bytes":
+			writer.WriteHeader(http.StatusOK)
+			if flusher, ok := writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-request.Context().Done()
+		case "/short-flush":
+			// Content-Length promises more than is written, then the handler
+			// returns: the client sees a read error, not a clean EOF.
+			writer.Header().Set("Content-Length", fmt.Sprint(1<<20))
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write(payload[:32*1024])
+			if flusher, ok := writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+	}))
+	server.EnableHTTP2 = false
+	server.StartTLS()
+	defer server.Close()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+	proxy := newVaneNetworkTestProxy("probe-partial")
+	parse := func(path string) *url.URL {
+		endpoint, err := url.Parse(server.URL + path)
+		require.NoError(t, err)
+		return endpoint
+	}
+
+	partialCtx, partialCancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer partialCancel()
+	result := probeVaneCapabilityWithTLSConfig(partialCtx, proxy, parse("/stall-after-bytes"), 4<<20, &tls.Config{RootCAs: pool})
+	require.True(t, result.valid, "a deadline after bytes arrived must still measure the node")
+	require.Equal(t, "read-timeout", result.reason)
+	require.False(t, result.capHit)
+	require.Equal(t, int64(64*1024), result.bytes)
+	require.Positive(t, result.lowerBoundBPS)
+	require.InDelta(t, 8*float64(result.bytes)/result.duration.Seconds(), result.lowerBoundBPS, 1,
+		"the lower bound must use the cap-hit formula on the bytes actually read")
+
+	zeroCtx, zeroCancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer zeroCancel()
+	result = probeVaneCapabilityWithTLSConfig(zeroCtx, proxy, parse("/stall-before-bytes"), 4<<20, &tls.Config{RootCAs: pool})
+	require.False(t, result.valid, "no bytes means nothing was measured")
+	require.Equal(t, "read-timeout", result.reason)
+	require.Zero(t, result.bytes)
+
+	result = probeVaneCapabilityWithTLSConfig(t.Context(), proxy, parse("/short-flush"), 4<<20, &tls.Config{RootCAs: pool})
+	require.False(t, result.valid, "a broken connection stays invalid even with bytes")
+	require.Equal(t, "read-error", result.reason)
+	require.Equal(t, int64(32*1024), result.bytes)
+}
+
+// PROBE-PARTIAL-001 + RACE-ENGINE-001: a partial (read-timeout) measurement is
+// a real lower bound, so it can win when it clears the demand, and it still
+// loses when it does not.
+func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
+	t.Run("partial bound above demand wins", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		beta := newVaneTestProxy("beta", true, true)
+		gamma := newVaneTestProxy("gamma", true, true)
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneRacingForTest(t, group, vaneRacingOn)
+		group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+			if proxy.Name() == "beta" {
+				return vaneProbeResult{valid: true, reason: "read-timeout", bytes: 256 * 1024, duration: 500 * time.Millisecond, lowerBoundBPS: 4_000_000}
+			}
+			return vaneProbeResult{reason: "read-timeout", bytes: 0, duration: time.Second}
+		}
+		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr-partial.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+		resultCh := make(chan vaneRaceResult, 1)
+		scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+		require.True(t, scheduled, reason)
+		result := <-resultCh
+		require.Equal(t, "beta", result.winner.name, "a partial bound above requiredBPS must win")
+	})
+
+	t.Run("partial bound below demand loses", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		beta := newVaneTestProxy("beta", true, true)
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneRacingForTest(t, group, vaneRacingOn)
+		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+			return vaneProbeResult{valid: true, reason: "read-timeout", bytes: 64 * 1024, duration: 400 * time.Millisecond, lowerBoundBPS: 1_500_000}
+		}
+		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr-partial-low.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {
+			t.Error("a bound below requiredBPS must not produce a winner")
+		})
+		require.True(t, scheduled, reason)
+		waitVaneRaceIdle(t, group)
+		require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
+	})
+}
+
 func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) vaneRaceRequest {
 	t.Helper()
 	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
