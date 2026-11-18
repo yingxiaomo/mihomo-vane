@@ -6,6 +6,9 @@ import (
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
+	P "github.com/metacubex/mihomo/constant/provider"
+	RP "github.com/metacubex/mihomo/rules/provider"
+	"github.com/metacubex/mihomo/tunnel"
 
 	"github.com/stretchr/testify/require"
 )
@@ -317,4 +320,57 @@ func candidateNames(ranked []vaneCandidateScore) []string {
 		names[i] = candidate.name
 	}
 	return names
+}
+
+// RULESET-SCENE-001: scene rules accept RULE-SET. The provider name is stored
+// verbatim at parse time and resolved against the tunnel registry on every
+// match — registration, updates and removals are all reflected, an
+// unregistered provider is "no match", never an error.
+func TestVaneSceneRuleSet(t *testing.T) {
+	rule, err := parseVaneSceneRule("RULE-SET,streaming,media")
+	require.NoError(t, err)
+	require.Equal(t, vaneRuleRuleSet, rule.kind)
+	require.Equal(t, "streaming", rule.value)
+	_, err = parseVaneSceneRule("RULE-SET,,media")
+	require.Error(t, err, "empty payload is rejected by the shared check")
+
+	metadata := &C.Metadata{Host: "media.streaming-provider.test"}
+	outside := &C.Metadata{Host: "example.test"}
+
+	t.Run("registered provider matches", func(t *testing.T) {
+		oldProviders := tunnel.RuleProviders()
+		oldRules := tunnel.Rules()
+		provider := RP.NewRuleSetProvider("streaming", P.Domain, P.YamlRule, 0, nil,
+			[]string{"+.streaming-provider.test"}, nil, nil)
+		tunnel.UpdateRules(nil, nil, map[string]P.RuleProvider{"streaming": provider})
+		defer tunnel.UpdateRules(oldRules, nil, oldProviders)
+
+		require.Equal(t, vaneSceneMedia, classifyVaneScene(metadata, []vaneSceneRule{rule}),
+			"a host inside the provider is classified")
+		require.Equal(t, vaneSceneDefault, classifyVaneScene(outside, []vaneSceneRule{rule}),
+			"a host outside the provider is not classified")
+		require.Equal(t, vaneSceneDefault, classifyVaneScene(metadata, []vaneSceneRule{
+			{kind: vaneRuleRuleSet, value: "missing", scene: vaneSceneMedia},
+		}), "an unregistered provider never matches and never errors")
+	})
+
+	t.Run("first hit wins when mixed with DOMAIN rules", func(t *testing.T) {
+		oldProviders := tunnel.RuleProviders()
+		oldRules := tunnel.Rules()
+		provider := RP.NewRuleSetProvider("streaming", P.Domain, P.YamlRule, 0, nil,
+			[]string{"+.streaming-provider.test"}, nil, nil)
+		tunnel.UpdateRules(nil, nil, map[string]P.RuleProvider{"streaming": provider})
+		defer tunnel.UpdateRules(oldRules, nil, oldProviders)
+
+		domainFirst := []vaneSceneRule{
+			{kind: vaneRuleDomain, value: "media.streaming-provider.test", scene: vaneSceneInteractive},
+			rule,
+		}
+		require.Equal(t, vaneSceneInteractive, classifyVaneScene(metadata, domainFirst))
+		rulesetFirst := []vaneSceneRule{
+			rule,
+			{kind: vaneRuleDomain, value: "media.streaming-provider.test", scene: vaneSceneInteractive},
+		}
+		require.Equal(t, vaneSceneMedia, classifyVaneScene(metadata, rulesetFirst))
+	})
 }

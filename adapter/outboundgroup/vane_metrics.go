@@ -9,6 +9,7 @@ import (
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/tunnel"
 )
 
 // vaneScene is deliberately small and closed: unknown values use the
@@ -84,6 +85,7 @@ const (
 	vaneRuleProcess
 	vaneRuleProcessPath
 	vaneRuleDSCP
+	vaneRuleRuleSet
 )
 
 type vaneUintRange struct {
@@ -164,6 +166,12 @@ func parseVaneSceneRule(text string) (vaneSceneRule, error) {
 		default:
 			return vaneSceneRule{}, fmt.Errorf("unsupported network %q", payload)
 		}
+	case "RULE-SET":
+		// The provider name is stored verbatim and resolved lazily at match
+		// time: rule providers register asynchronously, so an unregistered
+		// name is "no match", never a construction error.
+		rule.kind = vaneRuleRuleSet
+		rule.value = payload
 	case "DST-PORT":
 		rule.kind = vaneRuleDstPort
 		ranges, err := parseVaneUintRanges(payload, math.MaxUint16)
@@ -287,6 +295,15 @@ func (r vaneSceneRule) matches(metadata *C.Metadata) bool {
 		// Metadata does not carry a separate DSCP-presence bit. Treat the
 		// zero value as unknown so an omitted field cannot satisfy a rule.
 		return metadata.DSCP != 0 && vaneRangesContain(r.ranges, uint64(metadata.DSCP))
+	case vaneRuleRuleSet:
+		// Looked up from the tunnel registry on every match, mirroring the
+		// main engine's RuleSet.getProvider: registration, updates and
+		// removals are all reflected without rebuilding the group.
+		provider, ok := tunnel.RuleProviders()[r.value]
+		if !ok {
+			return false
+		}
+		return provider.Match(metadata, C.RuleMatchHelper{})
 	default:
 		return false
 	}
