@@ -85,12 +85,25 @@ type vaneTargetFailureState struct {
 
 // B2 loss EMA weights early evidence more heavily and stabilizes the estimate
 // as samples accumulate. The stall signature window and minimum attempt count
-// are internal starting values — the shadow data decides the final thresholds.
+// are internal starting values. The Step 3 thresholds are deliberately fixed
+// instead of tuned from shadow samples: the network is not stationary, so a
+// number fitted to last week's samples is pseudo-precision. The real switching
+// decision comes from live measurement (racing probes, target traffic
+// evidence, the decaying loss EMA); these thresholds are only guard rails.
 const (
 	vaneB2LossAlphaBase    = 0.4
 	vaneB2LossAlphaDecay   = 0.05
 	vaneB2StallMinAge      = 10 * time.Second
 	vaneB2StallMinAttempts = 5
+	// Step 3 selection guard rails (B2-STEP3-001 / B2-STEP3-002): a healthy
+	// path retransmits well under 1%, so 5% is already visibly bad for media,
+	// and stalling one time in five is frequent enough to step aside.
+	vaneLossDegradedThreshold  = 0.05
+	vaneStallFrequentThreshold = 0.20
+	// vaneStallCooldown is an independent cooldown source. It holds the same
+	// value as vaneRacingNoWinnerCooldown but means something different, so it
+	// is deliberately not reused from there.
+	vaneStallCooldown = 30 * time.Second
 )
 
 // String renders the key for learning-state maps (round6 item 3). The format
@@ -250,6 +263,21 @@ func (s *vaneTargetFailureState) b2StallRate() float64 {
 		return 1
 	}
 	return rate
+}
+
+// lossDegraded reports whether the smoothed retransmission ratio is bad enough
+// to step away from this challenger. No extra sample floor: the EMA is already
+// smoothed, and excluding the challenger is fail-safe — the flow simply stays
+// where it is instead of moving to something worse.
+func (s *vaneTargetFailureState) lossDegraded() bool {
+	return s.lossSamples > 0 && s.lossEMA > vaneLossDegradedThreshold
+}
+
+// stallFrequent reports whether this challenger stalls often enough to be
+// cooled down for a while. b2StallRate already applies the minimum-attempt
+// floor, so no second gate is needed here.
+func (s *vaneTargetFailureState) stallFrequent() bool {
+	return s.b2StallRate() > vaneStallFrequentThreshold
 }
 
 // recordB2MediaStall counts one media-flow settlement (round5 B2 item 3):

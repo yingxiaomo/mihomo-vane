@@ -781,6 +781,13 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		if failure.attemptCount > 0 {
 			snapshot.Runtime.B2StallTargets++
 		}
+		// Step 3 guard-rail tallies: pure reads of the same records.
+		if failure.lossDegraded() {
+			snapshot.Runtime.B2LossDegradedTargets++
+		}
+		if failure.stallFrequent() {
+			snapshot.Runtime.B2StallFrequentTargets++
+		}
 	}
 	// B2 item 4: copy the live per-node flow counts — never expose the
 	// internal map's reference. An empty counter set keeps the zero Runtime

@@ -478,6 +478,23 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 		if until := a.mediaSlowCooldowns[legacyKey]; until.After(blockUntil) {
 			blockUntil = until
 		}
+		// B2 Step 3: the loss and stall records stay observations — they only
+		// filter or cool a challenger here and never write back to the failure
+		// streak. Same lock (a.mu) and same read style as
+		// targetMemberBlockedLocked.
+		if state, ok := a.targetFailures[vaneTargetFailureKey{target: request.targetKey, member: member}]; ok {
+			if state.lossDegraded() {
+				continue
+			}
+			// A frequent staller is not excluded: it is parked on its own
+			// cooldown so an idle challenger wins the slot, while the
+			// earliest-expiry fallback still recovers it when everyone cools.
+			if state.stallFrequent() {
+				if until := now.Add(vaneStallCooldown); until.After(blockUntil) {
+					blockUntil = until
+				}
+			}
+		}
 		candidates = append(candidates, vaneRaceCandidate{
 			proxy: proxy, member: member, targetBPS: targetBPS, targetFresh: targetFresh,
 			scoreMicros: scoreVaneMetrics(vaneSceneMedia, snapshot), blockUntil: blockUntil, delayZero: item.delay == 0,

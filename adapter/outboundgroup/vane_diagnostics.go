@@ -151,8 +151,13 @@ type VaneDiagnosticRuntime struct {
 	ActiveTargetCooldowns    int                              `json:"activeTargetCooldowns"`
 	B2LossTargets            int                              `json:"b2LossTargets"`
 	B2StallTargets           int                              `json:"b2StallTargets"`
-	B2ActiveMediaFlows       map[string]int                   `json:"b2ActiveMediaFlows,omitempty"`
-	P5Nodes                  map[string]VaneDiagnosticP5Node  `json:"p5Nodes,omitempty"`
+	// Step 3 guard-rail tallies: how many target/member pairs actually cross
+	// the loss and stall lines. All pairs over the line means the line is
+	// drawn wrong, which the two raw tallies above cannot answer.
+	B2LossDegradedTargets  int                             `json:"b2LossDegradedTargets"`
+	B2StallFrequentTargets int                             `json:"b2StallFrequentTargets"`
+	B2ActiveMediaFlows     map[string]int                  `json:"b2ActiveMediaFlows,omitempty"`
+	P5Nodes                map[string]VaneDiagnosticP5Node `json:"p5Nodes,omitempty"`
 }
 
 // VaneDiagnosticP5Node is the passive per-node throughput profile (round6
