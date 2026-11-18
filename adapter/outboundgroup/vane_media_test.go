@@ -11,6 +11,9 @@ import (
 
 	"github.com/metacubex/mihomo/common/buf"
 	C "github.com/metacubex/mihomo/constant"
+	P "github.com/metacubex/mihomo/constant/provider"
+	RP "github.com/metacubex/mihomo/rules/provider"
+	"github.com/metacubex/mihomo/tunnel"
 	SBufio "github.com/metacubex/sing/common/bufio"
 
 	"github.com/stretchr/testify/require"
@@ -673,4 +676,62 @@ func TestVaneMediaHintExpiresAndOnlyAffectsAllowedDomain(t *testing.T) {
 	_, exists := group.mediaHints[key]
 	group.mu.Unlock()
 	require.False(t, exists)
+}
+
+// RULESET-GATE-001: media-reconnect-domains accepts RULE-SET entries. The
+// entry parser is three-state (rule-set / plain domain / error at
+// construction), the gate checks rule sets after plain domains, and a hit
+// scopes by the provider name.
+func TestVaneMediaRuleSetGate(t *testing.T) {
+	t.Run("entry parser is three-state", func(t *testing.T) {
+		name, isRuleSet, err := parseVaneMediaRuleSetEntry("RULE-SET,streaming")
+		require.NoError(t, err)
+		require.True(t, isRuleSet)
+		require.Equal(t, "streaming", name)
+		name, isRuleSet, err = parseVaneMediaRuleSetEntry("rule-set,streaming")
+		require.NoError(t, err, "the prefix is case-insensitive")
+		require.True(t, isRuleSet)
+		require.Equal(t, "streaming", name, "the provider name is kept verbatim")
+		_, isRuleSet, err = parseVaneMediaRuleSetEntry("example.com")
+		require.NoError(t, err)
+		require.False(t, isRuleSet)
+		for _, bad := range []string{"RULE-SET,", "RULE-SET,a,b", "RULE-SET, ,"} {
+			_, _, err = parseVaneMediaRuleSetEntry(bad)
+			require.Error(t, err, "%q must fail at construction", bad)
+		}
+	})
+
+	t.Run("config splits domains and rule sets", func(t *testing.T) {
+		config, err := newVaneMediaConfig(VaneOption{
+			MediaReconnectDomains: []string{"example.com", "RULE-SET,streaming"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, []string{"example.com"}, config.domains)
+		require.Equal(t, []string{"streaming"}, config.ruleSets)
+		_, err = newVaneMediaConfig(VaneOption{MediaReconnectDomains: []string{"RULE-SET,"}})
+		require.Error(t, err)
+	})
+
+	t.Run("gate scopes by provider name after plain domains", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		group.media.domains = []string{"plain.example"}
+		group.media.ruleSets = []string{"streaming", "missing"}
+
+		oldProviders := tunnel.RuleProviders()
+		oldRules := tunnel.Rules()
+		provider := RP.NewRuleSetProvider("streaming", P.Domain, P.YamlRule, 0, nil,
+			[]string{"+.streaming-provider.test"}, nil, nil)
+		tunnel.UpdateRules(nil, nil, map[string]P.RuleProvider{"streaming": provider})
+		defer tunnel.UpdateRules(oldRules, nil, oldProviders)
+
+		require.Equal(t, vaneMediaTargetKey{target: "plain.example", port: 443},
+			group.mediaTargetKey("media.plain.example", 443), "plain domains keep priority")
+		require.Equal(t, vaneMediaTargetKey{target: "streaming", port: 443},
+			group.mediaTargetKey("media.streaming-provider.test", 443), "the scope is the provider name")
+		require.Equal(t, vaneMediaTargetKey{port: 443},
+			group.mediaTargetKey("outside.test", 443), "hosts outside every entry stay out of the gate")
+	})
 }

@@ -10,6 +10,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/tunnel"
 )
 
 const (
@@ -33,6 +34,7 @@ const (
 type vaneMediaConfig struct {
 	enabled           bool
 	domains           []string
+	ruleSets          []string
 	lowThroughputBPS  float64
 	lowWindows        int
 	maxLowWindows     int
@@ -66,10 +68,36 @@ func defaultVaneMediaConfig() vaneMediaConfig {
 	}
 }
 
+// parseVaneMediaRuleSetEntry is three-state: a valid `RULE-SET,<name>` entry
+// returns (name, true, nil); a plain domain returns ("", false, nil); a
+// malformed RULE-SET entry (empty name, or a name containing a comma) returns
+// an error so it fails fast at construction instead of silently never
+// matching. The prefix is case-insensitive like every other rule type; the
+// provider name is kept verbatim.
+func parseVaneMediaRuleSetEntry(entry string) (string, bool, error) {
+	trimmed := strings.TrimSpace(entry)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "RULE-SET,") {
+		return "", false, nil
+	}
+	name := strings.TrimSpace(trimmed[len("RULE-SET,"):])
+	if name == "" || strings.Contains(name, ",") {
+		return "", false, fmt.Errorf("invalid media-reconnect-domain rule-set entry %q", entry)
+	}
+	return name, true, nil
+}
+
 func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 	config := defaultVaneMediaConfig()
 	config.enabled = option.MediaReconnect
 	for _, rawDomain := range option.MediaReconnectDomains {
+		name, isRuleSet, err := parseVaneMediaRuleSetEntry(rawDomain)
+		if err != nil {
+			return vaneMediaConfig{}, err
+		}
+		if isRuleSet {
+			config.ruleSets = append(config.ruleSets, name)
+			continue
+		}
 		domain, valid := normalizeVaneDomain(rawDomain)
 		if !valid {
 			return vaneMediaConfig{}, fmt.Errorf("invalid media-reconnect-domain %q", rawDomain)
@@ -930,6 +958,19 @@ func (a *Vane) mediaTargetKey(target string, port uint16) vaneMediaTargetKey {
 	for _, domain := range a.media.domains {
 		if host == domain || strings.HasSuffix(host, "."+domain) {
 			return vaneMediaTargetKey{target: domain, port: port}
+		}
+	}
+	// Round8 item 3: RULE-SET entries are checked after plain domains, and a
+	// hit scopes by the provider name — "scope is what the config names", so
+	// one provider per service or one provider for all streaming is the
+	// user's choice.
+	for _, name := range a.media.ruleSets {
+		provider, ok := tunnel.RuleProviders()[name]
+		if !ok {
+			continue
+		}
+		if provider.Match(&C.Metadata{Host: host}, C.RuleMatchHelper{}) {
+			return vaneMediaTargetKey{target: name, port: port}
 		}
 	}
 	return vaneMediaTargetKey{port: port}
