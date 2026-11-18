@@ -996,6 +996,15 @@ func cloneVaneDiagnosticsSnapshot(source VaneDiagnosticsSnapshot) VaneDiagnostic
 	for reason, count := range source.ChurnSuppressions {
 		cloned.ChurnSuppressions[reason] = count
 	}
+	// ProbeInvalidReasons must not be shared with the live counters: the
+	// snapshot is marshalled outside the diagnostics lock, and a concurrent
+	// write to a shared map is a fatal runtime error. A nil source stays nil.
+	if source.Counters.ProbeInvalidReasons != nil {
+		cloned.Counters.ProbeInvalidReasons = make(map[string]uint64, len(source.Counters.ProbeInvalidReasons))
+		for reason, count := range source.Counters.ProbeInvalidReasons {
+			cloned.Counters.ProbeInvalidReasons[reason] = count
+		}
+	}
 	cloned.RecentEvents = append([]VaneDiagnosticEvent(nil), source.RecentEvents...)
 	cloned.GrayFailure.Exclusions.Attempt = make(map[string]uint64, len(source.GrayFailure.Exclusions.Attempt))
 	for reason, count := range source.GrayFailure.Exclusions.Attempt {

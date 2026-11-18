@@ -1182,6 +1182,14 @@ func TestVaneProbeInvalidReasonsCounter(t *testing.T) {
 	require.Equal(t, map[string]uint64{
 		"dial-error": 2, "tls-timeout": 1, "header-timeout": 1, "read-timeout": 1, "early-eof": 1,
 	}, counters.ProbeInvalidReasons)
+
+	// The snapshot must own its map: the live counters keep writing while the
+	// snapshot is marshalled outside the diagnostics lock.
+	diagnostics.record(vaneDiagnosticRecord{kind: "race-probe-invalid", reason: "dial-error", force: true})
+	require.Equal(t, map[string]uint64{
+		"dial-error": 2, "tls-timeout": 1, "header-timeout": 1, "read-timeout": 1, "early-eof": 1,
+	}, counters.ProbeInvalidReasons)
+	require.Equal(t, uint64(3), diagnostics.snapshot().Counters.ProbeInvalidReasons["dial-error"])
 }
 
 func TestVaneProbeInvalidReasonsRestoreFromOlderSnapshot(t *testing.T) {
