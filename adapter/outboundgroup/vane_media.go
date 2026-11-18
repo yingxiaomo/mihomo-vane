@@ -1014,6 +1014,20 @@ func (a *Vane) mediaTargetKey(target string, port uint16) vaneMediaTargetKey {
 			return vaneMediaTargetKey{target: category, port: port}
 		}
 	}
+	// Scene-as-gate (SCENE-GATE-001): a flow classified as media by a scene
+	// rule that carries a target identity is gate-eligible with that identity
+	// as the scope, so the rule set only needs to be named once (in
+	// scene-rules) and media-reconnect-domains can stay empty. The match is
+	// re-run against the host alone so the scope is a pure function of
+	// (target, port) and agrees at every call site; the gate lists above keep
+	// precedence, so existing configs behave exactly as before. Rules without
+	// a target identity (NETWORK, DST-PORT, ...) yield no scope and fall
+	// through to the empty key below.
+	if rule, ok := matchVaneSceneRule(&C.Metadata{Host: host}, a.rules); ok && rule.scene == vaneSceneMedia {
+		if scope := rule.scope(); scope != "" {
+			return vaneMediaTargetKey{target: scope, port: port}
+		}
+	}
 	return vaneMediaTargetKey{port: port}
 }
 

@@ -265,15 +265,38 @@ func parseVaneUintRanges(payload string, maximum uint64) ([]vaneUintRange, error
 }
 
 func classifyVaneScene(metadata *C.Metadata, rules []vaneSceneRule) vaneScene {
+	if rule, ok := matchVaneSceneRule(metadata, rules); ok {
+		return rule.scene
+	}
+	return vaneSceneDefault
+}
+
+// matchVaneSceneRule returns the first rule matching the metadata, or false.
+// Rules are evaluated in slice order; the first match wins.
+func matchVaneSceneRule(metadata *C.Metadata, rules []vaneSceneRule) (vaneSceneRule, bool) {
 	if metadata == nil {
-		return vaneSceneDefault
+		return vaneSceneRule{}, false
 	}
 	for _, rule := range rules {
 		if rule.matches(metadata) {
-			return rule.scene
+			return rule, true
 		}
 	}
-	return vaneSceneDefault
+	return vaneSceneRule{}, false
+}
+
+// scope returns the gate scope this rule carries when it classifies a flow as
+// media: the domain for DOMAIN / DOMAIN-SUFFIX, the provider name for
+// RULE-SET, the category name for GEOSITE. Rules that match on something other
+// than a target identity (NETWORK, DST-PORT, IN-NAME, IN-USER, PROCESS,
+// PROCESS-PATH, DSCP) carry no scope and return "".
+func (r vaneSceneRule) scope() string {
+	switch r.kind {
+	case vaneRuleDomain, vaneRuleDomainSuffix, vaneRuleRuleSet, vaneRuleGeoSite:
+		return r.value
+	default:
+		return ""
+	}
 }
 
 func (r vaneSceneRule) matches(metadata *C.Metadata) bool {
