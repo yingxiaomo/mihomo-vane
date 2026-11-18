@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/component/geodata"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
@@ -35,6 +36,7 @@ type vaneMediaConfig struct {
 	enabled           bool
 	domains           []string
 	ruleSets          []string
+	geoSites          []string
 	lowThroughputBPS  float64
 	lowWindows        int
 	maxLowWindows     int
@@ -86,6 +88,25 @@ func parseVaneMediaRuleSetEntry(entry string) (string, bool, error) {
 	return name, true, nil
 }
 
+// parseVaneMediaGeoSiteEntry is the GEOSITE counterpart of
+// parseVaneMediaRuleSetEntry: a valid `GEOSITE,<category>` entry returns
+// (category, true, nil); anything else returns ("", false, nil) so the caller
+// can fall through to the plain-domain path. A malformed GEOSITE entry
+// (empty category, or a category containing a comma) errors at construction.
+// `!` negation and `@attr` suffixes are the loader's own syntax and pass
+// through verbatim.
+func parseVaneMediaGeoSiteEntry(entry string) (string, bool, error) {
+	trimmed := strings.TrimSpace(entry)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "GEOSITE,") {
+		return "", false, nil
+	}
+	category := strings.TrimSpace(trimmed[len("GEOSITE,"):])
+	if category == "" || strings.Contains(category, ",") {
+		return "", false, fmt.Errorf("invalid media-reconnect-domain geosite entry %q", entry)
+	}
+	return category, true, nil
+}
+
 func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 	config := defaultVaneMediaConfig()
 	config.enabled = option.MediaReconnect
@@ -96,6 +117,14 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 		}
 		if isRuleSet {
 			config.ruleSets = append(config.ruleSets, name)
+			continue
+		}
+		category, isGeoSite, err := parseVaneMediaGeoSiteEntry(rawDomain)
+		if err != nil {
+			return vaneMediaConfig{}, err
+		}
+		if isGeoSite {
+			config.geoSites = append(config.geoSites, category)
 			continue
 		}
 		domain, valid := normalizeVaneDomain(rawDomain)
@@ -971,6 +1000,18 @@ func (a *Vane) mediaTargetKey(target string, port uint16) vaneMediaTargetKey {
 		}
 		if provider.Match(&C.Metadata{Host: host}, C.RuleMatchHelper{}) {
 			return vaneMediaTargetKey{target: name, port: port}
+		}
+	}
+	// Round8.5: GEOSITE entries resolve against the shared GeoSite database —
+	// no extra download — and scope by the category name. Fail-closed like
+	// every geodata path: a missing database is "no match", never an error.
+	for _, category := range a.media.geoSites {
+		matcher, err := geodata.LoadGeoSiteMatcher(category)
+		if err != nil {
+			continue
+		}
+		if matcher.ApplyDomain(host) {
+			return vaneMediaTargetKey{target: category, port: port}
 		}
 	}
 	return vaneMediaTargetKey{port: port}

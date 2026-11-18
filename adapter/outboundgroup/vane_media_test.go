@@ -735,3 +735,57 @@ func TestVaneMediaRuleSetGate(t *testing.T) {
 			group.mediaTargetKey("outside.test", 443), "hosts outside every entry stay out of the gate")
 	})
 }
+
+// GEOSITE-GATE-001: media-reconnect-domains accepts GEOSITE entries — the
+// gate resolves against the shared GeoSite database (no extra download) and
+// scopes a hit by the category name. Fail-closed in a database-less sandbox.
+func TestVaneMediaGeoSiteGate(t *testing.T) {
+	t.Run("entry parser is three-state", func(t *testing.T) {
+		category, isGeoSite, err := parseVaneMediaGeoSiteEntry("GEOSITE,telegram")
+		require.NoError(t, err)
+		require.True(t, isGeoSite)
+		require.Equal(t, "telegram", category)
+		category, isGeoSite, err = parseVaneMediaGeoSiteEntry("geosite,telegram@cn")
+		require.NoError(t, err, "the prefix is case-insensitive")
+		require.True(t, isGeoSite)
+		require.Equal(t, "telegram@cn", category, "attr suffixes pass through verbatim")
+		_, isGeoSite, err = parseVaneMediaGeoSiteEntry("example.com")
+		require.NoError(t, err)
+		require.False(t, isGeoSite)
+		for _, bad := range []string{"GEOSITE,", "GEOSITE,a,b"} {
+			_, _, err = parseVaneMediaGeoSiteEntry(bad)
+			require.Error(t, err, "%q must fail at construction", bad)
+		}
+	})
+
+	t.Run("config splits domains, rule sets and geosites", func(t *testing.T) {
+		config, err := newVaneMediaConfig(VaneOption{
+			MediaReconnectDomains: []string{"example.com", "RULE-SET,streaming", "GEOSITE,telegram"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, []string{"example.com"}, config.domains)
+		require.Equal(t, []string{"streaming"}, config.ruleSets)
+		require.Equal(t, []string{"telegram"}, config.geoSites)
+		_, err = newVaneMediaConfig(VaneOption{MediaReconnectDomains: []string{"GEOSITE,"}})
+		require.Error(t, err)
+	})
+
+	t.Run("gate is fail-closed without a database and keeps plain priority", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		group.media.domains = []string{"plain.example"}
+		group.media.ruleSets = nil
+		group.media.geoSites = []string{"telegram", "youtube"}
+
+		// No GeoSite database in the sandbox: the geosite entries never match,
+		// quietly, and plain domains keep working.
+		require.Equal(t, vaneMediaTargetKey{target: "plain.example", port: 443},
+			group.mediaTargetKey("media.plain.example", 443))
+		require.Equal(t, vaneMediaTargetKey{port: 443},
+			group.mediaTargetKey("api.telegram.org", 443))
+		require.Equal(t, vaneMediaTargetKey{port: 443},
+			group.mediaTargetKey("www.youtube.com", 443))
+	})
+}
