@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/metacubex/mihomo/component/geodata"
+	_ "github.com/metacubex/mihomo/component/geodata/memconservative"
+	_ "github.com/metacubex/mihomo/component/geodata/standard"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/tunnel"
 )
@@ -86,6 +89,7 @@ const (
 	vaneRuleProcessPath
 	vaneRuleDSCP
 	vaneRuleRuleSet
+	vaneRuleGeoSite
 )
 
 type vaneUintRange struct {
@@ -171,6 +175,11 @@ func parseVaneSceneRule(text string) (vaneSceneRule, error) {
 		// time: rule providers register asynchronously, so an unregistered
 		// name is "no match", never a construction error.
 		rule.kind = vaneRuleRuleSet
+		rule.value = payload
+	case "GEOSITE":
+		// The category is stored verbatim; `!` negation and `@attr` suffixes
+		// are the geodata loader's own syntax, parsed there — not here.
+		rule.kind = vaneRuleGeoSite
 		rule.value = payload
 	case "DST-PORT":
 		rule.kind = vaneRuleDstPort
@@ -304,6 +313,19 @@ func (r vaneSceneRule) matches(metadata *C.Metadata) bool {
 			return false
 		}
 		return provider.Match(metadata, C.RuleMatchHelper{})
+	case vaneRuleGeoSite:
+		// Fail-closed: without a GeoSite database the load errors and the
+		// rule never matches — construction is not affected and no error
+		// reaches the selection path.
+		host, valid := normalizeVaneDomain(metadata.RuleHost())
+		if !valid {
+			return false
+		}
+		matcher, err := geodata.LoadGeoSiteMatcher(r.value)
+		if err != nil {
+			return false
+		}
+		return matcher.ApplyDomain(host)
 	default:
 		return false
 	}

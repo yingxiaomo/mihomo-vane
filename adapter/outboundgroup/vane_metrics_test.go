@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/component/geodata"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	RP "github.com/metacubex/mihomo/rules/provider"
@@ -373,4 +374,27 @@ func TestVaneSceneRuleSet(t *testing.T) {
 		}
 		require.Equal(t, vaneSceneMedia, classifyVaneScene(metadata, rulesetFirst))
 	})
+}
+
+// GEOSITE-SCENE-001: scene rules accept GEOSITE categories. Parsing stores
+// the category verbatim (`!` negation and `@attr` are the loader's syntax);
+// matching is fail-closed — without a GeoSite database the load errors and
+// the rule never matches, with no error and no panic.
+func TestVaneSceneGeoSite(t *testing.T) {
+	rule, err := parseVaneSceneRule("GEOSITE,category-openai,media")
+	require.NoError(t, err)
+	require.Equal(t, vaneRuleGeoSite, rule.kind)
+	require.Equal(t, "category-openai", rule.value)
+	_, err = parseVaneSceneRule("GEOSITE,,media")
+	require.Error(t, err, "empty category is rejected by the shared check")
+
+	metadata := &C.Metadata{Host: "api.openai.com"}
+	matcher, err := geodata.LoadGeoSiteMatcher("category-openai")
+	require.Error(t, err, "the sandbox has no GeoSite database")
+	require.Nil(t, matcher)
+
+	require.Equal(t, vaneSceneDefault, classifyVaneScene(metadata, []vaneSceneRule{rule}),
+		"fail-closed: no database means the rule never matches, quietly")
+	require.Equal(t, vaneSceneDefault, classifyVaneScene(&C.Metadata{}, []vaneSceneRule{rule}),
+		"an empty host never matches")
 }
