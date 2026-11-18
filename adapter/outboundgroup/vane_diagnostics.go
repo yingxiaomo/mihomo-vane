@@ -62,6 +62,9 @@ type VaneDiagnosticCounters struct {
 	B2LossUnsupported     uint64 `json:"b2LossUnsupported"`
 	B2StallSuspected      uint64 `json:"b2StallSuspected"`
 	B2StallAttempts       uint64 `json:"b2StallAttempts"`
+	// ProbeInvalidReasons splits ProbeInvalid by probe failure reason, so a
+	// rotated event ring can no longer erase why probes failed.
+	ProbeInvalidReasons map[string]uint64 `json:"probeInvalidReasons,omitempty"`
 }
 
 type VaneDiagnosticPersistence struct {
@@ -649,6 +652,19 @@ func (d *vaneDiagnostics) recordExplorationSelection(selection vaneExplorationSe
 	}
 }
 
+// countProbeInvalidReasonLocked splits invalid probes by failure reason. The
+// map is created on first use because a snapshot restored from an older
+// version carries no map at all.
+func (d *vaneDiagnostics) countProbeInvalidReasonLocked(reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	if d.snapshotData.Counters.ProbeInvalidReasons == nil {
+		d.snapshotData.Counters.ProbeInvalidReasons = make(map[string]uint64)
+	}
+	d.snapshotData.Counters.ProbeInvalidReasons[reason]++
+}
+
 func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnosticEvent {
 	now := d.clock.Now().UTC()
 	d.snapshotData.UpdatedAt = now
@@ -704,6 +720,7 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		d.snapshotData.Counters.ProbeCount++
 		d.snapshotData.Counters.ProbeInvalid++
 		d.snapshotData.Counters.ProbeBytes += vaneDiagnosticBytes(record.totalBytes)
+		d.countProbeInvalidReasonLocked(record.reason)
 	case "race-probe-canceled":
 		d.snapshotData.Counters.ProbeCount++
 		d.snapshotData.Counters.ProbeCanceled++

@@ -1160,3 +1160,47 @@ func TestVaneDiagnosticsRegistryIsDormantUntilActivation(t *testing.T) {
 	vaneDiagnosticsRegistry.Unlock()
 	require.True(t, registeredAfter)
 }
+
+// PROBE-REASON-001: invalid probe reasons land in counters, so a rotated
+// event ring can no longer erase why probes failed, and a snapshot written
+// before the field existed restores to an empty (not nil) map.
+func TestVaneProbeInvalidReasonsCounter(t *testing.T) {
+	clock := newVaneConnTestClock()
+	store := newVaneDiagnosticsTestStore()
+	diagnostics := newVaneDiagnostics("probe-reasons", clock, store)
+	require.Nil(t, diagnostics.snapshot().Counters.ProbeInvalidReasons)
+
+	reasons := []string{"dial-error", "tls-timeout", "header-timeout", "read-timeout", "early-eof", "dial-error"}
+	for _, reason := range reasons {
+		diagnostics.record(vaneDiagnosticRecord{kind: "race-probe-invalid", reason: reason, force: true})
+	}
+	diagnostics.record(vaneDiagnosticRecord{kind: "race-probe-success", reason: "cap-hit", totalBytes: 4 << 20, force: true})
+
+	counters := diagnostics.snapshot().Counters
+	require.Equal(t, uint64(6), counters.ProbeInvalid)
+	require.Equal(t, uint64(1), counters.ProbeSuccess)
+	require.Equal(t, map[string]uint64{
+		"dial-error": 2, "tls-timeout": 1, "header-timeout": 1, "read-timeout": 1, "early-eof": 1,
+	}, counters.ProbeInvalidReasons)
+}
+
+func TestVaneProbeInvalidReasonsRestoreFromOlderSnapshot(t *testing.T) {
+	clock := newVaneConnTestClock()
+	store := newVaneDiagnosticsTestStore()
+	// A snapshot written before the field existed carries no reason map.
+	legacy, err := json.Marshal(VaneDiagnosticsSnapshot{
+		SchemaVersion: VaneDiagnosticsSchemaVersion,
+		Group:         "probe-legacy",
+		Counters:      VaneDiagnosticCounters{ProbeCount: 3, ProbeInvalid: 3},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Save(vaneDiagnosticsStorageKey("probe-legacy"), legacy))
+
+	diagnostics := newVaneDiagnostics("probe-legacy", clock, store)
+	require.Equal(t, uint64(3), diagnostics.snapshot().Counters.ProbeInvalid)
+	require.Empty(t, diagnostics.snapshot().Counters.ProbeInvalidReasons)
+
+	diagnostics.record(vaneDiagnosticRecord{kind: "race-probe-invalid", reason: "tls-error", force: true})
+	require.Equal(t, map[string]uint64{"tls-error": 1}, diagnostics.snapshot().Counters.ProbeInvalidReasons)
+	require.Equal(t, uint64(4), diagnostics.snapshot().Counters.ProbeInvalid)
+}
