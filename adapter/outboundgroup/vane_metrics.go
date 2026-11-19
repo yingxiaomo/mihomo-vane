@@ -386,6 +386,7 @@ const (
 	vaneMetricConnect
 	vaneMetricResponse
 	vaneMetricThroughput
+	vaneMetricJitter
 )
 
 const vaneMinimumEvidence = 1e-6
@@ -407,6 +408,8 @@ func vaneSpec(kind vaneMetricKind) vaneMetricSpec {
 		return vaneMetricSpec{5 * time.Minute, 2 * time.Hour, 6, 0.55}
 	case vaneMetricThroughput:
 		return vaneMetricSpec{10 * time.Minute, 6 * time.Hour, 4, 0.60}
+	case vaneMetricJitter:
+		return vaneMetricSpec{5 * time.Minute, 2 * time.Hour, 6, 0.55}
 	default:
 		return vaneMetricSpec{}
 	}
@@ -463,6 +466,52 @@ type vaneDualMetric struct {
 	slow vaneDecayLayer
 }
 
+type vaneJitterTracker struct {
+	mean      vaneDualMetric
+	deviation vaneDualMetric
+	samples   int
+}
+
+func (t *vaneJitterTracker) observeLatency(now time.Time, elapsedMillis float64) {
+	if math.IsNaN(elapsedMillis) || math.IsInf(elapsedMillis, 0) || elapsedMillis < 0 {
+		return
+	}
+	meanMillis := elapsedMillis
+	if estimate := t.mean.estimate(vaneMetricJitter, now); estimate.valid && estimate.value > 0 {
+		meanMillis = estimate.value
+	}
+	delta := elapsedMillis - meanMillis
+	t.mean.observe(vaneMetricJitter, now, elapsedMillis, 1)
+	t.deviation.observe(vaneMetricJitter, now, delta*delta, 1)
+	t.samples++
+}
+
+func (t vaneJitterTracker) estimate(now time.Time) vaneMetricEstimate {
+	if t.samples < 2 {
+		return vaneMetricEstimate{}
+	}
+	mean := t.mean.estimate(vaneMetricJitter, now)
+	deviation := t.deviation.estimate(vaneMetricJitter, now)
+	if !mean.valid || !deviation.valid || mean.value <= 0 {
+		return vaneMetricEstimate{}
+	}
+	evidence := math.Min(mean.evidence, deviation.evidence)
+	if evidence <= 0 {
+		return vaneMetricEstimate{}
+	}
+	return vaneMetricEstimate{value: math.Sqrt(math.Max(deviation.value, 0)), evidence: evidence,
+		confidence: 1 - math.Exp(-evidence/vaneSpec(vaneMetricJitter).confidenceK), valid: true}
+}
+
+func (t vaneJitterTracker) ratio(now time.Time) float64 {
+	estimate := t.estimate(now)
+	mean := t.mean.estimate(vaneMetricJitter, now)
+	if !estimate.valid || !mean.valid || mean.value <= 0 {
+		return 0
+	}
+	return estimate.value / mean.value
+}
+
 func (m *vaneDualMetric) observe(kind vaneMetricKind, now time.Time, value, quality float64) {
 	spec := vaneSpec(kind)
 	m.fast.observe(now, spec.fastHalfLife, value, quality)
@@ -508,6 +557,7 @@ type vaneMetrics struct {
 	connect    vaneDualMetric
 	response   vaneDualMetric
 	throughput vaneDualMetric
+	jitter     vaneJitterTracker
 	// p5 carries the passive percentile/peak/hourly profile (round6 item 1).
 	// It feeds on the raw sample below; scoring never reads it.
 	p5 vaneP5
@@ -523,6 +573,8 @@ func (m *vaneMetrics) observeFailure(now time.Time, failed bool) {
 
 func (m *vaneMetrics) observeConnect(now time.Time, elapsed time.Duration) {
 	m.connect.observe(vaneMetricConnect, now, vaneLogClamp(durationMillis(elapsed), 1, 30_000), 1)
+	// Connect and response have different baselines; pooling them creates artificial jitter.
+	m.jitter.observeLatency(now, durationMillis(elapsed))
 }
 
 func (m *vaneMetrics) observeResponse(now time.Time, elapsed time.Duration) {
@@ -559,6 +611,8 @@ type vaneMetricsSnapshot struct {
 	connect    vaneMetricEstimate
 	response   vaneMetricEstimate
 	throughput vaneMetricEstimate
+	// jitter is σ of connect latency in raw milliseconds.
+	jitter vaneMetricEstimate
 }
 
 func (m vaneMetrics) snapshot(now time.Time) vaneMetricsSnapshot {
@@ -567,6 +621,7 @@ func (m vaneMetrics) snapshot(now time.Time) vaneMetricsSnapshot {
 		connect:    m.connect.estimate(vaneMetricConnect, now),
 		response:   m.response.estimate(vaneMetricResponse, now),
 		throughput: m.throughput.estimate(vaneMetricThroughput, now),
+		jitter:     m.jitter.estimate(now),
 	}
 }
 
@@ -575,10 +630,13 @@ type vaneSceneScoring struct {
 	connectWeight      float64
 	responseWeight     float64
 	throughputWeight   float64
+	jitterWeight       float64
 	connectGoodMillis  float64
 	connectBadMillis   float64
 	responseGoodMillis float64
 	responseBadMillis  float64
+	jitterGoodMillis   float64
+	jitterBadMillis    float64
 	throughputLowBPS   float64
 	throughputHighBPS  float64
 }
@@ -587,13 +645,13 @@ func vaneScoring(scene vaneScene) vaneSceneScoring {
 	const mbps = 1_000_000
 	switch scene {
 	case vaneSceneInteractive:
-		return vaneSceneScoring{0.35, 0.25, 0.35, 0.05, 50, 1500, 100, 1500, 0.25 * mbps, 5 * mbps}
+		return vaneSceneScoring{0.30, 0.20, 0.30, 0.05, 0.15, 50, 1500, 100, 1500, 3, 100, 0.25 * mbps, 5 * mbps}
 	case vaneSceneMedia:
-		return vaneSceneScoring{0.30, 0.10, 0.20, 0.40, 50, 1500, 200, 3000, 3 * mbps, 12 * mbps}
+		return vaneSceneScoring{0.25, 0.10, 0.15, 0.35, 0.15, 50, 1500, 200, 3000, 3, 100, 3 * mbps, 12 * mbps}
 	case vaneSceneBulk:
-		return vaneSceneScoring{0.25, 0.05, 0.05, 0.65, 50, 1500, 300, 5000, 2 * mbps, 80 * mbps}
+		return vaneSceneScoring{0.25, 0.05, 0.05, 0.60, 0.05, 50, 1500, 300, 5000, 3, 100, 2 * mbps, 80 * mbps}
 	default:
-		return vaneSceneScoring{0.35, 0.20, 0.20, 0.25, 50, 1500, 150, 3000, 1 * mbps, 20 * mbps}
+		return vaneSceneScoring{0.30, 0.15, 0.15, 0.25, 0.15, 50, 1500, 150, 3000, 3, 100, 1 * mbps, 20 * mbps}
 	}
 }
 
@@ -611,11 +669,15 @@ func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
 	throughput := vaneMetricCost(snapshot.throughput, vaneMetricThroughput, func(value float64) float64 {
 		return vaneThroughputCost(value, config.throughputLowBPS, config.throughputHighBPS)
 	})
+	jitter := vaneMetricCost(snapshot.jitter, vaneMetricJitter, func(value float64) float64 {
+		return vaneJitterCost(value, config.jitterGoodMillis, config.jitterBadMillis)
+	})
 
 	score := config.failureWeight*failure +
 		config.connectWeight*connect +
 		config.responseWeight*response +
-		config.throughputWeight*throughput
+		config.throughputWeight*throughput +
+		config.jitterWeight*jitter
 	return int64(math.Round(vaneClamp(score, 0, 1) * 1_000_000))
 }
 func vaneMetricCost(estimate vaneMetricEstimate, kind vaneMetricKind, observed func(float64) float64) float64 {
@@ -630,6 +692,14 @@ func vaneMetricCost(estimate vaneMetricEstimate, kind vaneMetricKind, observed f
 // Latency estimates are already in log(milliseconds).
 func vaneLatencyCost(logMillis, goodMillis, badMillis float64) float64 {
 	return vaneClamp((logMillis-math.Log(goodMillis))/math.Log(badMillis/goodMillis), 0, 1)
+}
+
+// Jitter is σ in raw milliseconds; its anchors share the latency log scale.
+func vaneJitterCost(sigmaMillis, goodMillis, badMillis float64) float64 {
+	if sigmaMillis <= 0 {
+		return 0
+	}
+	return vaneLatencyCost(math.Log(sigmaMillis), goodMillis, badMillis)
 }
 
 // Throughput estimates are already in log(bits/second).

@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// This replay freezes the model-free selection and scoring behavior imported
-// from the protected pre-rename tree.
+// This replay preserves the original selection fixture and pins the
+// intentional score change from the fifth dimension (JITTER-P1-001).
 func TestVaneRenameBehaviorReplay(t *testing.T) {
 	clock := newVaneConnTestClock()
 	a := newVaneTestProxy("alpha", true, true)
@@ -42,5 +42,5 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 		scores = append(scores, scoreVaneMetrics(scene, metrics.snapshot(clock.Now())))
 	}
 	require.Equal(t, []string{"alpha", "beta", "alpha", "beta"}, choices)
-	require.Equal(t, []int64{167472, 98116, 194427, 462083}, scores)
+	require.Equal(t, []int64{158917, 89561, 172942, 432878}, scores)
 }

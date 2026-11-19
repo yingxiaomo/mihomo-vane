@@ -107,8 +107,9 @@ func vaneExplorationScopeValues(index int) (vaneTransport, vaneScene) {
 func vaneEvidenceCoverageMicros(snapshot vaneMetricsSnapshot, transport vaneTransport, scene vaneScene) int64 {
 	weights := vaneScoring(scene)
 	weighted := weights.failureWeight*vaneEstimateConfidence(snapshot.failure) +
-		weights.connectWeight*vaneEstimateConfidence(snapshot.connect)
-	denominator := weights.failureWeight + weights.connectWeight
+		weights.connectWeight*vaneEstimateConfidence(snapshot.connect) +
+		weights.jitterWeight*vaneEstimateConfidence(snapshot.jitter)
+	denominator := weights.failureWeight + weights.connectWeight + weights.jitterWeight
 	if transport == vaneTransportTCP {
 		weighted += weights.responseWeight*vaneEstimateConfidence(snapshot.response) +
 			weights.throughputWeight*vaneEstimateConfidence(snapshot.throughput)

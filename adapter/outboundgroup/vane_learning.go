@@ -18,13 +18,14 @@ import (
 )
 
 const (
-	VaneLearningSchemaVersion   = 1
-	vaneLearningRegistryLimit   = 256
-	vaneLearningPersistInterval = 30 * time.Second
-	vaneLearningFutureSkew      = 5 * time.Minute
-	vaneLearningMaximumWeight   = 1e12
-	vaneLearningMaximumAverage  = 40.0
-	vaneLearningPayloadLimit    = 2 * 1024 * 1024
+	VaneLearningSchemaVersion      = 1
+	vaneLearningRegistryLimit      = 256
+	vaneLearningPersistInterval    = 30 * time.Second
+	vaneLearningFutureSkew         = 5 * time.Minute
+	vaneLearningMaximumWeight      = 1e12
+	vaneLearningMaximumAverage     = 40.0
+	vaneLearningMaximumJitterValue = 1e12 // raw milliseconds and squared milliseconds, not logs
+	vaneLearningPayloadLimit       = 2 * 1024 * 1024
 )
 
 type vaneLearningStore interface {
@@ -66,11 +67,18 @@ type vanePersistedDualMetric struct {
 	Slow vanePersistedDecayLayer `json:"slow"`
 }
 
+type vanePersistedJitter struct {
+	Mean      vanePersistedDualMetric `json:"mean"`
+	Deviation vanePersistedDualMetric `json:"deviation"`
+	Samples   int                     `json:"samples"`
+}
+
 type vanePersistedMetrics struct {
 	Failure    vanePersistedDualMetric `json:"failure"`
 	Connect    vanePersistedDualMetric `json:"connect"`
 	Response   vanePersistedDualMetric `json:"response"`
 	Throughput vanePersistedDualMetric `json:"throughput"`
+	Jitter     *vanePersistedJitter    `json:"jitter,omitempty"`
 	// P5 (round6 item 2) is passive per-node telemetry; its presence never
 	// affects node validity on restore.
 	P5 *vanePersistedP5 `json:"p5,omitempty"`
@@ -425,11 +433,12 @@ func restoreVaneMetrics(metrics vanePersistedMetrics, now time.Time) (vaneMetric
 	connect, connectValid, connectInvalid := restoreVaneDualMetric(metrics.Connect, now)
 	response, responseValid, responseInvalid := restoreVaneDualMetric(metrics.Response, now)
 	throughput, throughputValid, throughputInvalid := restoreVaneDualMetric(metrics.Throughput, now)
+	jitter, jitterValid, jitterInvalid := restoreVaneJitter(metrics.Jitter, now)
 	// P5 restores but never decides validity: a node kept alive only by its
 	// P5 profile would resurrect selection state from telemetry.
-	return vaneMetrics{failure: failure, connect: connect, response: response, throughput: throughput, p5: restoreVaneP5(metrics.P5, now)},
-		failureValid || connectValid || responseValid || throughputValid,
-		failureInvalid || connectInvalid || responseInvalid || throughputInvalid
+	return vaneMetrics{failure: failure, connect: connect, response: response, throughput: throughput, jitter: jitter, p5: restoreVaneP5(metrics.P5, now)},
+		failureValid || connectValid || responseValid || throughputValid || jitterValid,
+		failureInvalid || connectInvalid || responseInvalid || throughputInvalid || jitterInvalid
 }
 
 func restoreVaneDualMetric(metric vanePersistedDualMetric, now time.Time) (vaneDualMetric, bool, bool) {
@@ -438,14 +447,48 @@ func restoreVaneDualMetric(metric vanePersistedDualMetric, now time.Time) (vaneD
 	return vaneDualMetric{fast: fast, slow: slow}, fastValid || slowValid, fastInvalid || slowInvalid
 }
 
+func restoreVaneDualMetricWithCap(metric vanePersistedDualMetric, now time.Time, maxAverage float64) (vaneDualMetric, bool, bool) {
+	fast, fastValid, fastInvalid := restoreVaneDecayLayerWithCap(metric.Fast, now, maxAverage)
+	slow, slowValid, slowInvalid := restoreVaneDecayLayerWithCap(metric.Slow, now, maxAverage)
+	return vaneDualMetric{fast: fast, slow: slow}, fastValid || slowValid, fastInvalid || slowInvalid
+}
+
+func restoreVaneJitter(persisted *vanePersistedJitter, now time.Time) (vaneJitterTracker, bool, bool) {
+	if persisted == nil {
+		return vaneJitterTracker{}, false, false
+	}
+	mean, meanValid, meanInvalid := restoreVaneDualMetricWithCap(persisted.Mean, now, vaneLearningMaximumJitterValue)
+	deviation, deviationValid, deviationInvalid := restoreVaneDualMetricWithCap(persisted.Deviation, now, vaneLearningMaximumJitterValue)
+	tracker := vaneJitterTracker{mean: mean, deviation: deviation, samples: persisted.Samples}
+	if persisted.Samples < 0 {
+		return vaneJitterTracker{}, false, true
+	}
+	if persisted.Samples == 0 {
+		if meanValid || deviationValid {
+			return vaneJitterTracker{}, false, true
+		}
+		return tracker, false, meanInvalid || deviationInvalid
+	}
+	valid := meanValid || deviationValid
+	invalid := meanInvalid || deviationInvalid
+	if !valid {
+		invalid = true
+	}
+	return tracker, valid, invalid
+}
+
 func restoreVaneDecayLayer(layer vanePersistedDecayLayer, now time.Time) (vaneDecayLayer, bool, bool) {
+	return restoreVaneDecayLayerWithCap(layer, now, vaneLearningMaximumAverage)
+}
+
+func restoreVaneDecayLayerWithCap(layer vanePersistedDecayLayer, now time.Time, maxAverage float64) (vaneDecayLayer, bool, bool) {
 	if !layer.Valid {
 		invalid := layer.Weight != 0 || layer.Sum != 0 || !layer.UpdatedAt.IsZero()
 		return vaneDecayLayer{}, false, invalid
 	}
 	if layer.Weight <= 0 || layer.Weight > vaneLearningMaximumWeight || math.IsNaN(layer.Weight) || math.IsInf(layer.Weight, 0) ||
 		layer.Sum < 0 || math.IsNaN(layer.Sum) || math.IsInf(layer.Sum, 0) || layer.UpdatedAt.IsZero() ||
-		layer.UpdatedAt.After(now.Add(vaneLearningFutureSkew)) || layer.Sum/layer.Weight > vaneLearningMaximumAverage {
+		layer.UpdatedAt.After(now.Add(vaneLearningFutureSkew)) || layer.Sum/layer.Weight > maxAverage {
 		return vaneDecayLayer{}, false, true
 	}
 	return vaneDecayLayer{weight: layer.Weight, sum: layer.Sum, updatedAt: layer.UpdatedAt, valid: true}, true, false
@@ -459,12 +502,21 @@ func persistVaneDualMetric(metric vaneDualMetric) vanePersistedDualMetric {
 	return vanePersistedDualMetric{Fast: persistVaneDecayLayer(metric.fast), Slow: persistVaneDecayLayer(metric.slow)}
 }
 
+func persistVaneJitter(tracker vaneJitterTracker) *vanePersistedJitter {
+	if tracker.samples == 0 {
+		return nil
+	}
+	return &vanePersistedJitter{Mean: persistVaneDualMetric(tracker.mean),
+		Deviation: persistVaneDualMetric(tracker.deviation), Samples: tracker.samples}
+}
+
 func persistVaneMetrics(metrics vaneMetrics, now time.Time) vanePersistedMetrics {
 	return vanePersistedMetrics{
 		Failure:    persistVaneDualMetric(metrics.failure),
 		Connect:    persistVaneDualMetric(metrics.connect),
 		Response:   persistVaneDualMetric(metrics.response),
 		Throughput: persistVaneDualMetric(metrics.throughput),
+		Jitter:     persistVaneJitter(metrics.jitter),
 		P5:         persistVaneP5(&metrics.p5, now),
 	}
 }
