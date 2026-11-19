@@ -28,6 +28,15 @@ const (
 	vaneRacingCapabilityTTL       = 10 * time.Minute
 	vaneRacingNoWinnerCooldown    = 30 * time.Second
 	vaneRacingMinimumReservation  = int64(64 * 1024)
+	// vaneRacingProbeMinDuration is the measurement floor for a proven
+	// throughput lower bound. A probe whose header consumed almost the whole
+	// budget leaves a body-read window of a few milliseconds; dividing by it
+	// reports a bound far above what the node delivered (4KB in 1ms reads as
+	// 32Mbps). Clamping to 100ms understates instead of overstating: a lower
+	// bound is a promise that the node is at least this fast, so erring low
+	// only makes the race more conservative, while erring high can pick the
+	// wrong winner and poison the capability cache.
+	vaneRacingProbeMinDuration = 100 * time.Millisecond
 )
 
 type vaneRacingMode uint8
@@ -708,6 +717,16 @@ func (a *Vane) recordRaceDiscardedStale(request vaneRaceRequest, to string, task
 	})
 }
 
+// vaneProbeBoundDuration floors a body-read window before it is turned into a
+// throughput lower bound. See vaneRacingProbeMinDuration for why the floor
+// exists and why it errs low.
+func vaneProbeBoundDuration(duration time.Duration) time.Duration {
+	if duration < vaneRacingProbeMinDuration {
+		return vaneRacingProbeMinDuration
+	}
+	return duration
+}
+
 func probeVaneCapability(ctx context.Context, proxy C.Proxy, endpoint *url.URL, byteLimit int64) vaneProbeResult {
 	return probeVaneCapabilityWithTLSConfig(ctx, proxy, endpoint, byteLimit, nil)
 }
@@ -820,10 +839,7 @@ func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoi
 			total += int64(n)
 		}
 		if total >= byteLimit {
-			duration := time.Since(started)
-			if duration <= 0 {
-				duration = time.Nanosecond
-			}
+			duration := vaneProbeBoundDuration(time.Since(started))
 			return vaneProbeResult{
 				valid: true, reason: "cap-hit", bytes: total, duration: duration,
 				lowerBoundBPS: 8 * float64(total) / duration.Seconds(), capHit: true,
@@ -845,9 +861,7 @@ func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoi
 				// header consumed most of the budget the read loop can end almost
 				// immediately, and a tiny duration would inflate the bound.
 				if total > 0 {
-					if duration <= 0 {
-						duration = time.Nanosecond
-					}
+					duration = vaneProbeBoundDuration(duration)
 					return vaneProbeResult{
 						valid: true, reason: "read-timeout", bytes: total, duration: duration,
 						lowerBoundBPS: 8 * float64(total) / duration.Seconds(),

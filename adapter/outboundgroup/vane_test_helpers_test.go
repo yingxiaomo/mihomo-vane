@@ -1,0 +1,33 @@
+package outboundgroup
+
+import (
+	"context"
+	"time"
+
+	C "github.com/metacubex/mihomo/constant"
+)
+
+// This file holds the test-only Vane wrappers moved out of vane.go
+// (TEST-WRAP-001): production paths go through the Epoch/Identity variants
+// directly, so these non-Epoch forms only exist for tests.
+// Signatures and behavior are unchanged from the move.
+
+func (a *Vane) recordDialFailure(ctx context.Context, metadata *C.Metadata, transport vaneTransport, proxy C.Proxy, err error, now time.Time) {
+	a.recordDialFailureEpoch(ctx, metadata, transport, proxy, vaneProxyPersistentIdentity(proxy), 0, err, now)
+}
+
+func (a *Vane) recordDialSuccess(metadata *C.Metadata, transport vaneTransport, candidate, identity string, now time.Time) {
+	a.recordDialSuccessEpoch(metadata, transport, candidate, identity, 0, now)
+}
+
+func (a *Vane) observeConnect(candidate string, transport vaneTransport, now time.Time, elapsed time.Duration) {
+	a.observeConnectIdentity(candidate, a.nodeIdentity(candidate), transport, now, elapsed)
+}
+
+func (a *Vane) observeResponse(candidate string, transport vaneTransport, now time.Time, elapsed time.Duration) {
+	a.observeResponseIdentity(candidate, a.nodeIdentity(candidate), transport, now, elapsed)
+}
+
+func (a *Vane) observeThroughput(candidate string, transport vaneTransport, now time.Time, bitsPerSecond float64) {
+	a.observeThroughputIdentity(candidate, a.nodeIdentity(candidate), transport, now, bitsPerSecond)
+}

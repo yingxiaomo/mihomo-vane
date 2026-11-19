@@ -726,11 +726,6 @@ func (a *Vane) lockVaneMediaIdentities(expected map[string]string) (func(), bool
 	return releaseAll, true
 }
 
-func (a *Vane) prepareMediaReconnect(targetKey vaneMediaTargetKey, target string, port uint16, current string, currentBPS float64) (vaneMediaPlan, bool) {
-	plan, reason := a.prepareMediaReconnectDetailed(targetKey, target, port, current, currentBPS)
-	return plan, reason == ""
-}
-
 func (a *Vane) vaneMediaIdentityCurrent(name, identity string, nodeEpoch uint64) bool {
 	if identity == "" {
 		return true
@@ -796,17 +791,34 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		return vaneMediaPlan{}, "budget-exhausted"
 	}
 
+	// BASELINE-COOLDOWN-001: the progressive target backoff gates the baseline
+	// path too — a challenger parked by a failed handoff for this target must
+	// not come back through the baseline snapshot.
+	stateKey, _ := a.targetKeyForMedia(target, port)
+
 	candidates := make([]vaneMediaChallenger, 0, len(health))
 	for _, item := range health {
 		proxy := item.proxy
 		if proxy.Name() == current || !item.alive {
 			continue
 		}
-		candidateKey := vaneMediaCandidateKey{vaneMediaTargetKey: targetKey, candidate: proxy.Name(), identity: vaneProxyPersistentIdentity(proxy)}
+		challengerIdentity := vaneProxyPersistentIdentity(proxy)
+		candidateKey := vaneMediaCandidateKey{vaneMediaTargetKey: targetKey, candidate: proxy.Name(), identity: challengerIdentity}
 		if a.mediaSlowCooldowns[candidateKey].After(now) {
 			continue
 		}
-		dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: target, port: port, candidate: proxy.Name(), identity: vaneProxyPersistentIdentity(proxy)}
+		// Same lease shape (name + identity + epoch) the failure records are
+		// keyed by, built the way the racing snapshot builds its lookup lease.
+		member := a.memberLeaseLocked(proxy.Name(), challengerIdentity)
+		if member.epoch == 0 {
+			if epoch := a.learning.nodeEpochs[vaneLearningNodeKey(member.name, member.identity)]; epoch != 0 {
+				member.epoch = epoch
+			}
+		}
+		if _, blocked := a.targetMemberBlockedLocked(stateKey, member, now); blocked {
+			continue
+		}
+		dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: target, port: port, candidate: proxy.Name(), identity: challengerIdentity}
 		if a.cooldownUntilLocked(dialKey, now, false).After(now) {
 			continue
 		}
@@ -879,14 +891,11 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 			}
 			return a.learning.nodeEpochs[vaneLearningNodeKey(candidates[0].proxy.Name(), vaneProxyPersistentIdentity(candidates[0].proxy))]
 		}(),
-		targetStateKey: func() vaneTargetKey {
-			key, _ := a.targetKeyForMedia(target, port)
-			return key
-		}(),
-		generation: a.learningGeneration,
-		knownGood:  candidates[0].knownGood,
-		currentBPS: currentBPS,
-		preparedAt: now,
+		targetStateKey: stateKey,
+		generation:     a.learningGeneration,
+		knownGood:      candidates[0].knownGood,
+		currentBPS:     currentBPS,
+		preparedAt:     now,
 	}, ""
 }
 
@@ -937,6 +946,19 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: plan.target, port: plan.port, candidate: plan.challenger, identity: plan.challengerIdentity}
 	if a.cooldownUntilLocked(dialKey, now, false).After(now) {
 		return "candidate-cooldown"
+	}
+	// BASELINE-COOLDOWN-001: re-check the progressive target block at commit
+	// time — the challenger may have entered its backoff window between
+	// prepare and commit. Same lease shape (name + identity + epoch) the
+	// failure records are keyed by, with the freshest epoch for this identity.
+	challengerEpoch := plan.challengerEpoch
+	if state := a.nodes[plan.challenger]; state != nil && state.identity == plan.challengerIdentity {
+		challengerEpoch = state.epoch
+	}
+	if _, blocked := a.targetMemberBlockedLocked(plan.targetStateKey, vaneMemberLease{
+		name: plan.challenger, identity: plan.challengerIdentity, epoch: challengerEpoch,
+	}, now); blocked {
+		return "candidate-blocked"
 	}
 	challengerKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity}
 	if a.mediaSlowCooldowns[challengerKey].After(now) {

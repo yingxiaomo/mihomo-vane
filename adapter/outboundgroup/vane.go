@@ -1190,10 +1190,6 @@ func vaneNeutralDialError(ctx context.Context, err error) bool {
 	return false
 }
 
-func (a *Vane) recordDialFailure(ctx context.Context, metadata *C.Metadata, transport vaneTransport, proxy C.Proxy, err error, now time.Time) {
-	a.recordDialFailureEpoch(ctx, metadata, transport, proxy, vaneProxyPersistentIdentity(proxy), 0, err, now)
-}
-
 func (a *Vane) recordDialFailureEpoch(ctx context.Context, metadata *C.Metadata, transport vaneTransport, proxy C.Proxy, identity string, nodeEpoch uint64, err error, now time.Time) {
 	if vaneNeutralDialError(ctx, err) {
 		return
@@ -1217,10 +1213,6 @@ func (a *Vane) recordDialFailureEpoch(ctx context.Context, metadata *C.Metadata,
 	a.learning.mu.Unlock()
 	a.mu.Unlock()
 	a.onDialFailed(proxy.Type(), err, a.healthCheck)
-}
-
-func (a *Vane) recordDialSuccess(metadata *C.Metadata, transport vaneTransport, candidate, identity string, now time.Time) {
-	a.recordDialSuccessEpoch(metadata, transport, candidate, identity, 0, now)
 }
 
 func (a *Vane) recordDialSuccessEpoch(metadata *C.Metadata, transport vaneTransport, candidate, identity string, nodeEpoch uint64, now time.Time) {
@@ -1248,10 +1240,6 @@ func (a *Vane) nodeIdentity(name string) string {
 	return a.nodeIdentities[name]
 }
 
-func (a *Vane) observeConnect(candidate string, transport vaneTransport, now time.Time, elapsed time.Duration) {
-	a.observeConnectIdentity(candidate, a.nodeIdentity(candidate), transport, now, elapsed)
-}
-
 func (a *Vane) observeConnectIdentity(candidate, identity string, transport vaneTransport, now time.Time, elapsed time.Duration) {
 	a.observeConnectEpochIdentity(candidate, identity, 0, transport, now, elapsed)
 }
@@ -1271,10 +1259,6 @@ func (a *Vane) observeConnectEpochIdentity(candidate, identity string, nodeEpoch
 	a.mu.Unlock()
 }
 
-func (a *Vane) observeResponse(candidate string, transport vaneTransport, now time.Time, elapsed time.Duration) {
-	a.observeResponseIdentity(candidate, a.nodeIdentity(candidate), transport, now, elapsed)
-}
-
 func (a *Vane) observeResponseIdentity(candidate, identity string, transport vaneTransport, now time.Time, elapsed time.Duration) {
 	a.observeResponseEpochIdentity(candidate, identity, 0, transport, now, elapsed)
 }
@@ -1292,10 +1276,6 @@ func (a *Vane) observeResponseEpochIdentity(candidate, identity string, nodeEpoc
 	a.learning.markDirtyLocked(now)
 	a.learning.mu.Unlock()
 	a.mu.Unlock()
-}
-
-func (a *Vane) observeThroughput(candidate string, transport vaneTransport, now time.Time, bitsPerSecond float64) {
-	a.observeThroughputIdentity(candidate, a.nodeIdentity(candidate), transport, now, bitsPerSecond)
 }
 
 func (a *Vane) observeThroughputIdentity(candidate, identity string, transport vaneTransport, now time.Time, bitsPerSecond float64) {

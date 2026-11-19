@@ -151,6 +151,97 @@ func TestVaneRacingProbe(t *testing.T) {
 	require.Equal(t, int32(5), proxy.dials.Load(), "each probe must dial the selected challenger directly")
 }
 
+// PROBE-BOUND-001: the measurement floor keeps a tiny body-read window from
+// inflating a proven lower bound; clamping errs low by design.
+func TestVaneProbeBoundDuration(t *testing.T) {
+	require.Equal(t, vaneRacingProbeMinDuration, vaneProbeBoundDuration(0))
+	require.Equal(t, vaneRacingProbeMinDuration, vaneProbeBoundDuration(time.Nanosecond))
+	require.Equal(t, vaneRacingProbeMinDuration, vaneProbeBoundDuration(vaneRacingProbeMinDuration-time.Nanosecond))
+	require.Equal(t, vaneRacingProbeMinDuration, vaneProbeBoundDuration(vaneRacingProbeMinDuration))
+	require.Equal(t, 150*time.Millisecond, vaneProbeBoundDuration(150*time.Millisecond))
+}
+
+// PROBE-BOUND-001: when the header consumes most of the probe budget the
+// body-read window shrinks to milliseconds, and without the 100ms measurement
+// floor a 4KB body would report an inflated ~32Mbps bound. That bound feeds
+// race verdicts, the capability cache and requiredBPS comparisons, so it must
+// stay conservative (≤1Mbps for 4KB) in both lower-bound branches.
+func TestVaneRacingProbeHeaderSlowBodyFastLowerBound(t *testing.T) {
+	payload := make([]byte, 16*1024)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/slow-header-cap":
+			// Header eats most of the 4s budget, then the body lands instantly:
+			// the measured body window is milliseconds, and the exact byteLimit
+			// makes the probe end in the cap-hit branch.
+			time.Sleep(3500 * time.Millisecond)
+			writer.Header().Set("Content-Length", fmt.Sprint(4096))
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write(payload[:4096])
+		case "/slow-header-stall":
+			// Same shape, but the probe ends in the read-timeout branch: 4KB
+			// arrive just before the deadline, then the body stalls.
+			time.Sleep(3900 * time.Millisecond)
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write(payload[:4096])
+			if flusher, ok := writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-request.Context().Done()
+		}
+	}))
+	server.EnableHTTP2 = false
+	server.StartTLS()
+	defer server.Close()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+	tlsConfig := &tls.Config{RootCAs: pool}
+	proxy := newVaneNetworkTestProxy("probe-bound")
+	parse := func(path string) *url.URL {
+		endpoint, err := url.Parse(server.URL + path)
+		require.NoError(t, err)
+		return endpoint
+	}
+
+	type probeOutcome struct {
+		path   string
+		result vaneProbeResult
+	}
+	outcomes := make(chan probeOutcome, 2)
+	run := func(path string, byteLimit int64) {
+		outcomes <- probeOutcome{path, probeVaneCapabilityWithTLSConfig(t.Context(), proxy, parse(path), byteLimit, tlsConfig)}
+	}
+	go run("/slow-header-cap", 4096)
+	go run("/slow-header-stall", 4<<20)
+	results := make(map[string]vaneProbeResult, 2)
+	for i := 0; i < 2; i++ {
+		outcome := <-outcomes
+		results[outcome.path] = outcome.result
+	}
+	require.Equal(t, int32(2), proxy.dials.Load(), "each probe must dial the selected challenger directly")
+
+	capResult := results["/slow-header-cap"]
+	require.True(t, capResult.valid)
+	require.True(t, capResult.capHit)
+	require.Equal(t, int64(4096), capResult.bytes)
+	require.GreaterOrEqual(t, capResult.duration, vaneRacingProbeMinDuration, "the measurement floor must hold the duration")
+	require.LessOrEqual(t, capResult.lowerBoundBPS, 1_000_000.0,
+		"4KB over a millisecond body window must clamp to ~0.33Mbps, not inflate to 32Mbps")
+	require.InDelta(t, 8*float64(capResult.bytes)/capResult.duration.Seconds(), capResult.lowerBoundBPS, 1,
+		"the lower bound must use the cap-hit formula on the clamped duration")
+
+	timeoutResult := results["/slow-header-stall"]
+	require.True(t, timeoutResult.valid, "bytes read before the deadline still measure the node")
+	require.Equal(t, "read-timeout", timeoutResult.reason)
+	require.Equal(t, int64(4096), timeoutResult.bytes)
+	require.GreaterOrEqual(t, timeoutResult.duration, vaneRacingProbeMinDuration, "the measurement floor must hold the duration")
+	require.LessOrEqual(t, timeoutResult.lowerBoundBPS, 1_000_000.0,
+		"4KB over a near-expired budget must clamp instead of inflating the bound")
+	require.InDelta(t, 8*float64(timeoutResult.bytes)/timeoutResult.duration.Seconds(), timeoutResult.lowerBoundBPS, 1,
+		"the lower bound must use the read-timeout formula on the clamped duration")
+}
+
 // PROBE-PARTIAL-001: bytes already read when the probe deadline fires are a
 // proven lower bound, while zero bytes, early-eof and read-error stay invalid.
 func TestVaneRacingProbePartialReadIsLowerBound(t *testing.T) {

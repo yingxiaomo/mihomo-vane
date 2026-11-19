@@ -19,6 +19,13 @@ const (
 	vaneDiagnosticsRecentEventLimit = 64
 	vaneDiagnosticsRegistryLimit    = 256
 	vaneDiagnosticsPersistInterval  = 30 * time.Second
+
+	// vaneBaselineTokenIDBase offsets baseline reconnect token IDs far away
+	// from the race task ID space (nextTaskID counts up from 1), so a stale
+	// race settlement can never present an ID that matches a live baseline
+	// lease. The offset only shapes the ID namespace; Sequence-derived IDs
+	// remain purely a diagnostics display concern.
+	vaneBaselineTokenIDBase = uint64(1) << 40
 )
 
 // VaneDiagnosticCounters contains cumulative Vane observations.
@@ -246,6 +253,12 @@ type vaneDiagnostics struct {
 	redirect        *vaneDiagnostics
 	lastAccess      atomic.Uint64
 	persistRetryAt  time.Time
+	// nextBaselineTokenID allocates IDs for baseline reconnect tokens. It
+	// lives far away from the race task ID space (nextTaskID counts up from
+	// 1) so a stale race settlement can never present an ID that matches a
+	// live baseline lease. Sequence-based IDs used to serve this purpose and
+	// collided in the narrow window where the event ring was still short.
+	nextBaselineTokenID uint64
 
 	persistMu         sync.Mutex
 	persistRunning    bool
@@ -581,12 +594,11 @@ func (d *vaneDiagnostics) recordReconnectCommit(record vaneDiagnosticRecord) *va
 		record.force = true
 		// A caller-supplied handoffID (a race task ID) wins: it stitches the
 		// race-stage events to every handoff lifecycle event. Otherwise the
-		// commit event derives its own sequence-based ID as before.
+		// commit event takes an ID from the dedicated baseline counter, which
+		// lives far above the race task ID space so the two can never collide.
 		if record.handoffID == 0 {
-			record.handoffID = uint64(1)
-			if events := d.snapshotData.RecentEvents; len(events) > 0 {
-				record.handoffID = events[len(events)-1].Sequence + 1
-			}
+			d.nextBaselineTokenID++
+			record.handoffID = vaneBaselineTokenIDBase + d.nextBaselineTokenID
 		}
 		event := d.recordLocked(record)
 		d.mu.Unlock()

@@ -216,6 +216,89 @@ func TestVaneMediaCommitRejectsReplacementDuringHealthCheck(t *testing.T) {
 	require.Equal(t, "stale-node-identity", group.commitMediaReconnectDetailed(plan))
 }
 
+// BASELINE-COOLDOWN-001: the progressive target backoff gates the baseline
+// reconnect path the same way it gates the racing snapshot — a challenger that
+// failed a handoff for this target must not be re-picked by the baseline, and
+// a block written between prepare and commit must reject the commit.
+func TestVaneBaselineReconnectRespectsTargetBlock(t *testing.T) {
+	newBlockedGroup := func(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestProxy, *vaneTestProxy, *vaneTestProxy, *C.Metadata, vaneMediaTargetKey) {
+		t.Helper()
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		alpha.identity = "alpha-old"
+		alpha.delay = 20
+		beta := newVaneTestProxy("beta", true, true)
+		beta.identity = "beta"
+		beta.delay = 10
+		gamma := newVaneTestProxy("gamma", true, true)
+		gamma.identity = "gamma"
+		gamma.delay = 30
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		metadata := &C.Metadata{Host: "rr-block.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+		key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+		return group, clock, alpha, beta, gamma, metadata, key
+	}
+
+	t.Run("prepare skips a challenger inside its target block", func(t *testing.T) {
+		group, clock, _, beta, _, metadata, key := newBlockedGroup(t)
+		require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
+		group.mu.Lock()
+		state := group.nodes["alpha"]
+		identity, epoch := state.identity, state.epoch
+		group.mu.Unlock()
+
+		// Without the block the baseline picks beta (better delay, name order).
+		plan, reason := group.prepareMediaReconnectForNodeDetailed(key, metadata.Host, metadata.DstPort, "alpha", identity, epoch, 2_000_000)
+		require.Empty(t, reason)
+		require.Equal(t, "beta", plan.challenger)
+
+		// Seed the progressive block the way a failed handoff leaves it.
+		group.mu.Lock()
+		targetKey, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+		member := group.memberLeaseLocked(beta.Name(), beta.identity)
+		group.targetFailures[vaneTargetFailureKey{target: targetKey, member: member}] = vaneTargetFailureState{
+			streak: 1, blockUntil: clock.Now().Add(30 * time.Second), lastFailureAt: clock.Now(),
+		}
+		group.mu.Unlock()
+
+		blockedPlan, reason := group.prepareMediaReconnectForNodeDetailed(key, metadata.Host, metadata.DstPort, "alpha", identity, epoch, 2_000_000)
+		require.Empty(t, reason)
+		require.Equal(t, "gamma", blockedPlan.challenger, "the blocked challenger must be skipped for the idle one")
+	})
+
+	t.Run("commit rejects a challenger blocked after prepare", func(t *testing.T) {
+		group, clock, _, beta, _, metadata, key := newBlockedGroup(t)
+		require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
+		group.mu.Lock()
+		state := group.nodes["alpha"]
+		identity, epoch := state.identity, state.epoch
+		group.mu.Unlock()
+		plan, reason := group.prepareMediaReconnectForNodeDetailed(key, metadata.Host, metadata.DstPort, "alpha", identity, epoch, 2_000_000)
+		require.Empty(t, reason)
+		require.Equal(t, "beta", plan.challenger)
+
+		// The block appears after prepare — as if a handoff failed while the
+		// plan was in flight — and the commit must not land on it.
+		group.mu.Lock()
+		member := group.memberLeaseLocked(beta.Name(), beta.identity)
+		group.targetFailures[vaneTargetFailureKey{target: plan.targetStateKey, member: member}] = vaneTargetFailureState{
+			streak: 1, blockUntil: clock.Now().Add(30 * time.Second), lastFailureAt: clock.Now(),
+		}
+		group.mu.Unlock()
+		require.Equal(t, "candidate-blocked", group.commitMediaReconnectDetailed(plan))
+
+		// A commit without the block still goes through on the same plan shape.
+		group.mu.Lock()
+		delete(group.targetFailures, vaneTargetFailureKey{target: plan.targetStateKey, member: member})
+		group.mu.Unlock()
+		freshPlan, reason := group.prepareMediaReconnectForNodeDetailed(key, metadata.Host, metadata.DstPort, "alpha", identity, epoch, 2_000_000)
+		require.Empty(t, reason)
+		require.Equal(t, "beta", freshPlan.challenger)
+		require.Empty(t, group.commitMediaReconnectDetailed(freshPlan))
+	})
+}
+
 // TARGET-LEASE-001: repeated provider entries deduplicate to one lease.
 func TestVaneMediaProviderLeaseDeduplicatesRepeatedProvider(t *testing.T) {
 	clock := newVaneConnTestClock()
@@ -788,4 +871,10 @@ func TestVaneMediaGeoSiteGate(t *testing.T) {
 		require.Equal(t, vaneMediaTargetKey{port: 443},
 			group.mediaTargetKey("www.youtube.com", 443))
 	})
+}
+
+// TEST-WRAP-001: test-only convenience, moved out of vane_media.go.
+func (a *Vane) prepareMediaReconnect(targetKey vaneMediaTargetKey, target string, port uint16, current string, currentBPS float64) (vaneMediaPlan, bool) {
+	plan, reason := a.prepareMediaReconnectDetailed(targetKey, target, port, current, currentBPS)
+	return plan, reason == ""
 }

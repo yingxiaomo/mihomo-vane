@@ -50,6 +50,87 @@ func newTargetGroupForTest(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestPr
 	return group, clock, alpha, beta, metadata
 }
 
+// TOKEN-ID-001: baseline-derived handoff IDs must live far above the race task
+// ID space. Before the dedicated baseline counter, a commit without a race
+// task ID derived its ID from the diagnostics Sequence — small numbers on a
+// fresh group, exactly where race task IDs (nextTaskID counts up from 1) live
+// — so a stale race settlement carrying the same task ID and member could be
+// accepted against a lease it never created, feeding the preference judgment
+// the race's previousBPS.
+func TestVaneBaselineTokenIDNeverCollidesWithRaceTaskID(t *testing.T) {
+	t.Run("baseline lease ids stay outside the race task space", func(t *testing.T) {
+		group, _, _, beta, metadata := newTargetGroupForTest(t)
+		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+		require.Zero(t, plan.raceID, "a plan without a race task ID takes the baseline derivation")
+		require.Empty(t, group.commitTargetHandoff(plan))
+		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		require.NotNil(t, decision.handoff)
+		require.Greater(t, decision.handoff.id, vaneBaselineTokenIDBase,
+			"a Sequence-derived ID would sit inside the race task ID space (1, 2, 3, ...)")
+
+		// A second commit on another port: strictly increasing IDs from the
+		// same counter, still far from every race task ID.
+		otherPort := *metadata
+		otherPort.DstPort = 8443
+		second := prepareTargetHandoffForTest(t, group, &otherPort, beta)
+		require.Empty(t, group.commitTargetHandoff(second))
+		secondDecision := group.pickDecision(&otherPort, vaneTransportTCP, false, true)
+		require.NotNil(t, secondDecision.handoff)
+		require.Greater(t, secondDecision.handoff.id, decision.handoff.id, "baseline IDs must be strictly increasing")
+	})
+
+	t.Run("stale race settlement cannot claim a baseline lease", func(t *testing.T) {
+		group, _, _, beta, metadata := newTargetGroupForTest(t)
+		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+		require.Empty(t, group.commitTargetHandoff(plan))
+		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		require.NotNil(t, decision.handoff)
+
+		// Task ID 1 is what the very first race on a fresh group carries; the
+		// member matches the lease on purpose, so only the ID must reject it.
+		stale := *decision.handoff
+		stale.id = 1
+		stale.previousBPS = 50_000_000
+		group.settleTargetHandoff(&stale, decision.handoff.toLease, vaneThroughputObservation{
+			BitsPerSecond: 40_000_000, TotalBytes: 24 * 1024 * 1024, Age: 3 * time.Second,
+		})
+		targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+		require.True(t, ok)
+		group.mu.Lock()
+		lease, alive := group.targetHandoffs[targetKey]
+		require.True(t, alive, "a mismatched settlement must not consume the lease")
+		require.Equal(t, decision.handoff.id, lease.id)
+		require.Empty(t, group.targetPreferences, "no preference may form from the wrong previousBPS")
+		group.mu.Unlock()
+		require.Zero(t, group.VaneDiagnostics().Counters.HandoffImproved)
+
+		// The lease's own token still settles and judges improvement by the
+		// previousBPS it was created with.
+		group.settleTargetHandoff(decision.handoff, decision.handoff.toLease, vaneThroughputObservation{
+			BitsPerSecond: 40_000_000, TotalBytes: 24 * 1024 * 1024, Age: 3 * time.Second,
+		})
+		group.mu.Lock()
+		require.Empty(t, group.targetHandoffs[targetKey], "the matched settlement consumes the lease")
+		require.NotEmpty(t, group.targetPreferences)
+		group.mu.Unlock()
+		require.Positive(t, group.VaneDiagnostics().Counters.HandoffImproved)
+	})
+
+	t.Run("race-supplied task id still owns its lease", func(t *testing.T) {
+		group, _, _, beta, metadata := newTargetGroupForTest(t)
+		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+		plan.raceID = 3
+		require.Empty(t, group.commitTargetHandoff(plan))
+		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		require.NotNil(t, decision.handoff)
+		require.Equal(t, uint64(3), decision.handoff.id, "a caller-supplied race task ID must win unchanged")
+		group.settleTargetHandoff(decision.handoff, decision.handoff.toLease, vaneThroughputObservation{
+			BitsPerSecond: 40_000_000, TotalBytes: 24 * 1024 * 1024, Age: 3 * time.Second,
+		})
+		require.Positive(t, group.VaneDiagnostics().Counters.HandoffImproved)
+	})
+}
+
 // TARGET-LEASE-001 + TARGET-SCOPE-001: lease scope isolation and single-outcome tokens.
 func TestVaneTargetHandoffLeaseScopeAndSingleOutcomeToken(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)

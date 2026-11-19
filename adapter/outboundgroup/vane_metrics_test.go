@@ -2,6 +2,7 @@ package outboundgroup
 
 import (
 	"math"
+	"sort"
 	"testing"
 	"time"
 
@@ -397,4 +398,51 @@ func TestVaneSceneGeoSite(t *testing.T) {
 		"fail-closed: no database means the rule never matches, quietly")
 	require.Equal(t, vaneSceneDefault, classifyVaneScene(&C.Metadata{}, []vaneSceneRule{rule}),
 		"an empty host never matches")
+}
+
+// vaneMetricBank is a small clock-injected convenience for event writers.
+// Selection can copy metrics and call snapshot with one shared timestamp.
+// TEST-WRAP-001: test-only, moved out of vane_metrics.go.
+type vaneMetricBank struct {
+	clock   vaneClock
+	metrics vaneMetrics
+}
+
+func newVaneMetricBank(clock vaneClock) *vaneMetricBank {
+	if clock == nil {
+		clock = vaneSystemClock{}
+	}
+	return &vaneMetricBank{clock: clock}
+}
+
+func (b *vaneMetricBank) observeFailure(failed bool) {
+	b.metrics.observeFailure(b.clock.Now(), failed)
+}
+
+func (b *vaneMetricBank) observeConnect(elapsed time.Duration) {
+	b.metrics.observeConnect(b.clock.Now(), elapsed)
+}
+
+func (b *vaneMetricBank) observeResponse(elapsed time.Duration) {
+	b.metrics.observeResponse(b.clock.Now(), elapsed)
+}
+
+func (b *vaneMetricBank) observeThroughput(bitsPerSecond float64) {
+	b.metrics.observeThroughput(b.clock.Now(), bitsPerSecond)
+}
+
+func (b *vaneMetricBank) snapshot() vaneMetricsSnapshot {
+	return b.metrics.snapshot(b.clock.Now())
+}
+
+// TEST-WRAP-001: test-only, moved out of vane_metrics.go.
+func rankVaneCandidates(scene vaneScene, snapshots map[string]vaneMetricsSnapshot) []vaneCandidateScore {
+	ranked := make([]vaneCandidateScore, 0, len(snapshots))
+	for name, snapshot := range snapshots {
+		ranked = append(ranked, vaneCandidateScore{name: name, scoreMicros: scoreVaneMetrics(scene, snapshot)})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		return compareVaneCandidateScores(ranked[i], ranked[j]) < 0
+	})
+	return ranked
 }

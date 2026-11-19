@@ -193,6 +193,24 @@ func TestVaneB2Step3StallCooldown(t *testing.T) {
 		require.ElementsMatch(t, []string{"beta", "gamma"}, raceCandidateNames(candidates))
 	})
 
+	// B2-STEP3-005: exactly 5 attempts is where the minimum-sample gate and the
+	// ratio line meet — the most easily misjudged point of the stall rule.
+	t.Run("exactly five attempts above the line is frequent", func(t *testing.T) {
+		group, request, betaMember, _ := newGroup(t)
+		seedStall(t, group, *request, betaMember, 2, 5)
+		candidates, reason := group.snapshotRaceCandidates(*request)
+		require.Empty(t, reason)
+		require.Equal(t, []string{"gamma"}, raceCandidateNames(candidates), "2/5=0.40 clears the line once the sample minimum is met")
+	})
+
+	t.Run("exactly five attempts on the line is not frequent", func(t *testing.T) {
+		group, request, betaMember, _ := newGroup(t)
+		seedStall(t, group, *request, betaMember, 1, 5)
+		candidates, reason := group.snapshotRaceCandidates(*request)
+		require.Empty(t, reason)
+		require.ElementsMatch(t, []string{"beta", "gamma"}, raceCandidateNames(candidates), "1/5=0.20 touches the line without clearing it")
+	})
+
 	t.Run("clean settlements dilute the rate", func(t *testing.T) {
 		group, request, betaMember, _ := newGroup(t)
 		seedStall(t, group, *request, betaMember, 3, 10)
