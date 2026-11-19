@@ -853,7 +853,12 @@ func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoi
 			if errors.Is(probeCtx.Err(), context.Canceled) {
 				return vaneProbeResult{reason: "canceled", bytes: total, duration: duration}
 			}
-			if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			// A timeout from either budget counts: the context deadline and the
+			// connection deadline are set milliseconds apart, so Read often
+			// returns an i/o timeout before probeCtx.Err() flips. Classifying
+			// on the context alone made this depend on which timer won.
+			var netErr net.Error
+			if errors.Is(probeCtx.Err(), context.DeadlineExceeded) || (errors.As(readErr, &netErr) && netErr.Timeout()) {
 				// A deadline that fires after bytes arrived already measured what
 				// the node delivered: those bytes are a proven lower bound, using
 				// the same formula as a cap-hit. Zero bytes stays invalid because
