@@ -589,6 +589,13 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		if a.racing.mode == vaneRacingOn {
 			observed.enableDirectPolicy()
 		}
+		// Shadow: direct reads may run the window policy too, but only to
+		// observe. Their actions are discarded at the gate, so shadow
+		// records would-handoff without changing any traffic
+		// (SHADOW-OBSERVE-001).
+		if a.racing.mode == vaneRacingShadow {
+			observed.enableShadowObserve()
+		}
 		if mediaFlow != nil {
 			mediaFlow.setPolicySubmitter(observed.submitPolicyAction)
 		}

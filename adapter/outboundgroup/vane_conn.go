@@ -168,7 +168,16 @@ type vaneObservedConn struct {
 	nativeCloseOnce  sync.Once
 	closeErr         error
 	directPolicy     bool
-	pendingAction    vanePolicyAction
+	// shadowObserve lets the window policy run on undelivered windows
+	// while racing is in shadow mode, purely to observe: the policy runs so
+	// low windows accumulate and races get scheduled, but the action it
+	// returns is discarded, never queued and never executed, so shadow
+	// records would-handoff without changing any traffic. Without it, shadow
+	// can only observe delivered windows, and a flow that mostly reads
+	// directly never reaches the policy at all — the shadow deadlock
+	// (SHADOW-OBSERVE-001).
+	shadowObserve bool
+	pendingAction vanePolicyAction
 }
 
 type vanePolicyAction func() bool
@@ -568,20 +577,25 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 	if recordThroughput && c.onWindow != nil {
 		c.mu.Lock()
 		directPolicy := c.directPolicy
+		shadowObserve := c.shadowObserve
 		c.mu.Unlock()
-		if !delivered && !directPolicy {
-			return
-		}
-		observation.Delivered = delivered
-		if action := c.onWindow(observation); action != nil {
-			if delivered {
-				c.requestAbort(action)
-			} else {
-				c.mu.Lock()
-				if c.pendingAction == nil {
-					c.pendingAction = action
+		if delivered || directPolicy || shadowObserve {
+			observation.Delivered = delivered
+			if action := c.onWindow(observation); action != nil {
+				if shadowObserve && !delivered && !directPolicy {
+					// Shadow observes only: the race was already scheduled
+					// inside the policy, and would-handoff is recorded by
+					// the race callback. Discarding the baseline action
+					// keeps shadow from changing any traffic.
+				} else if delivered {
+					c.requestAbort(action)
+				} else {
+					c.mu.Lock()
+					if c.pendingAction == nil {
+						c.pendingAction = action
+					}
+					c.mu.Unlock()
 				}
-				c.mu.Unlock()
 			}
 		}
 	}
@@ -590,6 +604,18 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 func (c *vaneObservedConn) enableDirectPolicy() {
 	c.mu.Lock()
 	c.directPolicy = true
+	c.mu.Unlock()
+}
+
+// enableShadowObserve lets the window policy run on undelivered windows
+// while racing is in shadow mode, purely to observe. The policy runs so low
+// windows accumulate and races get scheduled, but the action it returns is
+// discarded at the gate, never queued and never executed. Without it, shadow
+// can only observe delivered windows, and a flow that mostly reads directly
+// never reaches the policy at all — the shadow deadlock (SHADOW-OBSERVE-001).
+func (c *vaneObservedConn) enableShadowObserve() {
+	c.mu.Lock()
+	c.shadowObserve = true
 	c.mu.Unlock()
 }
 
