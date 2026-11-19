@@ -1,8 +1,8 @@
 package outboundgroup
 
 import (
-	"net/url"
 	"fmt"
+	"net/url"
 	"sort"
 	"testing"
 	"time"

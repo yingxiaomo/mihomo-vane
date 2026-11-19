@@ -173,9 +173,9 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 // RACE-IDENTITY-001 + TARGET-COOLDOWN-001: selection skips stale identities and cooldown-bound members.
 func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 	cases := []struct {
-		name       string
-		identity   string
-		mutate     func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease)
+		name     string
+		identity string
+		mutate   func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease)
 	}{
 		{
 			name:     "stale preference identity",
