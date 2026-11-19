@@ -15,13 +15,15 @@ import (
 )
 
 const (
-	vaneDefaultMediaLowThroughputBPS = int64(3_000_000)
+	// These media thresholds are behavior constants, not user policy knobs.
+	// Changing them requires a kernel rebuild; demand, scope and switches remain configurable.
+	vaneDefaultMediaLowThroughputBPS = int64(5_000_000)
 	vaneDefaultMediaLowWindows       = 3
 	vaneDefaultMediaMaxLowWindows    = 6
 	vaneDefaultMediaMinAge           = 15 * time.Second
 	vaneDefaultMediaMinBytes         = int64(2 * 1024 * 1024)
 	vaneDefaultMediaDemandBPS        = int64(1_000_000)
-	vaneDefaultMediaBufferGuard      = 3 * time.Second
+	vaneDefaultMediaBufferGuard      = 5 * time.Second
 	vaneDefaultMediaReconnectDelay   = 10 * time.Minute
 	vaneDefaultMediaSlowCooldown     = 30 * time.Minute
 	vaneDefaultMediaHintTTL          = 15 * time.Second
@@ -134,18 +136,6 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 		config.domains = append(config.domains, domain)
 	}
 
-	if option.MediaLowThroughput < 0 || option.MediaLowThroughput > vaneMaximumMediaThroughputBPS {
-		return vaneMediaConfig{}, fmt.Errorf("media-low-throughput must be between 0 and %d", vaneMaximumMediaThroughputBPS)
-	}
-	if option.MediaLowThroughput > 0 {
-		config.lowThroughputBPS = float64(option.MediaLowThroughput)
-	}
-	if option.MediaLowWindows < 0 {
-		return vaneMediaConfig{}, fmt.Errorf("media-low-windows must not be negative")
-	}
-	if option.MediaLowWindows > 0 {
-		config.lowWindows = option.MediaLowWindows
-	}
 	if option.MediaMaxLowWindows < 0 {
 		return vaneMediaConfig{}, fmt.Errorf("media-max-low-windows must not be negative")
 	}
@@ -155,49 +145,12 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 	if config.maxLowWindows < config.lowWindows {
 		return vaneMediaConfig{}, fmt.Errorf("media-max-low-windows must be at least media-low-windows")
 	}
-	if option.MediaMinBytes < 0 {
-		return vaneMediaConfig{}, fmt.Errorf("media-min-bytes must not be negative")
-	}
-	if option.MediaMinBytes > 0 {
-		config.minBytes = option.MediaMinBytes
-	}
+
 	if option.MediaDemandBPS < 0 || option.MediaDemandBPS > vaneMaximumMediaThroughputBPS {
 		return vaneMediaConfig{}, fmt.Errorf("media-demand-bps must be between 0 and %d", vaneMaximumMediaThroughputBPS)
 	}
 	if option.MediaDemandBPS > 0 {
 		config.demandBPS = float64(option.MediaDemandBPS)
-	}
-	if option.MediaChallengerRatio < 0 || (option.MediaChallengerRatio > 0 && option.MediaChallengerRatio < 1) {
-		return vaneMediaConfig{}, fmt.Errorf("media-challenger-ratio must be zero or at least 1")
-	}
-	if option.MediaChallengerRatio > 0 {
-		config.challengerRatio = option.MediaChallengerRatio
-	}
-	if option.MediaReconnectBudget < 0 {
-		return vaneMediaConfig{}, fmt.Errorf("media-reconnect-budget must not be negative")
-	}
-	if option.MediaReconnectBudget > 0 {
-		config.budgetMax = option.MediaReconnectBudget
-	}
-
-	var err error
-	if config.minAge, err = vaneDurationOption("media-min-age", option.MediaMinAge, vaneDefaultMediaMinAge); err != nil {
-		return vaneMediaConfig{}, err
-	}
-	if config.bufferGuard, err = vaneDurationOption("media-buffer-guard", option.MediaBufferGuard, vaneDefaultMediaBufferGuard); err != nil {
-		return vaneMediaConfig{}, err
-	}
-	if config.reconnectCooldown, err = vaneDurationOption("media-reconnect-cooldown", option.MediaReconnectCooldown, vaneDefaultMediaReconnectDelay); err != nil {
-		return vaneMediaConfig{}, err
-	}
-	if config.slowCooldown, err = vaneDurationOption("media-slow-cooldown", option.MediaSlowCooldown, vaneDefaultMediaSlowCooldown); err != nil {
-		return vaneMediaConfig{}, err
-	}
-	if config.hintTTL, err = vaneDurationOption("media-hint-ttl", option.MediaHintTTL, vaneDefaultMediaHintTTL); err != nil {
-		return vaneMediaConfig{}, err
-	}
-	if config.budgetWindow, err = vaneDurationOption("media-budget-window", option.MediaBudgetWindow, vaneDefaultMediaBudgetWindow); err != nil {
-		return vaneMediaConfig{}, err
 	}
 	return config, nil
 }

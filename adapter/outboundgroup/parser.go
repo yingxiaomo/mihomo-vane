@@ -15,6 +15,28 @@ import (
 	"github.com/metacubex/mihomo/log"
 )
 
+func checkVaneRemovedMediaKeys(config map[string]any) error {
+	var found []string
+	for _, key := range vaneRemovedMediaKeys {
+		for supplied := range config {
+			if strings.EqualFold(supplied, key) {
+				found = append(found, key)
+				break
+			}
+		}
+	}
+	if len(found) != 0 {
+		return fmt.Errorf("vane media thresholds %s are now hardcoded in the kernel; remove them from the config", strings.Join(found, ", "))
+	}
+	return nil
+}
+
+var vaneRemovedMediaKeys = []string{
+	"media-low-throughput", "media-low-windows", "media-min-age", "media-min-bytes",
+	"media-buffer-guard", "media-reconnect-cooldown", "media-slow-cooldown", "media-hint-ttl",
+	"media-challenger-ratio", "media-reconnect-budget", "media-budget-window",
+}
+
 var (
 	errFormat            = errors.New("format error")
 	errType              = errors.New("unsupported type")
@@ -57,6 +79,11 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 
 	if groupOption.Type == "" || groupOption.Name == "" {
 		return nil, errFormat
+	}
+	if groupOption.Type == "vane" {
+		if err := checkVaneRemovedMediaKeys(config); err != nil {
+			return nil, err
+		}
 	}
 
 	if _, ok := config["routing-mark"]; ok {

@@ -677,57 +677,64 @@ func TestVaneMediaCandidateCooldownPrunesExpiredEntries(t *testing.T) {
 	require.Empty(t, group.mediaSlowCooldowns)
 }
 
+func TestVaneMediaFixedPolicyBoundaries(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	defer group.Close()
+	rules, err := parseVaneSceneRules([]string{"DOMAIN-SUFFIX,googlevideo.com,media"})
+	require.NoError(t, err)
+	group.rules = rules
+	group.media, err = newVaneMediaConfig(VaneOption{MediaReconnect: true, MediaDemandBPS: 5_000_000})
+	require.NoError(t, err)
+	flow := vaneMediaFlow{group: group}
+	require.Equal(t, float64(5_000_000), flow.raceRequest(vaneThroughputObservation{BitsPerSecond: 2_000_000}, 3).requiredBPS)
+
+	now := clock.Now()
+	host := "rr9.googlevideo.com"
+	key := group.mediaTargetKey(host, 443)
+	require.NotEmpty(t, key.target)
+	group.mediaHints[key] = vaneMediaHint{expiresAt: now}
+	group.mediaBudgets[key] = vaneMediaBudget{startedAt: now.Add(-group.media.budgetWindow), count: group.media.budgetMax}
+	candidate := vaneMediaCandidateKey{vaneMediaTargetKey: key, candidate: "alpha"}
+	group.mediaSlowCooldowns[candidate] = now
+	require.True(t, group.mediaCooldownUntilLocked(host, 443, "alpha", now).IsZero())
+	require.NotContains(t, group.mediaSlowCooldowns, candidate)
+	group.pruneMediaLocked(now)
+	require.NotContains(t, group.mediaHints, key)
+	require.NotContains(t, group.mediaBudgets, key)
+}
+
 func TestVaneMediaConfigValidation(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	group, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{
-		MediaReconnect:         true,
-		MediaReconnectDomains:  []string{"GoogleVideo.Com."},
-		MediaLowThroughput:     5_000_000,
-		MediaLowWindows:        4,
-		MediaMaxLowWindows:     8,
-		MediaMinAge:            20,
-		MediaMinBytes:          8 * 1024 * 1024,
-		MediaDemandBPS:         2_000_000,
-		MediaBufferGuard:       5,
-		MediaReconnectCooldown: 180,
-		MediaSlowCooldown:      600,
-		MediaHintTTL:           10,
-		MediaChallengerRatio:   1.5,
-		MediaReconnectBudget:   2,
-		MediaBudgetWindow:      900,
+		MediaReconnect:        true,
+		MediaMaxLowWindows:    8,
+		MediaDemandBPS:        2_000_000,
+		MediaReconnectDomains: []string{"GoogleVideo.Com."},
 	}, fallback, nil)
 	require.NoError(t, err)
 	require.True(t, group.media.enabled)
 	require.Equal(t, float64(5_000_000), group.media.lowThroughputBPS)
-	require.Equal(t, 4, group.media.lowWindows)
+	require.Equal(t, vaneDefaultMediaLowWindows, group.media.lowWindows)
 	require.Equal(t, 8, group.media.maxLowWindows)
 	require.Equal(t, []string{"googlevideo.com"}, group.media.domains)
-	require.Equal(t, 20*time.Second, group.media.minAge)
-	require.Equal(t, int64(8*1024*1024), group.media.minBytes)
+	require.Equal(t, vaneDefaultMediaMinAge, group.media.minAge)
+	require.Equal(t, vaneDefaultMediaMinBytes, group.media.minBytes)
 	require.Equal(t, float64(2_000_000), group.media.demandBPS)
 	require.Equal(t, 5*time.Second, group.media.bufferGuard)
-	require.Equal(t, 180*time.Second, group.media.reconnectCooldown)
-	require.Equal(t, 600*time.Second, group.media.slowCooldown)
-	require.Equal(t, 10*time.Second, group.media.hintTTL)
-	require.Equal(t, 1.5, group.media.challengerRatio)
-	require.Equal(t, 2, group.media.budgetMax)
-	require.Equal(t, 900*time.Second, group.media.budgetWindow)
+	require.Equal(t, vaneDefaultMediaReconnectDelay, group.media.reconnectCooldown)
+	require.Equal(t, vaneDefaultMediaSlowCooldown, group.media.slowCooldown)
+	require.Equal(t, vaneDefaultMediaHintTTL, group.media.hintTTL)
+	require.Equal(t, vaneDefaultMediaChallengerRatio, group.media.challengerRatio)
+	require.Equal(t, vaneDefaultMediaBudgetMax, group.media.budgetMax)
+	require.Equal(t, vaneDefaultMediaBudgetWindow, group.media.budgetWindow)
 
 	invalid := []VaneOption{
-		{MediaLowThroughput: -1},
-		{MediaLowWindows: -1},
 		{MediaMaxLowWindows: -1},
-		{MediaLowWindows: 4, MediaMaxLowWindows: 3},
-		{MediaMinAge: -1},
-		{MediaMinBytes: -1},
+		{MediaMaxLowWindows: 2}, // low-windows is now a fixed 3
 		{MediaDemandBPS: -1},
-		{MediaBufferGuard: -1},
-		{MediaReconnectCooldown: -1},
-		{MediaSlowCooldown: -1},
-		{MediaHintTTL: -1},
-		{MediaChallengerRatio: 0.5},
-		{MediaReconnectBudget: -1},
-		{MediaBudgetWindow: -1},
+		{MediaDemandBPS: vaneMaximumMediaThroughputBPS + 1},
 		{MediaReconnectDomains: []string{".."}},
 		{MediaReconnectDomains: []string{".googlevideo.com"}},
 		{MediaReconnectDomains: []string{"rr..googlevideo.com"}},

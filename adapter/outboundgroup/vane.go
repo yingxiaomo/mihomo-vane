@@ -45,19 +45,8 @@ type VaneOption struct {
 	GrayFailureObservation bool     `group:"gray-failure-observation,omitempty"`
 	MediaReconnect         bool     `group:"media-reconnect,omitempty"`
 	MediaReconnectDomains  []string `group:"media-reconnect-domains,omitempty"`
-	MediaLowThroughput     int64    `group:"media-low-throughput,omitempty"`
-	MediaLowWindows        int      `group:"media-low-windows,omitempty"`
 	MediaMaxLowWindows     int      `group:"media-max-low-windows,omitempty"`
-	MediaMinAge            int      `group:"media-min-age,omitempty"`
-	MediaMinBytes          int64    `group:"media-min-bytes,omitempty"`
 	MediaDemandBPS         int64    `group:"media-demand-bps,omitempty"`
-	MediaBufferGuard       int      `group:"media-buffer-guard,omitempty"`
-	MediaReconnectCooldown int      `group:"media-reconnect-cooldown,omitempty"`
-	MediaSlowCooldown      int      `group:"media-slow-cooldown,omitempty"`
-	MediaHintTTL           int      `group:"media-hint-ttl,omitempty"`
-	MediaChallengerRatio   float64  `group:"media-challenger-ratio,omitempty"`
-	MediaReconnectBudget   int      `group:"media-reconnect-budget,omitempty"`
-	MediaBudgetWindow      int      `group:"media-budget-window,omitempty"`
 	Racing                 string   `group:"racing,omitempty"`
 	RacingURL              string   `group:"racing-url,omitempty"`
 	RacingBudgetMBHour     int64    `group:"racing-budget-mb-hour,omitempty"`

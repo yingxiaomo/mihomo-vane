@@ -229,6 +229,42 @@ func TestNewVaneOptions(t *testing.T) {
 	require.EqualError(t, err, "empty fallback proxy not exist")
 }
 
+func TestVaneMediaRemovedKeysRejected(t *testing.T) {
+	keys := []string{
+		"media-low-throughput", "media-low-windows", "media-min-age", "media-min-bytes",
+		"media-buffer-guard", "media-reconnect-cooldown", "media-slow-cooldown", "media-hint-ttl",
+		"media-challenger-ratio", "media-reconnect-budget", "media-budget-window",
+	}
+	proxyMap := map[string]C.Proxy{
+		"COMPATIBLE": newVaneTestProxy("COMPATIBLE", true, false),
+		"alpha":      newVaneTestProxy("alpha", true, true),
+	}
+	config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "media-max-low-windows": 4, "media-demand-bps": 5_000_000}
+	providers := map[string]P.ProxyProvider{}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			config[key] = 0
+			defer delete(config, key)
+			_, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
+			require.ErrorContains(t, err, key)
+			require.ErrorContains(t, err, "now hardcoded in the kernel")
+			require.Empty(t, providers)
+		})
+	}
+	config["MEDIA-LOW-THROUGHPUT"] = nil
+	config["media-buffer-guard"] = 3
+	_, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
+	require.EqualError(t, err, "vane media thresholds media-low-throughput, media-buffer-guard are now hardcoded in the kernel; remove them from the config")
+	delete(config, "MEDIA-LOW-THROUGHPUT")
+	delete(config, "media-buffer-guard")
+	parsed, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
+	require.NoError(t, err)
+	group := parsed.(*Vane)
+	t.Cleanup(func() { _ = group.Close() })
+	require.Equal(t, 4, group.media.maxLowWindows)
+	require.Equal(t, float64(5_000_000), group.media.demandBPS)
+}
+
 func TestParseVaneProxyGroup(t *testing.T) {
 	newInputs := func() (map[string]C.Proxy, map[string]P.ProxyProvider) {
 		return map[string]C.Proxy{
@@ -256,19 +292,8 @@ func TestParseVaneProxyGroup(t *testing.T) {
 			"gray-failure-observation": true,
 			"media-reconnect":          true,
 			"media-reconnect-domains":  []string{"video.example"},
-			"media-low-throughput":     5_000_000,
-			"media-low-windows":        4,
 			"media-max-low-windows":    8,
-			"media-min-age":            20,
-			"media-min-bytes":          8 * 1024 * 1024,
 			"media-demand-bps":         2_000_000,
-			"media-buffer-guard":       5,
-			"media-reconnect-cooldown": 180,
-			"media-slow-cooldown":      600,
-			"media-hint-ttl":           10,
-			"media-challenger-ratio":   1.5,
-			"media-reconnect-budget":   2,
-			"media-budget-window":      900,
 			"disable-udp":              false,
 			"expected-status":          "204",
 			"include-all":              false,
@@ -291,20 +316,10 @@ func TestParseVaneProxyGroup(t *testing.T) {
 		require.Equal(t, uint64(17), group.exploration.interval)
 		require.True(t, group.gray.isEnabled())
 		require.True(t, group.media.enabled)
-		require.Equal(t, float64(5_000_000), group.media.lowThroughputBPS)
-		require.Equal(t, 4, group.media.lowWindows)
+		require.Equal(t, vaneDefaultMediaLowWindows, group.media.lowWindows)
 		require.Equal(t, 8, group.media.maxLowWindows)
 		require.Equal(t, []string{"video.example"}, group.media.domains)
-		require.Equal(t, 20*time.Second, group.media.minAge)
-		require.Equal(t, int64(8*1024*1024), group.media.minBytes)
 		require.Equal(t, float64(2_000_000), group.media.demandBPS)
-		require.Equal(t, 5*time.Second, group.media.bufferGuard)
-		require.Equal(t, 180*time.Second, group.media.reconnectCooldown)
-		require.Equal(t, 600*time.Second, group.media.slowCooldown)
-		require.Equal(t, 10*time.Second, group.media.hintTTL)
-		require.Equal(t, 1.5, group.media.challengerRatio)
-		require.Equal(t, 2, group.media.budgetMax)
-		require.Equal(t, 900*time.Second, group.media.budgetWindow)
 	})
 
 	t.Run("prior model configuration is rejected", func(t *testing.T) {
