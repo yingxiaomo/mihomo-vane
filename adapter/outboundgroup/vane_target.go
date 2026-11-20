@@ -507,6 +507,8 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if targetBPS, fresh := a.targetEvidenceLocked(key, to, now); fresh && targetBPS < requiredBPS {
 		return "challenger-evidence-degraded"
 	}
+	// A capability-cache win carries no target-scoped evidence and is therefore
+	// not vetoed here; that evidence priority is intentional, not a bug.
 	if _, blocked := a.targetMemberBlockedLocked(key, to, now); blocked {
 		return "candidate-cooldown"
 	}
