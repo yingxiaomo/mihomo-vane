@@ -235,6 +235,9 @@ type vaneHandoffToken struct {
 	targetKey   vaneTargetKey
 	fromLease   vaneMemberLease
 	toLease     vaneMemberLease
+	// baseline marks a token created by the synchronous hint path. It has no
+	// targetHandoffs lease; settlement validates it through the media hint.
+	baseline bool
 }
 
 type vaneDiagnostics struct {

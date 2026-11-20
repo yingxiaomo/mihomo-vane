@@ -1033,6 +1033,10 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		lowWindows: plan.lowWindows,
 		force:      true,
 	})
+	if handoff != nil {
+		handoff.targetKey = plan.targetStateKey
+		handoff.baseline = true
+	}
 	a.mediaHints[plan.targetKey] = vaneMediaHint{
 		candidate: plan.challenger,
 		identity:  plan.challengerIdentity,

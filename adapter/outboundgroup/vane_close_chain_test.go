@@ -342,3 +342,228 @@ func TestVaneRaceTokenReleasedWhenEngineHasNoWinner(t *testing.T) {
 		return flow.raceToken == 0
 	}, 2*time.Second, time.Millisecond, "the done callback must release a race that never called back")
 }
+
+// CHAIN-03: the synchronous chain must walk prepare -> commit -> close ->
+// reconnect -> settlement -> preference, not just assert its pieces.
+func TestVaneSyncChainPrepareCommitCloseSettleImproved(t *testing.T) {
+	clock := newVaneConnTestClock()
+	fill := func(payload []byte) (int, error) {
+		for i := range payload {
+			payload[i] = 1
+		}
+		return len(payload), nil
+	}
+	alphaConn := &vaneConnTestConn{readFunc: fill}
+	betaConn := &vaneConnTestConn{readFunc: fill}
+	alpha := newVaneTestProxy("alpha", true, true)
+	alpha.delay = 20
+	alpha.dialConn = alphaConn
+	beta := newVaneTestProxy("beta", true, true)
+	beta.delay = 10
+	beta.dialConn = betaConn
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	group.media.lowThroughputBPS = 5_000_000
+	group.media.demandBPS = 2_000_000
+	group.media.minAge = 15 * time.Second
+	group.media.minBytes = 2 * 1024 * 1024
+	group.media.bufferGuard = 5 * time.Second
+	group.media.maxLowWindows = 4
+
+	now := clock.Now()
+	group.mu.Lock()
+	group.learning.mu.Lock()
+	require.NotNil(t, group.ensureProxyNodeLocked(beta, now))
+	group.nodeControls["beta"].recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 6_000_000, observedAt: now,
+	}
+	group.learning.mu.Unlock()
+	group.mu.Unlock()
+
+	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	conn, err := group.DialContext(t.Context(), metadata)
+	require.NoError(t, err)
+	observed := conn.(*vaneObservedConn)
+	reader, counters := observed.UnwrapReader()
+	payload := make([]byte, 64*1024)
+	closed := false
+	for i := 0; i < 128; i++ {
+		n, readErr := reader.Read(payload)
+		if readErr != nil {
+			break
+		}
+		require.Equal(t, len(payload), n)
+		for _, counter := range counters {
+			counter(int64(n))
+		}
+		alphaConn.mu.Lock()
+		closeCalls := alphaConn.closeCalls
+		alphaConn.mu.Unlock()
+		if closeCalls > 0 {
+			closed = true
+			break
+		}
+		clock.Advance(time.Second)
+	}
+	require.True(t, closed, "the slow flow must be closed by the synchronous plan")
+	require.Equal(t, 1, alphaConn.closeCalls)
+
+	key := vaneMediaTargetKey{target: "googlevideo.com", port: 443}
+	group.mu.Lock()
+	hint, hinted := group.mediaHints[key]
+	group.mu.Unlock()
+	require.True(t, hinted)
+	require.Equal(t, "beta", hint.candidate)
+
+	newConn, err := group.DialContext(t.Context(), metadata)
+	require.NoError(t, err)
+	newObserved := newConn.(*vaneObservedConn)
+	newReader, newCounters := newObserved.UnwrapReader()
+	big := make([]byte, 1<<20)
+	for i := 0; i < 6; i++ {
+		n, readErr := newReader.Read(big)
+		require.NoError(t, readErr)
+		require.Equal(t, len(big), n)
+		for _, counter := range newCounters {
+			counter(int64(n))
+		}
+		clock.Advance(time.Second)
+	}
+	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffImproved)
+	require.Zero(t, group.VaneDiagnostics().Counters.HandoffNoGain)
+	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	require.True(t, ok)
+	group.mu.Lock()
+	_, preferred := group.targetPreferences[targetKey]
+	group.mu.Unlock()
+	require.True(t, preferred, "a real improvement must create the target preference")
+	require.NoError(t, newConn.Close())
+}
+
+// CHAIN-05: the challenger ordering keeps its four deterministic keys:
+// knownGood, score, delay, then name.
+func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
+	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	seedMetrics := func(group *Vane, proxy *vaneTestProxy, now time.Time, connect, response time.Duration) {
+		state := group.ensureProxyNodeLocked(proxy, now)
+		require.NotNil(t, state)
+		state.tcp.observeFailure(now, false)
+		state.tcp.observeConnect(now, connect)
+		state.tcp.observeResponse(now, response)
+		state.tcp.observeThroughput(now, 6_000_000)
+	}
+	seedRecent := func(group *Vane, proxy *vaneTestProxy, now time.Time, bps float64) {
+		require.NotNil(t, group.ensureProxyNodeLocked(proxy, now))
+		group.nodeControls[proxy.Name()].recentTCPThroughput = vaneRecentThroughput{bitsPerSecond: bps, observedAt: now}
+	}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time)
+		want  string
+	}{
+		{
+			name: "knownGood beats a shorter delay",
+			setup: func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time) {
+				beta.delay, gamma.delay = 20, 5
+				seedRecent(group, beta, now, 6_000_000)
+			},
+			want: "beta",
+		},
+		{
+			name: "score breaks a knownGood tie",
+			setup: func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time) {
+				beta.delay, gamma.delay = 10, 10
+				seedMetrics(group, beta, now, 10*time.Millisecond, 20*time.Millisecond)
+				seedMetrics(group, gamma, now, 500*time.Millisecond, time.Second)
+				seedRecent(group, beta, now, 6_000_000)
+				seedRecent(group, gamma, now, 6_000_000)
+			},
+			want: "beta",
+		},
+		{
+			name: "delay breaks a score tie",
+			setup: func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time) {
+				beta.delay, gamma.delay = 10, 20
+			},
+			want: "beta",
+		},
+		{
+			name: "name breaks a delay tie",
+			setup: func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time) {
+				beta.delay, gamma.delay = 10, 10
+			},
+			want: "beta",
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			clock := newVaneConnTestClock()
+			alpha := newVaneTestProxy("alpha", true, true)
+			beta := newVaneTestProxy("beta", true, true)
+			gamma := newVaneTestProxy("gamma", true, true)
+			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
+			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+			group.media.lowThroughputBPS = 5_000_000
+			group.media.demandBPS = 2_000_000
+			now := clock.Now()
+			group.mu.Lock()
+			group.learning.mu.Lock()
+			alphaState := group.ensureProxyNodeLocked(alpha, now)
+			require.NotNil(t, alphaState)
+			testCase.setup(t, group, beta, gamma, now)
+			group.learning.mu.Unlock()
+			group.mu.Unlock()
+
+			key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+			plan, reason := group.prepareMediaReconnectForNodeDetailed(
+				key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_600_000,
+			)
+			require.Empty(t, reason)
+			require.Equal(t, testCase.want, plan.challenger)
+		})
+	}
+}
+
+// CHAIN-09: demand dominates the low-throughput line. A 6 Mbps candidate is
+// not admissible when demand is 8 Mbps, and the race bar is 8 Mbps.
+func TestVaneDemandDominatesCandidateAdmission(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	beta.delay = 10
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	group.media.lowThroughputBPS = 5_000_000
+	group.media.demandBPS = 8_000_000
+	now := clock.Now()
+	group.mu.Lock()
+	group.learning.mu.Lock()
+	alphaState := group.ensureProxyNodeLocked(alpha, now)
+	require.NotNil(t, alphaState)
+	require.NotNil(t, group.ensureProxyNodeLocked(beta, now))
+	group.nodeControls["beta"].recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 6_000_000, observedAt: now,
+	}
+	group.learning.mu.Unlock()
+	group.mu.Unlock()
+
+	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+	plan, reason := group.prepareMediaReconnectForNodeDetailed(
+		key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_600_000,
+	)
+	require.Equal(t, "no-challenger", reason)
+	require.Empty(t, plan.challenger)
+
+	flow := newVaneMediaFlow(group, "alpha", metadata)
+	require.NotNil(t, flow)
+	request := flow.raceRequest(vaneThroughputObservation{
+		BitsPerSecond: 1_600_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
+	}, 3)
+	require.Equal(t, float64(8_000_000), request.requiredBPS)
+	group.mu.Lock()
+	require.Empty(t, group.targetPreferences)
+	group.mu.Unlock()
+}

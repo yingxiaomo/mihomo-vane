@@ -549,6 +549,13 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 				require.Empty(t, group.targetHandoffs)
 				require.Empty(t, group.targetPreferences)
 				group.mu.Unlock()
+				// SHADOW-02: the race callback only records would-handoff; it
+				// must never reach submitPolicyAction.
+				select {
+				case <-actions:
+					t.Fatal("shadow race must not submit a policy action")
+				default:
+				}
 			} else {
 				require.Nil(t, baselineAction)
 				var action vanePolicyAction

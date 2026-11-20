@@ -590,12 +590,19 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	}
 	kind := "handoff-no-gain"
 	a.mu.Lock()
-	lease, ok := a.targetHandoffs[token.targetKey]
-	if !ok || lease.id != token.id || lease.to != member || !a.memberLeaseCurrentLocked(member) {
+	current := a.memberLeaseCurrentLocked(member)
+	if lease, ok := a.targetHandoffs[token.targetKey]; ok && lease.id == token.id {
+		if lease.to != member || !current {
+			a.mu.Unlock()
+			return
+		}
+		delete(a.targetHandoffs, token.targetKey)
+	} else if !token.baseline || !current {
+		// A target handoff must still own its lease. A baseline token has no
+		// target lease; the media hint that carried it is its validation.
 		a.mu.Unlock()
 		return
 	}
-	delete(a.targetHandoffs, token.targetKey)
 	a.recordTargetEvidenceLocked(token.targetKey, member, sample.BitsPerSecond, now)
 	if sample.BitsPerSecond >= required {
 		a.targetPreferences[token.targetKey] = vaneTargetPreference{
