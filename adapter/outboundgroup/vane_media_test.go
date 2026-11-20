@@ -76,6 +76,12 @@ func TestVaneMediaReconnectClosesOnceAndHandsOffTarget(t *testing.T) {
 	beta.dialConn = betaConn
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	// CHAIN-01: beta needs fresh throughput evidence above the close bar;
+	// the test drives real traffic only through alpha's flow.
+	group.ensureNodeLocked(beta.Name(), clock.Now())
+	group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 
 	conn, err := group.DialContext(t.Context(), metadata)
@@ -170,6 +176,11 @@ func TestVaneMediaPreparedPlanRejectsSameNameReplacement(t *testing.T) {
 	beta.delay = 10
 	group, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	// CHAIN-01: beta needs fresh throughput evidence above the close bar.
+	group.ensureNodeLocked(beta.Name(), clock.Now())
+	group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	metadata := &C.Metadata{Host: "rr-plan.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 	group.mu.Lock()
@@ -198,6 +209,11 @@ func TestVaneMediaCommitRejectsReplacementDuringHealthCheck(t *testing.T) {
 	beta.delay = 10
 	group, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	// CHAIN-01: beta needs fresh throughput evidence above the close bar.
+	group.ensureNodeLocked(beta.Name(), clock.Now())
+	group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	metadata := &C.Metadata{Host: "rr-commit-race.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 	group.mu.Lock()
@@ -235,6 +251,13 @@ func TestVaneBaselineReconnectRespectsTargetBlock(t *testing.T) {
 		gamma.delay = 30
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		// CHAIN-01: both challengers need fresh throughput evidence.
+		for _, challenger := range []C.Proxy{beta, gamma} {
+			group.ensureNodeLocked(challenger.Name(), clock.Now())
+			group.ensureNodeControlLocked(challenger.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+				bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+			}
+		}
 		metadata := &C.Metadata{Host: "rr-block.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
 		return group, clock, alpha, beta, gamma, metadata, key
@@ -350,6 +373,11 @@ func TestVaneMediaHintRejectsSameNameChallengerReplacement(t *testing.T) {
 	beta.delay = 10
 	group, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	// CHAIN-01: beta needs fresh throughput evidence above the close bar.
+	group.ensureNodeLocked(beta.Name(), clock.Now())
+	group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	metadata := &C.Metadata{Host: "rr-hint-race.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 	group.mu.Lock()
@@ -577,6 +605,11 @@ func TestVaneMediaBufferCreditEventuallyDefersToEscapeLimit(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	// CHAIN-01: beta needs fresh throughput evidence above the close bar.
+	group.ensureNodeLocked(beta.Name(), clock.Now())
+	group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	group.media.lowThroughputBPS = 5_000_000
 	group.media.lowWindows = 3
 	group.media.maxLowWindows = 6
@@ -625,6 +658,11 @@ func TestVaneMediaCommitRejectsChallengerThatFailedAfterPrepare(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	// CHAIN-01: beta needs fresh throughput evidence above the close bar.
+	group.ensureNodeLocked(beta.Name(), clock.Now())
+	group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	metadata := &C.Metadata{Host: "rr10.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
 	plan, ok := group.prepareMediaReconnect(key, metadata.Host, metadata.DstPort, "alpha", 2_000_000)
@@ -648,6 +686,11 @@ func TestVaneMediaReconnectBudgetIsBounded(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	// CHAIN-01: beta needs fresh throughput evidence above the close bar.
+	group.ensureNodeLocked(beta.Name(), clock.Now())
+	group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	group.media.reconnectCooldown = time.Second
 	group.media.slowCooldown = time.Second
 	group.media.budgetMax = 2

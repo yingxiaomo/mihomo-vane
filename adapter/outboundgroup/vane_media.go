@@ -430,7 +430,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 
 	plan, reason := f.group.prepareMediaReconnectForNodeDetailed(f.targetKey, f.target, f.port, f.candidate, f.identity, f.nodeEpoch, sample.BitsPerSecond)
 	mode := f.group.racing.mode
-	if reason != "" && !(mode != vaneRacingOff && reason == "no-challenger") {
+	if reason != "" && !(mode != vaneRacingOff && (reason == "no-challenger" || reason == "no-evidence-candidate")) {
 		f.recordReconnectSuppressed(reason, sample, lowWindows)
 		return nil
 	}
@@ -447,7 +447,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	if mode == vaneRacingShadow {
 		if reason == "" && !plan.knownGood {
 			f.scheduleRace(sample, lowWindows)
-		} else if reason == "no-challenger" {
+		} else if reason == "no-challenger" || reason == "no-evidence-candidate" {
 			f.scheduleRace(sample, lowWindows)
 		}
 		// Shadow preserves the frozen baseline action and every baseline media
@@ -463,6 +463,9 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	if reason == "" && plan.knownGood {
 		f.completeMediaPlan(&plan, sample, lowWindows)
 		return f.policyActionForPlan(plan, sample, lowWindows, true)
+	}
+	if reason == "no-evidence-candidate" {
+		f.recordReconnectSuppressed(reason, sample, lowWindows)
 	}
 	f.scheduleRace(sample, lowWindows)
 	return nil
@@ -791,6 +794,17 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		defer release()
 	}
 	now := a.clock.Now()
+	// CHAIN-01: capability evidence is read before a.mu; no path may hold
+	// racingRuntime.mu together with a.mu (see snapshotFreshCapabilities).
+	capSnapshot := a.snapshotFreshCapabilities(now)
+	requiredBPS := currentBPS * a.media.challengerRatio
+	if requiredBPS < a.media.demandBPS {
+		requiredBPS = a.media.demandBPS
+	}
+	improvementBar := a.media.lowThroughputBPS
+	if requiredBPS > improvementBar {
+		improvementBar = requiredBPS
+	}
 
 	a.mu.Lock()
 	a.learning.mu.Lock()
@@ -822,6 +836,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 	stateKey, _ := a.targetKeyForMedia(target, port)
 
 	candidates := make([]vaneMediaChallenger, 0, len(health))
+	sawEvidenceFiltered := false
 	for _, item := range health {
 		proxy := item.proxy
 		if proxy.Name() == current || !item.alive {
@@ -862,9 +877,28 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		if freshThroughput {
 			throughputBPS = recent.bitsPerSecond
 			knownGood = throughputBPS >= a.media.lowThroughputBPS && throughputBPS >= a.media.demandBPS && throughputBPS >= currentBPS*a.media.challengerRatio
-			if !knownGood {
-				continue
+		}
+		// CHAIN-01: real traffic first, capability cache only when there is no
+		// fresh real-traffic sample. A candidate below the close bar is not a
+		// valid reason to break the current flow. A never-selected candidate
+		// has no node state, so its lease epoch is 0; try both the computed
+		// lease and its zero-epoch form, because a probe that never selected
+		// the challenger wrote its record under epoch 0.
+		bestEvidence := 0.0
+		if freshThroughput {
+			bestEvidence = recent.bitsPerSecond
+		} else if capBPS, ok := capSnapshot[member]; ok {
+			bestEvidence = capBPS
+		} else {
+			zeroEpoch := member
+			zeroEpoch.epoch = 0
+			if capBPS, ok := capSnapshot[zeroEpoch]; ok {
+				bestEvidence = capBPS
 			}
+		}
+		if bestEvidence < improvementBar {
+			sawEvidenceFiltered = true
+			continue
 		}
 		if !knownGood && item.delay == 0 {
 			continue
@@ -878,6 +912,10 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		})
 	}
 	if len(candidates) == 0 {
+		if sawEvidenceFiltered {
+			log.Debugln("Vane: suppress media reconnect target=%s:%d node=%s reason=no-evidence-candidate", target, port, current)
+			return vaneMediaPlan{}, "no-evidence-candidate"
+		}
 		log.Debugln("Vane: suppress media reconnect target=%s:%d node=%s reason=no-challenger", target, port, current)
 		return vaneMediaPlan{}, "no-challenger"
 	}
@@ -949,6 +987,9 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		defer release()
 	}
 	now := a.clock.Now()
+	// CHAIN-01: capability evidence is read before a.mu; no path may hold
+	// racingRuntime.mu together with a.mu (see snapshotFreshCapabilities).
+	capSnapshot := a.snapshotFreshCapabilities(now)
 	a.mu.Lock()
 	a.learning.mu.Lock()
 	defer func() {
@@ -1010,6 +1051,12 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 			(plan.knownGood && recent.bitsPerSecond < a.media.demandBPS)) {
 		return "challenger-evidence-degraded"
 	}
+	// CHAIN-01: the challenger must still have fresh evidence above the close
+	// bar when the close happens, across all evidence tiers. This also covers
+	// the prepare->commit expiry window for non-knownGood (capability) plans.
+	if reason := a.checkChallengerEvidenceLocked(plan, capSnapshot, now); reason != "" {
+		return reason
+	}
 	budget := a.mediaBudgets[plan.targetKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
 		budget = vaneMediaBudget{startedAt: now}
@@ -1044,6 +1091,64 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		handoff:   handoff,
 	}
 	a.mediaReconnects[plan.targetKey] = now.Add(a.media.reconnectCooldown)
+	return ""
+}
+
+// checkChallengerEvidenceLocked reports "" when the challenger still has fresh
+// evidence above the CHAIN-01 close bar, or the rejection reason. Caller holds
+// a.mu (+ learning.mu); caps was snapshotted before any lock (see
+// snapshotFreshCapabilities). Tiers, priority-ordered: fresh target-level real
+// traffic first (most specific direct measurement), then fresh node-level real
+// traffic, capability cache only when there is no fresh real traffic at all.
+// The target tier is REQUIRED: a target-evidence race winner never writes the
+// capability cache (runMediaRace returns early), so without this tier commit
+// would veto a legitimate winner. The bar mirrors RACE-01's required
+// (max(currentBPS x challengerRatio, demand)) plus the 5 Mbps slow line:
+// bar = max(5M, currentBPS x 1.25, demandBPS). KnownGood plans are NOT exempt:
+// the target tier can still veto them (deliberate target-level strictness).
+func (a *Vane) checkChallengerEvidenceLocked(plan vaneMediaPlan, caps map[vaneMemberLease]float64, now time.Time) string {
+	lease := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: plan.challengerEpoch}
+	best := 0.0
+	if plan.targetStateKey.targetScope != "" {
+		if bps, fresh := a.targetEvidenceLocked(plan.targetStateKey, lease, now); fresh {
+			best = bps
+		}
+	}
+	if best <= 0 {
+		if state := a.nodeControls[plan.challenger]; state != nil {
+			recent := state.recentTCPThroughput
+			if recent.bitsPerSecond > 0 && !recent.observedAt.IsZero() && now.Sub(recent.observedAt) <= vaneMediaEvidenceMaxAge {
+				best = recent.bitsPerSecond
+			}
+		}
+	}
+	if best <= 0 {
+		if bps, ok := caps[lease]; ok {
+			best = bps
+		} else {
+			// A never-selected challenger has no node state, so its plan may
+			// carry a zero epoch while the probe wrote its record under epoch 0.
+			zeroEpoch := lease
+			zeroEpoch.epoch = 0
+			if bps, ok := caps[zeroEpoch]; ok {
+				best = bps
+			}
+		}
+	}
+	if best <= 0 {
+		return "challenger-no-evidence"
+	}
+	bar := a.media.lowThroughputBPS
+	requiredBPS := plan.currentBPS * a.media.challengerRatio
+	if requiredBPS < a.media.demandBPS {
+		requiredBPS = a.media.demandBPS
+	}
+	if requiredBPS > bar {
+		bar = requiredBPS
+	}
+	if best < bar {
+		return "challenger-evidence-degraded"
+	}
 	return ""
 }
 

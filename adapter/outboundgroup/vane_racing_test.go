@@ -526,6 +526,17 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
 			configureVaneRacingForTest(t, group, mode)
+			// CHAIN-01: the shadow baseline close needs challenger evidence. The
+			// helper's demand=1/low=3M with a 1 Mbps sample makes any evidence
+			// >= 3M knownGood, and a knownGood plan never races, so the
+			// would-handoff counter (fed by the race callback) needs the
+			// no-challenger path instead: leave beta without evidence, let the
+			// shadow dispatch schedule the race, and let the probe fill the
+			// capability cache. The baseline close itself is vetoed by the
+			// evidence gate (no-evidence-candidate), which is the CHAIN-01
+			// contract; wouldHandoff comes from the race callback with the
+			// probe's 100M bound.
+			group.ensureNodeLocked(beta.Name(), clock.Now())
 			group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 				return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
 			}
@@ -541,11 +552,15 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 			baselineAction := flow.observe(sample)
 
 			if mode == vaneRacingShadow {
-				require.NotNil(t, baselineAction)
-				require.True(t, baselineAction())
+				// CHAIN-01: without challenger evidence the baseline close is
+				// vetoed (no-evidence-candidate) and the flow is not closed;
+				// the race still runs and records would-handoff.
+				require.Nil(t, baselineAction)
 				require.Eventually(t, func() bool { return group.VaneDiagnostics().Counters.WouldHandoff > 0 }, time.Second, time.Millisecond)
+				suppressions := group.VaneDiagnostics().Suppressions
+				require.Greater(t, suppressions["no-evidence-candidate"], uint64(0))
 				group.mu.Lock()
-				require.NotEmpty(t, group.mediaHints)
+				require.Empty(t, group.mediaHints)
 				require.Empty(t, group.targetHandoffs)
 				require.Empty(t, group.targetPreferences)
 				group.mu.Unlock()

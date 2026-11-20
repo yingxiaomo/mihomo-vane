@@ -825,6 +825,9 @@ func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
 			name: "delay breaks a score tie",
 			setup: func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time) {
 				beta.delay, gamma.delay = 10, 20
+				// CHAIN-01: both challengers need evidence above the close bar.
+				seedRecent(group, beta, now, 6_000_000)
+				seedRecent(group, gamma, now, 6_000_000)
 			},
 			want: "beta",
 		},
@@ -832,6 +835,8 @@ func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
 			name: "name breaks a delay tie",
 			setup: func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time) {
 				beta.delay, gamma.delay = 10, 10
+				seedRecent(group, beta, now, 6_000_000)
+				seedRecent(group, gamma, now, 6_000_000)
 			},
 			want: "beta",
 		},
@@ -894,7 +899,7 @@ func TestVaneDemandDominatesCandidateAdmission(t *testing.T) {
 	plan, reason := group.prepareMediaReconnectForNodeDetailed(
 		key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_600_000,
 	)
-	require.Equal(t, "no-challenger", reason)
+	require.Equal(t, "no-evidence-candidate", reason)
 	require.Empty(t, plan.challenger)
 
 	flow := newVaneMediaFlow(group, "alpha", metadata)

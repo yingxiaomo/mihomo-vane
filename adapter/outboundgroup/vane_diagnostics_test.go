@@ -131,6 +131,11 @@ func TestVaneDiagnosticsPersistReconnectLifecycleAndOutcome(t *testing.T) {
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
 	group.diagnostics = newVaneDiagnostics(group.Name(), clock, store)
+	// CHAIN-01: beta needs fresh throughput evidence for the baseline close.
+	group.ensureNodeLocked("beta", clock.Now())
+	group.ensureNodeControlLocked("beta", clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+	}
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 
 	flow := newVaneMediaFlow(group, "alpha", metadata)
@@ -227,8 +232,11 @@ func TestVaneDiagnosticsProductionReasons(t *testing.T) {
 		require.Nil(t, flow.observe(low))
 
 		snapshot := group.VaneDiagnostics()
+		// CHAIN-01: beta has delay==0, so it is filtered by the delay check
+		// after the evidence gate marks it evidence-filtered; the reason is
+		// the evidence gate's, not the delay check's.
 		require.Equal(t, uint64(1), snapshot.Counters.ReconnectSuppressed)
-		require.Equal(t, uint64(1), snapshot.Suppressions["no-challenger"])
+		require.Equal(t, uint64(1), snapshot.Suppressions["no-evidence-candidate"])
 	})
 
 	t.Run("commit rejection", func(t *testing.T) {
@@ -238,6 +246,12 @@ func TestVaneDiagnosticsProductionReasons(t *testing.T) {
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		// CHAIN-01: beta needs evidence so the commit reaches the
+		// challenger-unhealthy rejection under test.
+		group.ensureNodeLocked(beta.Name(), clock.Now())
+		group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+			bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+		}
 		flow := newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "rr4.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 		low := vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second}
 		require.Nil(t, flow.observe(low))
@@ -534,6 +548,13 @@ func TestVaneDiagnosticsHandoffIdentityIsBoundToEachGenerationHint(t *testing.T)
 	}
 	oldGeneration := newGroup()
 	newGeneration := newGroup()
+	// CHAIN-01: the hand-written plan has no evidence trail; seed beta.
+	for _, g := range []*Vane{oldGeneration, newGeneration} {
+		g.ensureNodeLocked("beta", clock.Now())
+		g.ensureNodeControlLocked("beta", clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+			bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+		}
+	}
 	metadata := &C.Metadata{Host: "rr-reload.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	key := oldGeneration.mediaTargetKey(metadata.Host, metadata.DstPort)
 	plan := vaneMediaPlan{
@@ -960,6 +981,13 @@ func TestVaneMediaReconnectDetailedReasons(t *testing.T) {
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		// CHAIN-01: beta needs fresh throughput evidence above the close bar to
+		// be a valid challenger; without it the prepare evidence gate filters it.
+		group.media.lowThroughputBPS = 3_000_000
+		group.ensureNodeLocked(beta.Name(), clock.Now())
+		group.ensureNodeControlLocked(beta.Name(), clock.Now()).recentTCPThroughput = vaneRecentThroughput{
+			bitsPerSecond: 5_000_000, observedAt: clock.Now(),
+		}
 		return group, clock, alpha, beta, vaneMediaTargetKey{target: "googlevideo.com", port: 443}
 	}
 

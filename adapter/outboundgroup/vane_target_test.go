@@ -19,6 +19,18 @@ func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata
 	mediaKey := group.mediaTargetKey(metadata.Host, metadata.DstPort)
 	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
+	// CHAIN-01: commit now requires fresh challenger evidence. Seed the
+	// challenger's node evidence so tests that exercise other commit paths
+	// (leases, feedback, pruning) are not vetoed by the evidence check.
+	now := group.clock.Now()
+	group.mu.Lock()
+	group.learning.mu.Lock()
+	require.NotNil(t, group.ensureProxyNodeLocked(challenger, now))
+	group.nodeControls[challenger.Name()].recentTCPThroughput = vaneRecentThroughput{
+		bitsPerSecond: 12_000_000, observedAt: now,
+	}
+	group.learning.mu.Unlock()
+	group.mu.Unlock()
 	return vaneMediaPlan{
 		targetKey:          mediaKey,
 		targetStateKey:     targetKey,

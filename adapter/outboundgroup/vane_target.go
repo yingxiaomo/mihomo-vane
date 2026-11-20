@@ -464,6 +464,9 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	defer release()
 
 	now := a.clock.Now()
+	// CHAIN-01: capability evidence is read before a.mu; no path may hold
+	// racingRuntime.mu together with a.mu (see snapshotFreshCapabilities).
+	capSnapshot := a.snapshotFreshCapabilities(now)
 	a.mu.Lock()
 	a.learning.mu.Lock()
 	defer func() {
@@ -519,6 +522,13 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	challengerKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity}
 	if a.mediaSlowCooldowns[challengerKey].After(now) {
 		return "challenger-slow-cooldown"
+	}
+	// CHAIN-01: the challenger must still have fresh evidence above the close
+	// bar across all tiers. A race winner below the 5 Mbps slow line is vetoed
+	// on purpose (do not cut a flow to a node that is still slow); a
+	// target-evidence winner passes through the target tier here.
+	if reason := a.checkChallengerEvidenceLocked(plan, capSnapshot, now); reason != "" {
+		return reason
 	}
 	budget := a.mediaBudgets[plan.targetKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {

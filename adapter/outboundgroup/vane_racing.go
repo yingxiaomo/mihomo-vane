@@ -596,6 +596,24 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 	return candidates, ""
 }
 
+// snapshotFreshCapabilities copies the fresh capability records (TTL 10min).
+// It takes racingRuntime.mu only and MUST be called without holding a.mu or
+// learning.mu: no caller of prepare/commit may hold racingRuntime.mu when
+// calling in, and no path may ever take racingRuntime.mu before a.mu. The
+// order is racingRuntime.mu first (snapshot, released), then a.mu.
+func (a *Vane) snapshotFreshCapabilities(now time.Time) map[vaneMemberLease]float64 {
+	a.racingRuntime.mu.Lock()
+	defer a.racingRuntime.mu.Unlock()
+	fresh := make(map[vaneMemberLease]float64, len(a.racingRuntime.capabilities))
+	for member, record := range a.racingRuntime.capabilities {
+		if record.observedAt.IsZero() || now.Sub(record.observedAt) > vaneRacingCapabilityTTL {
+			continue
+		}
+		fresh[member] = record.lowerBoundBPS
+	}
+	return fresh
+}
+
 func (a *Vane) validateRaceWinner(request vaneRaceRequest, member vaneMemberLease) bool {
 	if !a.racingGenerationCurrent(request.generation) {
 		return false
