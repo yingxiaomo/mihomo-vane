@@ -50,6 +50,10 @@ var (
 	providers     map[string]P.ProxyProvider
 	ruleProviders map[string]P.RuleProvider
 	configMux     sync.RWMutex
+	// ruleProvidersMu guards ruleProviders independently. RuleSet.Match calls
+	// RuleProviders while match already holds configMux.RLock; sharing one lock
+	// would self-deadlock as soon as a writer queues.
+	ruleProvidersMu sync.RWMutex
 
 	// for compatibility, lazy init
 	tcpQueue  chan C.ConnContext
@@ -211,8 +215,11 @@ func Listeners() map[string]C.InboundListener {
 func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider) {
 	configMux.Lock()
 	rules = newRules
-	ruleProviders = rp
 	subRules = newSubRule
+	// Lock order is configMux -> ruleProvidersMu everywhere.
+	ruleProvidersMu.Lock()
+	ruleProviders = rp
+	ruleProvidersMu.Unlock()
 	configMux.Unlock()
 }
 
@@ -232,8 +239,8 @@ func Providers() map[string]P.ProxyProvider {
 
 // RuleProviders return all loaded rule providers
 func RuleProviders() map[string]P.RuleProvider {
-	configMux.RLock()
-	defer configMux.RUnlock()
+	ruleProvidersMu.RLock()
+	defer ruleProvidersMu.RUnlock()
 	return maps.Clone(ruleProviders)
 }
 

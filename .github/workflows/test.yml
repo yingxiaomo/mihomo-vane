@@ -14,7 +14,7 @@ on:
 
 jobs:
   test:
-    if: ${{ github.ref == 'refs/heads/dev-vane' }}
+    if: ${{ github.ref == 'refs/heads/dev-vane' || github.event_name == 'pull_request' }}
     strategy:
       matrix:
         os:

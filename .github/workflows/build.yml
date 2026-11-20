@@ -17,7 +17,7 @@ concurrency:
   
 jobs:
   build:
-    if: ${{ github.ref == 'refs/heads/dev-vane' }}
+    if: ${{ github.ref == 'refs/heads/dev-vane' || github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -270,7 +270,7 @@ jobs:
     permissions:
       actions: read
       contents: write
-    if: ${{ !startsWith(github.event_name, 'pull_request') }}
+    if: ${{ github.ref == 'refs/heads/dev-vane' && !startsWith(github.event_name, 'pull_request') }}
     needs: [build]
     runs-on: ubuntu-latest
     steps:
