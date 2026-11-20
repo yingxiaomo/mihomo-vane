@@ -618,7 +618,7 @@ func TestVaneFirstResponseLifecycle(t *testing.T) {
 		<-writeDone
 		mu.Lock()
 		defer mu.Unlock()
-		require.Equal(t, []time.Duration{0}, responses)
+		require.Empty(t, responses, "a response that arrived before send confirmation has no measurable duration")
 	})
 
 	t.Run("response concurrent with a failed write is discarded", func(t *testing.T) {
@@ -646,6 +646,23 @@ func TestVaneFirstResponseLifecycle(t *testing.T) {
 		}
 		close(releaseWrite)
 		<-writeDone
+		require.Zero(t, callbacks.Load())
+	})
+
+	t.Run("server push and empty reads without a write emit no sample", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		underlying := &vaneConnTestConn{reads: []vaneConnTestRead{
+			{payload: []byte("server-push")},
+			{err: io.EOF},
+		}}
+		var callbacks atomic.Int32
+		wrapped := newVaneObservedConn(underlying, clock, func(time.Duration) { callbacks.Add(1) }, nil)
+		if n, err := wrapped.Read(make([]byte, 32)); n == 0 || err != nil {
+			t.Fatalf("server-push Read = (%d, %v), want positive bytes", n, err)
+		}
+		if n, err := wrapped.Read(make([]byte, 32)); n != 0 || !errors.Is(err, io.EOF) {
+			t.Fatalf("empty Read = (%d, %v), want (0, EOF)", n, err)
+		}
 		require.Zero(t, callbacks.Load())
 	})
 }

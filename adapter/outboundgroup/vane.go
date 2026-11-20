@@ -573,6 +573,11 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		},
 		func(observation vaneThroughputObservation, reason string) {
 			attempt.throughput(a.clock.Now(), observation, reason)
+		},
+		func() {
+			if mediaFlow != nil {
+				mediaFlow.markClosed()
+			}
 		})
 	if observed, ok := controlled.(*vaneObservedConn); ok {
 		if a.racing.mode == vaneRacingOn {

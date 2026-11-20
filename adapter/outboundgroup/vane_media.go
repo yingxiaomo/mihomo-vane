@@ -191,7 +191,10 @@ type vaneMediaFlow struct {
 	mu              sync.Mutex
 	lowWindows      int
 	aborted         bool
+	closed          bool
 	handoff         *vaneHandoffToken
+	raceSeq         uint64
+	raceToken       uint64
 	policySubmitter func(vanePolicyAction, bool)
 	flowCountOnce   sync.Once
 }
@@ -333,7 +336,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	member := vaneMemberLease{name: f.candidate, identity: f.identity, epoch: f.nodeEpoch}
 
 	f.mu.Lock()
-	if f.aborted {
+	if f.aborted || f.closed {
 		f.mu.Unlock()
 		return nil
 	}
@@ -342,6 +345,9 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		f.lowWindows++
 	} else {
 		f.lowWindows = 0
+		// A recovered flow invalidates any in-flight race: its result belongs
+		// to the previous low-window streak, not the next one (RACE-06).
+		f.raceToken = 0
 	}
 	lowWindows := f.lowWindows
 	handoff := f.handoff
@@ -500,14 +506,30 @@ func (f *vaneMediaFlow) raceRequest(sample vaneThroughputObservation, lowWindows
 }
 
 func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindows int) {
+	token, ok := f.beginRaceToken()
+	if !ok {
+		return
+	}
 	request := f.raceRequest(sample, lowWindows)
 	scheduled, reason := f.group.scheduleMediaRace(request, func(result vaneRaceResult) {
-		// The race is asynchronous: the flow may have recovered between the
-		// trigger and this callback. A recovered flow must never be closed,
-		// and its would-commit must not pollute shadow statistics.
-		if f.flowRecovered() {
+		// The race is asynchronous: the flow may have recovered, closed, or
+		// started a new low-window round between the trigger and this callback.
+		// Only the round that scheduled this race may act on its result.
+		closed, recovered, stale := f.raceVerdict(token)
+		if closed {
+			return
+		}
+		if recovered {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "reconnect-rejected", reason: "flow-recovered", handoffID: result.taskID, target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
+				bps: result.lowerBoundBPS, force: true,
+			})
+			return
+		}
+		if stale {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind: "race-stale", reason: "stale-generation", handoffID: result.taskID, target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
 				bps: result.lowerBoundBPS, force: true,
 			})
@@ -541,17 +563,28 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 			age: sample.Age, lowWindows: lowWindows,
 		})
 		f.submitPolicyAction(f.policyActionForPlan(plan, sample, lowWindows, true), sample.Delivered)
+	}, func() {
+		f.clearRaceToken(token)
 	})
-	if !scheduled && reason != "race-in-flight" && reason != "no-winner-cooldown" {
-		f.recordReconnectSuppressed(reason, sample, lowWindows)
+	if !scheduled {
+		f.clearRaceToken(token)
+		if reason != "race-in-flight" && reason != "no-winner-cooldown" {
+			f.recordReconnectSuppressed(reason, sample, lowWindows)
+		}
 	}
 }
 
 func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThroughputObservation, lowWindows int, targetCommit bool) vanePolicyAction {
 	return func() bool {
 		f.mu.Lock()
-		if f.aborted {
-			f.mu.Unlock()
+		aborted, closed := f.aborted, f.closed
+		f.mu.Unlock()
+		if closed {
+			// The connection already won the close race. Do not turn a
+			// natural close into a handoff commit.
+			return false
+		}
+		if aborted {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "reconnect-rejected", reason: "already-committed", handoffID: plan.raceID,
 				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
@@ -560,7 +593,6 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 			})
 			return false
 		}
-		f.mu.Unlock()
 		commitReason := ""
 		if targetCommit {
 			commitReason = f.group.commitTargetHandoff(plan)
@@ -593,13 +625,53 @@ func (f *vaneMediaFlow) policyAborted() bool {
 	return f.aborted
 }
 
-// flowRecovered reports whether the flow's low-window streak has fallen back
-// below the trigger threshold since the race was scheduled. The race is
-// asynchronous, so a recovered flow must never be closed by its result.
-func (f *vaneMediaFlow) flowRecovered() bool {
+// beginRaceToken reserves this flow's race round before the engine is called.
+// The callback can then tell whether its result still belongs to the current
+// low-window streak; a token must never be derived from raceToken itself
+// because recovery/close resets that field.
+func (f *vaneMediaFlow) beginRaceToken() (uint64, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.lowWindows < f.group.media.lowWindows
+	if f.closed || f.aborted || f.raceToken != 0 {
+		return 0, false
+	}
+	f.raceSeq++
+	if f.raceSeq == 0 {
+		f.raceSeq = 1
+	}
+	f.raceToken = f.raceSeq
+	return f.raceToken, true
+}
+
+func (f *vaneMediaFlow) clearRaceToken(token uint64) {
+	if token == 0 {
+		return
+	}
+	f.mu.Lock()
+	if f.raceToken == token {
+		f.raceToken = 0
+	}
+	f.mu.Unlock()
+}
+
+// raceVerdict answers closed/recovered/stale in one lock acquisition; separate
+// reads would leave gaps between the three checks.
+func (f *vaneMediaFlow) raceVerdict(token uint64) (closed, recovered, stale bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// A baseline policy close sets aborted, not closed. Shadow still records
+	// would-handoff after that close; only a natural close invalidates the
+	// observation. On-mode commits are already gated by policyActionForPlan.
+	return f.closed, f.lowWindows < f.group.media.lowWindows, f.raceToken != token
+}
+
+// markClosed is called at natural-close ownership. It invalidates any race
+// result that has not been submitted yet.
+func (f *vaneMediaFlow) markClosed() {
+	f.mu.Lock()
+	f.closed = true
+	f.raceToken = 0
+	f.mu.Unlock()
 }
 
 type vaneMediaHealth struct {
@@ -917,12 +989,26 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 	if a.mediaSlowCooldowns[challengerKey].After(now) {
 		return "challenger-slow-cooldown"
 	}
-	if state := a.nodeControls[plan.challenger]; state != nil {
-		recent := state.recentTCPThroughput
-		if recent.bitsPerSecond > 0 && !recent.observedAt.IsZero() && now.Sub(recent.observedAt) <= vaneMediaEvidenceMaxAge &&
-			(recent.bitsPerSecond < a.media.lowThroughputBPS || recent.bitsPerSecond < plan.currentBPS*a.media.challengerRatio) {
-			return "challenger-evidence-degraded"
-		}
+	// CHAIN-08: a plan admitted on fresh throughput must still have fresh
+	// evidence at commit. The old check silently skipped when nodeControls was
+	// missing (for example after a reload replaced the same-named node).
+	state := a.nodeControls[plan.challenger]
+	var recent vaneRecentThroughput
+	if state != nil {
+		recent = state.recentTCPThroughput
+	}
+	if plan.knownGood && (state == nil || recent.bitsPerSecond <= 0 || recent.observedAt.IsZero() ||
+		now.Sub(recent.observedAt) > vaneMediaEvidenceMaxAge) {
+		return "challenger-no-evidence"
+	}
+	// CHAIN-04: re-check the same admission lines at commit, including demand
+	// for plans that were admitted on throughput.
+	if state != nil && recent.bitsPerSecond > 0 && !recent.observedAt.IsZero() &&
+		now.Sub(recent.observedAt) <= vaneMediaEvidenceMaxAge &&
+		(recent.bitsPerSecond < a.media.lowThroughputBPS ||
+			recent.bitsPerSecond < plan.currentBPS*a.media.challengerRatio ||
+			(plan.knownGood && recent.bitsPerSecond < a.media.demandBPS)) {
+		return "challenger-evidence-degraded"
 	}
 	budget := a.mediaBudgets[plan.targetKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {

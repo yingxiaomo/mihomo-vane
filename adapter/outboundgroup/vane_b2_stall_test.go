@@ -19,7 +19,7 @@ func TestVaneB2StallSignature(t *testing.T) {
 		controlled := newVaneControlledConnWithNative(&vaneConnTestConn{}, clock,
 			nil, nil, nil, nil,
 			func(closeObservation vaneConnectionCloseObservation) { observation = closeObservation },
-			nil)
+			nil, nil)
 		conn := controlled.(*vaneObservedConn)
 		steps(conn, clock)
 		require.NoError(t, conn.Close())

@@ -134,13 +134,14 @@ func (c *firstWriteVaneCallbackConn) finishWriteAttempt(decisive bool, result er
 // underlying connection.
 type vaneObservedConn struct {
 	C.Conn
-	clock          vaneClock
-	onResponse     func(time.Duration)
-	onThroughput   func(float64)
-	onWindow       func(vaneThroughputObservation) vanePolicyAction
-	onClose        func(vaneConnectionCloseObservation)
-	onNativeClose  func(vaneConnectionCloseObservation)
-	onNativeWindow func(vaneThroughputObservation, string)
+	clock                   vaneClock
+	onResponse              func(time.Duration)
+	onThroughput            func(float64)
+	onWindow                func(vaneThroughputObservation) vanePolicyAction
+	onClose                 func(vaneConnectionCloseObservation)
+	onNativeClose           func(vaneConnectionCloseObservation)
+	onNativeWindow          func(vaneThroughputObservation, string)
+	onNaturalCloseOwnership func()
 
 	mu               sync.Mutex
 	createdAt        time.Time
@@ -229,24 +230,25 @@ func newVaneControlledConn(conn C.Conn, clock vaneClock, onResponse func(time.Du
 }
 
 func newVaneControlledConnWithClose(conn C.Conn, clock vaneClock, onResponse func(time.Duration), onThroughput func(float64), onWindow func(vaneThroughputObservation) vanePolicyAction, onClose func(vaneConnectionCloseObservation)) C.Conn {
-	return newVaneControlledConnWithNative(conn, clock, onResponse, onThroughput, onWindow, onClose, nil, nil)
+	return newVaneControlledConnWithNative(conn, clock, onResponse, onThroughput, onWindow, onClose, nil, nil, nil)
 }
 
-func newVaneControlledConnWithNative(conn C.Conn, clock vaneClock, onResponse func(time.Duration), onThroughput func(float64), onWindow func(vaneThroughputObservation) vanePolicyAction, onClose func(vaneConnectionCloseObservation), onNativeClose func(vaneConnectionCloseObservation), onNativeWindow func(vaneThroughputObservation, string)) C.Conn {
+func newVaneControlledConnWithNative(conn C.Conn, clock vaneClock, onResponse func(time.Duration), onThroughput func(float64), onWindow func(vaneThroughputObservation) vanePolicyAction, onClose func(vaneConnectionCloseObservation), onNativeClose func(vaneConnectionCloseObservation), onNativeWindow func(vaneThroughputObservation, string), onNaturalCloseOwnership func()) C.Conn {
 	if clock == nil {
 		clock = vaneSystemClock{}
 	}
 	now := clock.Now()
 	return &vaneObservedConn{
-		Conn:           conn,
-		clock:          clock,
-		onResponse:     onResponse,
-		onThroughput:   onThroughput,
-		onWindow:       onWindow,
-		onClose:        onClose,
-		onNativeClose:  onNativeClose,
-		onNativeWindow: onNativeWindow,
-		createdAt:      now,
+		Conn:                    conn,
+		clock:                   clock,
+		onResponse:              onResponse,
+		onThroughput:            onThroughput,
+		onWindow:                onWindow,
+		onClose:                 onClose,
+		onNativeClose:           onNativeClose,
+		onNativeWindow:          onNativeWindow,
+		onNaturalCloseOwnership: onNaturalCloseOwnership,
+		createdAt:               now,
 	}
 }
 
@@ -347,6 +349,12 @@ func (c *vaneObservedConn) Close() error {
 		return c.closeUnderlying()
 	}
 	c.lifecycle = vaneConnectionNaturalClosing
+	if c.onNaturalCloseOwnership != nil {
+		// Ownership is claimed here, under lifecycleMu, before any queued
+		// policy action can run. The callback only takes the flow lock, which
+		// keeps the lifecycleMu -> flow.mu order used by requestAbort.
+		c.onNaturalCloseOwnership()
+	}
 	c.lifecycleMu.Unlock()
 	closedAt := c.clock.Now()
 
@@ -451,25 +459,21 @@ func (c *vaneObservedConn) emitNativeCloseObservation(observation vaneConnection
 func (c *vaneObservedConn) Upstream() any { return c.Conn }
 
 func (c *vaneObservedConn) observeWrite(now time.Time) {
-	var response time.Duration
-	var recordResponse bool
 	c.mu.Lock()
 	if !c.wrotePayload {
 		c.wrotePayload = true
 		c.firstWriteAt = now
 		if !c.provisionalRead.IsZero() && !c.responseRecorded {
+			// The read arrived before the write completed, so there is no
+			// measurable request->response duration. Keep the accounting for
+			// B2 stall detection, but emit no response sample.
 			c.responseRecorded = true
 			c.responseBytes = c.totalReadBytes
 			c.responseAt = now
-			response = vaneElapsed(now, c.provisionalRead)
-			recordResponse = true
 			c.provisionalRead = time.Time{}
 		}
 	}
 	c.mu.Unlock()
-	if recordResponse && c.onResponse != nil {
-		c.onResponse(response)
-	}
 }
 
 func (c *vaneObservedConn) beginWrite() {
@@ -479,8 +483,6 @@ func (c *vaneObservedConn) beginWrite() {
 }
 
 func (c *vaneObservedConn) finishWrite(now time.Time, success bool) {
-	var response time.Duration
-	var recordResponse bool
 	c.mu.Lock()
 	if c.pendingWrites > 0 {
 		c.pendingWrites--
@@ -489,11 +491,11 @@ func (c *vaneObservedConn) finishWrite(now time.Time, success bool) {
 		c.wrotePayload = true
 		c.firstWriteAt = now
 		if !c.provisionalRead.IsZero() && !c.responseRecorded {
+			// The read preceded send confirmation: account it for B2, but do
+			// not turn it into a zero-millisecond response sample.
 			c.responseRecorded = true
 			c.responseBytes = c.totalReadBytes
 			c.responseAt = now
-			response = vaneElapsed(now, c.provisionalRead)
-			recordResponse = true
 			c.provisionalRead = time.Time{}
 		}
 	}
@@ -501,9 +503,6 @@ func (c *vaneObservedConn) finishWrite(now time.Time, success bool) {
 		c.provisionalRead = time.Time{}
 	}
 	c.mu.Unlock()
-	if recordResponse && c.onResponse != nil {
-		c.onResponse(response)
-	}
 }
 
 func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered bool) {

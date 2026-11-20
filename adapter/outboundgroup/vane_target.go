@@ -497,6 +497,16 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		return "reconnect-cooldown"
 	}
 	to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: challengerState.epoch}
+	// RACE-01: the race (or the on+knownGood path) may have admitted this
+	// challenger minutes ago. If the target itself has since produced fresh
+	// evidence below the original bar, refuse before touching budget/cooldown.
+	requiredBPS := plan.currentBPS * a.media.challengerRatio
+	if requiredBPS < a.media.demandBPS {
+		requiredBPS = a.media.demandBPS
+	}
+	if targetBPS, fresh := a.targetEvidenceLocked(key, to, now); fresh && targetBPS < requiredBPS {
+		return "challenger-evidence-degraded"
+	}
 	if _, blocked := a.targetMemberBlockedLocked(key, to, now); blocked {
 		return "candidate-cooldown"
 	}
@@ -536,7 +546,20 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		force:      true,
 	})
 	if token == nil {
-		return "diagnostics-unavailable"
+		// RACE-07: the handoff lease is also the reconnect target and the
+		// settlement entry point, so a missing diagnostics token must not turn
+		// into a failed commit. Synthesize the token locally instead; the same
+		// environment condition is tolerated on the baseline path.
+		token = &vaneHandoffToken{
+			id:          plan.raceID,
+			leaseID:     vaneRaceLeaseID(plan.generation, plan.raceID),
+			target:      plan.target,
+			bucket:      plan.targetKey.target,
+			port:        plan.port,
+			from:        plan.current,
+			to:          plan.challenger,
+			previousBPS: plan.currentBPS,
+		}
 	}
 	token.targetKey = key
 	token.fromLease = from

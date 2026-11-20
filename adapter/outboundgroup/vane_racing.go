@@ -218,7 +218,14 @@ func (a *Vane) racingGenerationCurrent(generation uint64) bool {
 	return current && !closed
 }
 
-func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRaceResult)) (bool, string) {
+func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRaceResult), done ...func()) (bool, string) {
+	// done releases the caller's per-flow race round even when the engine
+	// returns without invoking the callback. It is variadic so existing test
+	// callers that do not own a flow round stay unchanged.
+	var finished func()
+	if len(done) > 0 {
+		finished = done[0]
+	}
 	// An empty targetScope means the flow is not gate-eligible. The scope comes
 	// from media-reconnect-domains, or — when that gate is empty — from the
 	// scene rule that classified the flow as media (SCENE-GATE-001).
@@ -259,7 +266,7 @@ func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRace
 		age:        request.age,
 		lowWindows: request.lowWindows,
 	})
-	go a.runMediaRace(ctx, cancel, taskID, request, callback)
+	go a.runMediaRace(ctx, cancel, taskID, request, callback, finished)
 	return true, ""
 }
 
@@ -276,11 +283,16 @@ func (a *Vane) finishRaceTask(taskID uint64, request vaneRaceRequest, noWinner, 
 	a.racingRuntime.mu.Unlock()
 }
 
-func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, taskID uint64, request vaneRaceRequest, callback func(vaneRaceResult)) {
+func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, taskID uint64, request vaneRaceRequest, callback func(vaneRaceResult), done func()) {
 	defer cancel()
 	noWinner := true
 	stale := false
-	defer func() { a.finishRaceTask(taskID, request, noWinner, stale) }()
+	defer func() {
+		a.finishRaceTask(taskID, request, noWinner, stale)
+		if done != nil {
+			done()
+		}
+	}()
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind:      "race-started",
 		handoffID: taskID,
