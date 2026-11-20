@@ -119,7 +119,11 @@ func waitForQueuedRuleWriter(t *testing.T) {
 // configMux once a writer is queued.
 func TestRuleProvidersNestedUnderMatchDoesNotDeadlock(t *testing.T) {
 	snapshotTunnelRules(t)
-	probe := &lockProbeRule{entered: make(chan struct{}), proceed: make(chan struct{})}
+	probe := &lockProbeRule{
+		entered: make(chan struct{}),
+		proceed: make(chan struct{}),
+		seen:    make(map[string]bool),
+	}
 	setTunnelRulesForTest([]C.Rule{probe}, map[string]P.RuleProvider{"old": nil})
 
 	matchDone := make(chan struct{})
@@ -146,6 +150,7 @@ func TestRuleProvidersNestedUnderMatchDoesNotDeadlock(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("match deadlocked in a nested RuleProviders read")
 	}
+	require.True(t, probe.seen["old"], "the probe must actually enter RuleProviders")
 	select {
 	case <-writerDone:
 	case <-time.After(3 * time.Second):

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -197,6 +198,11 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		flow.mu.Lock()
+		defer flow.mu.Unlock()
+		return flow.raceToken == 0
+	}, 2*time.Second, time.Millisecond, "a stale round must release its token")
 	select {
 	case <-actions:
 		t.Fatal("a stale race must not submit a policy action")
@@ -206,6 +212,203 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	require.Empty(t, group.targetHandoffs)
 	require.Empty(t, group.mediaHints)
 	group.mu.Unlock()
+}
+
+// RACE-06 control: after the first round finishes cleanly (no winner, no
+// callback), its token is released and a later round can schedule and commit.
+func TestVaneRaceRoundRecoversAfterCleanFinish(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	beta.delay = 10
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+
+	var probeCalls atomic.Int32
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		if probeCalls.Add(1) == 1 {
+			return vaneProbeResult{reason: "zero-bytes"}
+		}
+		return vaneProbeResult{
+			valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
+			duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true,
+		}
+	}
+
+	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	require.NotNil(t, flow)
+	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
+	actions := make(chan vanePolicyAction, 1)
+	flow.setPolicySubmitter(func(action vanePolicyAction, _ bool) { actions <- action })
+
+	low := vaneThroughputObservation{
+		BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second, Delivered: true,
+	}
+	for i := 0; i < 3; i++ {
+		require.Nil(t, flow.observe(low))
+	}
+	require.Eventually(t, func() bool {
+		flow.mu.Lock()
+		defer flow.mu.Unlock()
+		return flow.raceToken == 0
+	}, 2*time.Second, time.Millisecond, "the clean first round must release its token")
+	group.racingRuntime.mu.Lock()
+	inFlight := group.racingRuntime.inFlight
+	group.racingRuntime.mu.Unlock()
+	require.False(t, inFlight)
+
+	// The no-winner suppression is per target; expire it before the next round.
+	clock.Advance(31 * time.Second)
+	require.Nil(t, flow.observe(low))
+	var action vanePolicyAction
+	select {
+	case action = <-actions:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second round did not submit a handoff action")
+	}
+	require.NotNil(t, action)
+	require.True(t, action())
+	group.mu.Lock()
+	require.NotEmpty(t, group.targetHandoffs)
+	group.mu.Unlock()
+	require.Eventually(t, func() bool {
+		flow.mu.Lock()
+		defer flow.mu.Unlock()
+		return flow.raceToken == 0
+	}, 2*time.Second, time.Millisecond, "the committed round must release its token")
+}
+
+// RACE-01: the target evidence re-check must fire on the real race callback
+// path and on the on+knownGood path, not only when commitTargetHandoff is
+// called directly.
+func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
+	t.Run("race callback", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		beta := newVaneTestProxy("beta", true, true)
+		beta.delay = 10
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneRacingForTest(t, group, vaneRacingOn)
+
+		probeEntered := make(chan struct{})
+		releaseProbe := make(chan struct{})
+		var probeOnce sync.Once
+		group.racing.probe = func(ctx context.Context, _ C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+			probeOnce.Do(func() { close(probeEntered) })
+			select {
+			case <-releaseProbe:
+			case <-ctx.Done():
+				return vaneProbeResult{reason: "canceled"}
+			}
+			return vaneProbeResult{
+				valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
+				duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true,
+			}
+		}
+
+		metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+		require.NotNil(t, flow)
+		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
+
+		now := clock.Now()
+		group.mu.Lock()
+		group.learning.mu.Lock()
+		betaState := group.ensureProxyNodeLocked(beta, now)
+		require.NotNil(t, betaState)
+		group.learning.mu.Unlock()
+		group.mu.Unlock()
+
+		actions := make(chan vanePolicyAction, 1)
+		flow.setPolicySubmitter(func(action vanePolicyAction, _ bool) { actions <- action })
+		low := vaneThroughputObservation{
+			BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second, Delivered: true,
+		}
+		for i := 0; i < 3; i++ {
+			require.Nil(t, flow.observe(low))
+		}
+		select {
+		case <-probeEntered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("race did not reach the probe")
+		}
+
+		group.mu.Lock()
+		group.targetEvidence[vaneTargetEvidenceKey{
+			target: flow.targetStateKey,
+			member: vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: betaState.epoch},
+		}] = vaneTargetEvidence{bitsPerSecond: 1_000_000, observedAt: clock.Now()}
+		group.mu.Unlock()
+		close(releaseProbe)
+
+		var action vanePolicyAction
+		select {
+		case action = <-actions:
+		case <-time.After(2 * time.Second):
+			t.Fatal("race callback did not submit an action")
+		}
+		require.False(t, action())
+		group.mu.Lock()
+		require.Empty(t, group.targetHandoffs)
+		require.Empty(t, group.mediaBudgets)
+		group.mu.Unlock()
+	})
+
+	t.Run("on knownGood", func(t *testing.T) {
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		beta := newVaneTestProxy("beta", true, true)
+		beta.delay = 10
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneRacingForTest(t, group, vaneRacingOn)
+		group.media.lowThroughputBPS = 5_000_000
+		group.media.demandBPS = 2_000_000
+		group.media.maxLowWindows = 3
+
+		metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+		require.NotNil(t, flow)
+		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
+
+		now := clock.Now()
+		group.mu.Lock()
+		group.learning.mu.Lock()
+		betaState := group.ensureProxyNodeLocked(beta, now)
+		require.NotNil(t, betaState)
+		group.nodeControls[beta.Name()].recentTCPThroughput = vaneRecentThroughput{
+			bitsPerSecond: 6_000_000, observedAt: now,
+		}
+		group.learning.mu.Unlock()
+		group.mu.Unlock()
+
+		low := vaneThroughputObservation{
+			BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second, Delivered: true,
+		}
+		var action vanePolicyAction
+		for i := 0; i < 3; i++ {
+			action = flow.observe(low)
+		}
+		require.NotNil(t, action, "on+knownGood must return the target-commit action")
+
+		group.mu.Lock()
+		group.targetEvidence[vaneTargetEvidenceKey{
+			target: flow.targetStateKey,
+			member: vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: betaState.epoch},
+		}] = vaneTargetEvidence{bitsPerSecond: 1_000_000, observedAt: clock.Now()}
+		group.mu.Unlock()
+		require.False(t, action())
+		group.mu.Lock()
+		require.Empty(t, group.targetHandoffs)
+		require.Empty(t, group.mediaBudgets)
+		group.mu.Unlock()
+	})
 }
 
 // CHAIN-07: natural-close ownership invalidates an in-flight race before its
@@ -257,6 +460,9 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 		t.Fatal("race did not reach the probe")
 	}
 	require.NoError(t, conn.Close())
+	flow.mu.Lock()
+	require.True(t, flow.closed, "natural close must invalidate the flow")
+	flow.mu.Unlock()
 	close(releaseProbe)
 	require.Eventually(t, func() bool {
 		group.racingRuntime.mu.Lock()
@@ -276,22 +482,145 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	group.mu.Unlock()
 }
 
-// The final commit gate also refuses a plan whose flow has already closed.
-func TestVaneClosedFlowCannotCommitPlannedHandoff(t *testing.T) {
-	group, _, _, beta, metadata := newTargetGroupForTest(t)
-	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
-	flow := newVaneMediaFlow(group, plan.current, metadata)
-	require.NotNil(t, flow)
-	flow.markClosed()
+// CHAIN-07 (c): the connection lifecycle owns the close decision. Natural
+// close wins over a queued policy action; a successful policy close wins over
+// a later Close; a failed policy action returns the lifecycle to Open.
+func TestVaneConnectionLifecycleArbitration(t *testing.T) {
+	newConn := func(t *testing.T) (*vaneObservedConn, *[]vaneConnectionCloseObservation) {
+		t.Helper()
+		observations := make([]vaneConnectionCloseObservation, 0, 2)
+		conn := newVaneControlledConnWithNative(&vaneConnTestConn{}, newVaneConnTestClock(),
+			nil, nil, nil, nil,
+			func(observation vaneConnectionCloseObservation) {
+				observations = append(observations, observation)
+			}, nil, nil)
+		return conn.(*vaneObservedConn), &observations
+	}
 
-	action := flow.policyActionForPlan(plan, vaneThroughputObservation{
-		BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
-	}, 3, true)
-	require.False(t, action())
+	t.Run("natural close wins", func(t *testing.T) {
+		conn, observations := newConn(t)
+		require.NoError(t, conn.Close())
+		require.Len(t, *observations, 1)
+		require.False(t, (*observations)[0].PolicyClosed)
+
+		called := false
+		conn.requestAbort(func() bool { called = true; return true })
+		require.False(t, called)
+		require.Len(t, *observations, 1, "the losing policy action must not emit a second observation")
+	})
+
+	t.Run("policy close wins", func(t *testing.T) {
+		conn, observations := newConn(t)
+		called := false
+		conn.requestAbort(func() bool { called = true; return true })
+		require.True(t, called)
+		require.Len(t, *observations, 1)
+		require.True(t, (*observations)[0].PolicyClosed)
+
+		require.NoError(t, conn.Close())
+		require.Len(t, *observations, 1, "natural close after a policy close must not emit a second observation")
+	})
+
+	t.Run("failed policy close reopens the lifecycle", func(t *testing.T) {
+		conn, observations := newConn(t)
+		conn.requestAbort(func() bool { return false })
+		conn.lifecycleMu.Lock()
+		require.Equal(t, vaneConnectionOpen, conn.lifecycle)
+		conn.lifecycleMu.Unlock()
+		require.Empty(t, *observations)
+
+		require.NoError(t, conn.Close())
+		require.Len(t, *observations, 1)
+		require.False(t, (*observations)[0].PolicyClosed)
+	})
+
+	t.Run("closed flow rejects planned handoff", func(t *testing.T) {
+		group, _, _, beta, metadata := newTargetGroupForTest(t)
+		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+		flow := newVaneMediaFlow(group, plan.current, metadata)
+		require.NotNil(t, flow)
+		flow.markClosed()
+
+		action := flow.policyActionForPlan(plan, vaneThroughputObservation{
+			BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
+		}, 3, true)
+		require.False(t, action())
+		group.mu.Lock()
+		require.Empty(t, group.targetHandoffs)
+		require.Empty(t, group.mediaBudgets)
+		group.mu.Unlock()
+	})
+}
+
+// CHAIN-07 (b): an on-mode race callback blocked at the submitter must lose to
+// a natural close that already claimed lifecycleMu. The queued requestAbort
+// must return before executing the commit action.
+func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	beta.delay = 10
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneRacingForTest(t, group, vaneRacingOn)
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		return vaneProbeResult{
+			valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
+			duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true,
+		}
+	}
+
+	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	require.NotNil(t, flow)
+	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
+
+	var observations []vaneConnectionCloseObservation
+	conn := newVaneControlledConnWithNative(&vaneConnTestConn{}, clock,
+		nil, nil, nil, nil,
+		func(observation vaneConnectionCloseObservation) {
+			observations = append(observations, observation)
+		}, nil,
+		func() { flow.markClosed() })
+	observed := conn.(*vaneObservedConn)
+
+	submitEntered := make(chan struct{})
+	releaseSubmit := make(chan struct{})
+	var submitOnce sync.Once
+	flow.setPolicySubmitter(func(action vanePolicyAction, delivered bool) {
+		submitOnce.Do(func() { close(submitEntered) })
+		<-releaseSubmit
+		observed.submitPolicyAction(action, delivered)
+	})
+
+	low := vaneThroughputObservation{
+		BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second, Delivered: true,
+	}
+	for i := 0; i < 3; i++ {
+		require.Nil(t, flow.observe(low))
+	}
+	select {
+	case <-submitEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("race callback did not reach the policy submitter")
+	}
+
+	require.NoError(t, conn.Close())
+	close(releaseSubmit)
+	require.Eventually(t, func() bool {
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		return !group.racingRuntime.inFlight
+	}, 2*time.Second, time.Millisecond)
+
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
 	require.Empty(t, group.mediaBudgets)
+	require.Empty(t, group.targetPreferences)
 	group.mu.Unlock()
+	require.Len(t, observations, 1)
+	require.False(t, observations[0].PolicyClosed, "natural close must own the only observation")
 }
 
 // A race that never calls back must still release the flow's round token;
@@ -480,6 +809,17 @@ func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
 				seedRecent(group, gamma, now, 6_000_000)
 			},
 			want: "beta",
+		},
+		{
+			name: "throughput breaks a score tie",
+			setup: func(t *testing.T, group *Vane, beta, gamma *vaneTestProxy, now time.Time) {
+				beta.delay, gamma.delay = 10, 10
+				seedMetrics(group, beta, now, 10*time.Millisecond, 20*time.Millisecond)
+				seedMetrics(group, gamma, now, 10*time.Millisecond, 20*time.Millisecond)
+				seedRecent(group, beta, now, 6_000_000)
+				seedRecent(group, gamma, now, 10_000_000)
+			},
+			want: "gamma",
 		},
 		{
 			name: "delay breaks a score tie",
