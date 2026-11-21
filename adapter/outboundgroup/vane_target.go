@@ -705,7 +705,14 @@ func (a *Vane) failTargetHandoff(token *vaneHandoffToken, reason string, hard bo
 	if lease, ok := a.targetHandoffs[token.targetKey]; ok && lease.id == token.id {
 		delete(a.targetHandoffs, token.targetKey)
 	}
-	delete(a.targetPreferences, token.targetKey)
+	// P2 (audit 2026-11-22): only the failed handoff's own member loses the
+	// preference — a different member's proven preference must survive this
+	// failure (same ownership rule as invalidateTargetPreference). Baseline
+	// tokens carry no toLease, so baseline dial failures touch nothing here,
+	// matching the hard-failure recording right below.
+	if preference, ok := a.targetPreferences[token.targetKey]; ok && preference.to == token.toLease {
+		delete(a.targetPreferences, token.targetKey)
+	}
 	if hard && a.memberLeaseCurrentLocked(token.toLease) {
 		a.recordTargetFailureLocked(token.targetKey, token.toLease, now)
 	}

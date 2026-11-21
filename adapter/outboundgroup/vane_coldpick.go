@@ -73,7 +73,7 @@ func (a *Vane) coldPickGateLocked(freshCaps map[vaneMemberLease]float64, scope s
 // runColdPickProbe is the unlocked stage (b): reserve budget, probe both
 // candidates in parallel, wait for both results, settle the budget. It never
 // touches a.mu or learning.mu; all shared state writes happen in stage (c).
-func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outcomes []pickProbeOutcome, budgetDenied bool) {
+func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outcomes []pickProbeOutcome, budgetDenied, canceled bool) {
 	limits := a.reserveRaceBudget(len(probe.candidates), a.clock.Now())
 	if len(limits) == 0 {
 		a.diagnostics.record(vaneDiagnosticRecord{
@@ -81,8 +81,14 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 			target: probe.scope, bucket: probe.scope,
 			force: true,
 		})
-		return nil, true
+		return nil, true, false
 	}
+	// P0 (audit 2026-11-22): reserveRaceBudget legitimately returns fewer
+	// limits than requested when the hourly budget's remainder drops below
+	// the minimum reservation — index limits[i] for i >= len(limits) panics
+	// on the dial goroutine (no recover up the tunnel stack). Probe only the
+	// candidates we actually reserved for, mirroring runMediaRace.
+	probe.candidates = probe.candidates[:len(limits)]
 	type entry struct {
 		outcome  pickProbeOutcome
 		panicked any
@@ -102,6 +108,13 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 			// which re-panics after the results are gathered.
 			defer func() {
 				if r := recover(); r != nil {
+					// P1 (audit 2026-11-22): the reservation was taken in
+					// reserveRaceBudget; a panicked probe that never reaches
+					// the settle below must still release it, or the leaked
+					// reserved bytes block the hourly reset (gated on
+					// reserved == 0) and deny every later probe for this
+					// group until reload.
+					a.settleRaceBudget(limit, 0)
 					results <- entry{panicked: r}
 				}
 			}()
@@ -114,7 +127,16 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 	for len(outcomes) < len(probe.candidates) {
 		select {
 		case <-ctx.Done():
-			return outcomes, false
+			// P2 (audit 2026-11-22): a canceled gather must not be mistaken
+			// for a completed probe — stage (c) would otherwise stamp the
+			// per-scope timestamp and cache one-sided results. The race path
+			// records race-canceled and writes nothing; mirror that.
+			a.diagnostics.record(vaneDiagnosticRecord{
+				kind:   "pick-probe-canceled",
+				target: probe.scope, bucket: probe.scope,
+				force: true,
+			})
+			return outcomes, false, true
 		case entry := <-results:
 			if entry.panicked != nil {
 				panic(entry.panicked)
@@ -134,7 +156,7 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 		}
 		return outcomes[i].member.name < outcomes[j].member.name
 	})
-	return outcomes, false
+	return outcomes, false, false
 }
 
 // settleColdPickProbe records probe diagnostics and returns the pick verdict.

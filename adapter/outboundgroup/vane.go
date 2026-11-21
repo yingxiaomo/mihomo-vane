@@ -1173,7 +1173,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	var coldPickOutcomes []pickProbeOutcome
 	probed := false
 	if coldPick != nil {
-		var budgetDenied bool
+		var budgetDenied, canceled bool
 		func() {
 			// §J + the budget-denied leak Hermes flagged: the in-flight flag
 			// must clear as soon as the probe stage has run. A budget denial
@@ -1185,9 +1185,9 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				delete(a.pickProbeInflight, coldPick.scope)
 				a.mu.Unlock()
 			}()
-			coldPickOutcomes, budgetDenied = a.runColdPickProbe(ctx, *coldPick)
+			coldPickOutcomes, budgetDenied, canceled = a.runColdPickProbe(ctx, *coldPick)
 		}()
-		probed = !budgetDenied
+		probed = !budgetDenied && !canceled
 	}
 
 	// COLD-PICK stage (c): re-validate under a.mu and fold the outcome into
@@ -1217,8 +1217,13 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				}
 			}
 			// The probe replaces the ranking choice; run the same commit
-			// bookkeeping the normal path would have run.
-			a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
+			// bookkeeping the normal path would have run — including the
+			// anchor guard (P2, audit 2026-11-22): a target-scoped failure is
+			// a one-off bypass, not evidence that the scene's healthy global
+			// preference should change for every target.
+			if !anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name {
+				a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
+			}
 			selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 			a.pruneLocked(now, proxies)
 			a.learning.markDirtyLocked(now)

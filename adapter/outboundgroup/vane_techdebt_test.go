@@ -617,3 +617,90 @@ func TestVaneLearningRegistryKeepsVictimOnFlushFailure(t *testing.T) {
 	vaneLearningRegistry.Unlock()
 	require.True(t, victimKept, "a failed victim flush must not delete the victim")
 }
+
+// P2 (audit 2026-11-22): a failed handoff only clears the preference of the
+// member that failed — another member's proven preference survives.
+func TestVaneHandoffFailureKeepsForeignPreference(t *testing.T) {
+	group, _, _, beta, metadata := newTargetGroupForTest(t)
+	chain01ProductionValues(t, group, 2_000_000)
+	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	seedPreference := func() {
+		t.Helper()
+		group.mu.Lock()
+		betaLease := group.memberLeaseLocked(beta.Name(), beta.identity)
+		group.targetPreferences[key] = vaneTargetPreference{to: betaLease, expiresAt: group.clock.Now().Add(time.Minute), updatedAt: group.clock.Now()}
+		group.mu.Unlock()
+	}
+
+	// Control: the failing handoff's own member loses the preference. The
+	// race-target shape carries toLease (baseline tokens do not, and their
+	// dial failures touch no preference at all).
+	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+	require.Empty(t, group.commitTargetHandoff(plan))
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.NotNil(t, decision.handoff)
+	seedPreference()
+	group.failTargetHandoff(decision.handoff, "dial-failed", true)
+	group.mu.Lock()
+	_, preferred := group.targetPreferences[key]
+	group.mu.Unlock()
+	require.False(t, preferred, "the failing member's own preference is cleared")
+
+	// The fix: a foreign member's failed handoff must not wipe beta's
+	// preference. Commit a handoff for a fresh gamma-like member (toLease =
+	// gamma, same target) via a hand-built token.
+	gamma := newVaneTestProxy("gamma", true, true)
+	group.mu.Lock()
+	group.learning.mu.Lock()
+	gammaState := group.ensureProxyNodeLocked(gamma, group.clock.Now())
+	group.learning.mu.Unlock()
+	group.mu.Unlock()
+	foreignToken := &vaneHandoffToken{
+		id:        987654,
+		target:    metadata.Host,
+		port:      metadata.DstPort,
+		targetKey: key,
+		toLease:   vaneMemberLease{name: gamma.Name(), identity: gamma.identity, epoch: gammaState.epoch},
+	}
+	seedPreference()
+	group.failTargetHandoff(foreignToken, "dial-failed", true)
+	group.mu.Lock()
+	_, preferred = group.targetPreferences[key]
+	group.mu.Unlock()
+	require.True(t, preferred, "beta's preference must survive gamma's failed handoff")
+}
+
+// P2 (audit 2026-11-22): the bandwidth parser rejects NaN/Inf and
+// int64-overflowing values instead of relying on architecture-dependent
+// float→int64 conversion.
+func TestVaneBandwidthRejectsNonFinite(t *testing.T) {
+	for _, text := range []string{"NaN", "nan", "Inf", "+Inf", "-Inf", "infinity", "1e30", "1e309"} {
+		_, err := parseVaneBandwidth(text)
+		require.Error(t, err, text)
+	}
+	got, err := parseVaneBandwidth("500")
+	require.NoError(t, err)
+	require.Equal(t, float64(500), got)
+}
+
+// P2 (audit 2026-11-22): writes through the unwrapped writer drain the queued
+// policy action, like the conn's own Write does.
+func TestVaneUnwrappedWriterDrainsPendingAction(t *testing.T) {
+	clock := newVaneConnTestClock()
+	observed := newVaneObservedConn(&vaneConnTestConn{}, clock, nil, nil).(*vaneObservedConn)
+	executed := false
+	observed.submitPolicyAction(func() bool { executed = true; return true }, false)
+	observed.mu.Lock()
+	queued := observed.pendingAction != nil
+	observed.mu.Unlock()
+	require.True(t, queued)
+
+	writer, _ := observed.UnwrapWriter()
+	_, err := writer.Write([]byte("payload"))
+	require.NoError(t, err)
+	require.True(t, executed, "the queued action must execute on the first unwrapped write")
+	observed.mu.Lock()
+	drained := observed.pendingAction == nil
+	observed.mu.Unlock()
+	require.True(t, drained)
+}

@@ -297,6 +297,10 @@ type vaneObservedWriter struct {
 }
 
 func (w *vaneObservedWriter) Write(payload []byte) (int, error) {
+	// P2 (audit 2026-11-22): drain like the conn's own Write — a flow whose
+	// reads queue its policy action but whose writes go through this
+	// unwrapped writer would otherwise never execute the queued close.
+	w.owner.drainPendingAbort()
 	if len(payload) > 0 {
 		w.owner.beginWrite()
 	}

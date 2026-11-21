@@ -2,6 +2,7 @@ package outboundgroup
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -46,8 +47,17 @@ func parseVaneBandwidth(text string) (float64, error) {
 		trimmed = strings.TrimSpace(upper[:len(upper)-1])
 	}
 	number, err := strconv.ParseFloat(trimmed, 64)
-	if err != nil || number < 0 {
+	// P2 (audit 2026-11-22): ParseFloat accepts "NaN"/"Inf" with err == nil
+	// and neither is < 0; the float→int64 conversion downstream is
+	// architecture-dependent (amd64 clamps to MinInt64, arm64 saturates NaN
+	// to 0 — a silent misconfiguration). Reject them and any finite value
+	// whose product overflows int64.
+	if err != nil || number < 0 || math.IsNaN(number) || math.IsInf(number, 0) {
 		return 0, fmt.Errorf("invalid bandwidth value %q: must be a non-negative number with an optional K/M/G suffix", text)
 	}
-	return number * multiplier, nil
+	bits := number * multiplier
+	if math.IsNaN(bits) || math.IsInf(bits, 0) || bits > math.MaxInt64 {
+		return 0, fmt.Errorf("bandwidth value %q overflows the maximum", text)
+	}
+	return bits, nil
 }

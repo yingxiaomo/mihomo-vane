@@ -361,3 +361,125 @@ func TestVaneColdPickBudgetDeniedClearsInflight(t *testing.T) {
 	group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Positive(t, probeCalls.Load(), "the scope must probe again once budget recovers")
 }
+
+// P0 (audit 2026-11-22): a partially-exhausted hourly budget makes
+// reserveRaceBudget return fewer limits than candidates — the probe must run
+// on the reserved subset instead of indexing past the slice and crashing the
+// process on the dial goroutine.
+func TestVaneColdPickPartialBudgetDoesNotPanic(t *testing.T) {
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingOff)
+	// available = 64KB + 512B: one reservation fits, the remainder is below
+	// the minimum reservation — reserveRaceBudget returns exactly 1 limit.
+	group.racingRuntime.mu.Lock()
+	group.racingRuntime.budget = vaneRacingBudget{startedAt: group.clock.Now(), used: group.racing.budgetBytesHour - 64*1024 - 512}
+	group.racingRuntime.mu.Unlock()
+	probeCalls := atomic.Int32{}
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probeCalls.Add(1)
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: 64 * 1024, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+	}
+
+	require.NotPanics(t, func() {
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+		require.Equal(t, alpha.Name(), decision.proxy.Name())
+	})
+	require.Equal(t, int32(1), probeCalls.Load(), "only the reserved candidate is probed")
+}
+
+// P1 (audit 2026-11-22): a panicked probe releases its budget reservation in
+// the recover path — the leaked reservation would otherwise block the hourly
+// reset (gated on reserved == 0) and deny every later probe until reload.
+func TestVaneColdPickPanickedProbeReleasesBudget(t *testing.T) {
+	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		panic("probe exploded")
+	}
+
+	require.Panics(t, func() {
+		group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	})
+	// Both workers' recover paths must have settled their reservations.
+	require.Eventually(t, func() bool {
+		group.racingRuntime.mu.Lock()
+		defer group.racingRuntime.mu.Unlock()
+		return group.racingRuntime.budget.reserved == 0
+	}, time.Second, time.Millisecond, "panicked probes must release their reservations")
+}
+
+// P2 (audit 2026-11-22): a probe-win on a scene whose anchor is cooling for
+// another target must NOT rewrite the scene-global anchor — the same guard
+// the normal commit path enforces.
+func TestVaneColdPickProbeWinRespectsAnchorGuard(t *testing.T) {
+	group, clock, alpha, beta, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	// alpha is the ranking choice (better delay + the seeded anchor); the
+	// probe elects beta anyway.
+	alpha.delay = 10
+	beta.delay = 20
+	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+		if proxy.Name() == beta.Name() {
+			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+		}
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 5_000_000, capHit: true}
+	}
+
+	// Make the anchor cooling: alpha holds a dial cooldown for ANOTHER target
+	// — anchorCoolingAnywhere is true, so a probe win here must not move the
+	// scene-global anchor (the same one-off-bypass rule the normal path
+	// enforces). The anchor is seeded; a fresh group has none yet.
+	anchorKey := vaneAnchorKey{scene: vaneSceneMedia, transport: vaneTransportTCP}
+	group.mu.Lock()
+	anchorName := alpha.Name()
+	group.anchors[anchorKey] = vaneAnchor{name: anchorName, scoreMicros: 0}
+	group.cooldowns[vaneCooldownKey{transport: vaneTransportTCP, target: "other.example", port: 443, candidate: anchorName, identity: "test:" + anchorName}] = clock.Now().Add(time.Minute)
+	group.mu.Unlock()
+
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, beta.Name(), decision.proxy.Name(), "the probe winner must still win this pick")
+
+	group.mu.Lock()
+	anchor := group.anchors[anchorKey]
+	group.mu.Unlock()
+	require.Equal(t, anchorName, anchor.name,
+		"a probe win under a cooling anchor must not rewrite the scene-global anchor")
+}
+
+// P2 (audit 2026-11-22): a canceled gather must not stamp the per-scope
+// timestamp or cache one-sided results — the race path writes nothing on
+// cancel, and cold-pick now mirrors that.
+func TestVaneColdPickCanceledProbeWritesNothing(t *testing.T) {
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	alphaName := alpha.Name()
+	block := make(chan struct{})
+	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+		if proxy.Name() == alphaName {
+			<-block // the baseline candidate never finishes before the ctx fires
+		}
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+	defer cancel()
+	defer close(block)
+
+	require.NotPanics(t, func() {
+		group.pickDecision(ctx, metadata, vaneTransportTCP, false, true)
+	})
+	// Give the still-blocked worker (released by close(block)) a beat.
+	time.Sleep(20 * time.Millisecond)
+
+	scope := group.mediaTargetKey(metadata.Host, metadata.DstPort).target
+	group.mu.Lock()
+	_, stamped := group.lastPickProbeAt[scope]
+	group.mu.Unlock()
+	require.False(t, stamped, "a canceled probe must not stamp the scope")
+	group.racingRuntime.mu.Lock()
+	empty := len(group.racingRuntime.capabilities) == 0
+	group.racingRuntime.mu.Unlock()
+	require.True(t, empty, "one-sided results must not be cached")
+	canceledSeen := false
+	for _, event := range group.VaneDiagnostics().RecentEvents {
+		if event.Kind == "pick-probe-canceled" {
+			canceledSeen = true
+		}
+	}
+	require.True(t, canceledSeen)
+}
