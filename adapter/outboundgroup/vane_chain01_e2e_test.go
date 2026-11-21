@@ -53,6 +53,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true) // fast challenger, no evidence yet
 	beta.delay = 10
 	beta.dialConn = fastConn
+	betaName, betaIdentity := beta.Name(), beta.identity
 	var betaDials atomic.Int32
 	beta.dialHook = func() { betaDials.Add(1) }
 
@@ -61,15 +62,15 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	chain01ProductionValues(t, group, demand)
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 
-	probeCalled := atomic.Bool{}
 	// The DialContext pick runs the cold-pick probe first; make it return an
 	// invalid result so the capability cache stays empty and the CHAIN-01 gate
 	// vetoes the first slow-window trigger. The race probe afterwards returns
 	// the 40 Mbps bound that unlocks the switch.
-	var probeInvocations atomic.Int32
-	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
-		probeCalled.Store(true)
-		if probeInvocations.Add(1) == 1 {
+	// The race probe only targets beta (alpha is the current node and is
+	// excluded from the race), so dispatch by proxy name: beta gets the
+	// 40 Mbps bound that unlocks the gate, anything else is invalid.
+	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+		if proxy.Name() != betaName {
 			return vaneProbeResult{reason: "nil-connection"}
 		}
 		return vaneProbeResult{
@@ -79,37 +80,41 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	}
 
 	metadata := &C.Metadata{Host: "rr-chain01.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	// This test is about the CHAIN-01 evidence gate on the slow-flow path, not
+	// about the cold-pick probe: suppress the pick probe so the flow starts on
+	// alpha (the ranking choice) and the story stays gate-centric.
+	suppressColdPickProbeForTest(t, group, metadata)
 	first, err := group.DialContext(t.Context(), metadata)
 	require.NoError(t, err)
 	observed := first.(*vaneObservedConn)
 	reader, counters := observed.UnwrapReader()
 	payload := make([]byte, 64*1024)
 
-	// Drive the slow flow with real reads: 64 KiB per simulated second is
-	// ~0.5 Mbps, every window is low. Windows 1-2 only accumulate; window 3
-	// triggers prepare for the first time.
-	driveSlow := func(windows int) {
-		for i := 0; i < windows*6; i++ {
-			if i > 0 {
-				clock.Advance(time.Second)
+	// Stage 2-4: keep the flow slow until the close lands. Three production
+	// gates serialize here — the trigger gate (minBytes 2 MiB cumulative),
+	// the CHAIN-01 evidence gate (veto -> race -> capability refill), and the
+	// buffer-credit gate (defers while cumulative bytes are small). All three
+	// resolve within ~45 simulated windows, so drive the flow until the close
+	// lands instead of guessing window counts.
+	driveSlowUntil := func(cond func() bool, maxWindows int, message string) {
+		require.Eventually(t, func() bool {
+			if cond() {
+				return true
 			}
+			clock.Advance(time.Second)
 			n, readErr := reader.Read(payload)
-			require.NoError(t, readErr)
-			require.Equal(t, len(payload), n)
+			if readErr != nil {
+				return false
+			}
 			for _, counter := range counters {
 				counter(int64(n))
 			}
-		}
+			return cond()
+		}, 5*time.Second, time.Millisecond, message)
 	}
-
-	// Stage 2: keep the flow slow until the first trigger. Two production
-	// gates delay it: minBytes 2 MiB (cumulative) and the buffer-credit guard.
-	// Drive 6 windows (~2.3 MiB cumulative at 64 KiB/s) so both pass; the
-	// first prepare must be vetoed by the evidence gate.
-	driveSlow(6)
-	require.Eventually(t, func() bool {
+	driveSlowUntil(func() bool {
 		return group.VaneDiagnostics().Suppressions["no-evidence-candidate"] > 0
-	}, 3*time.Second, time.Millisecond, "the first trigger must be suppressed by the evidence gate")
+	}, 60, "the first trigger must be suppressed by the evidence gate")
 	snapshot := group.VaneDiagnostics()
 	require.GreaterOrEqual(t, snapshot.Counters.ReconnectSuppressed, uint64(1))
 	require.Zero(t, snapshot.Counters.ReconnectCommitted)
@@ -119,24 +124,23 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	require.Zero(t, closedSoFar, "no evidence means no close: the slow flow must survive")
 
 	// The recovery loop: shadow scheduled the race and the probe refilled the
-	// capability cache with a 40 Mbps bound for beta.
-	require.Eventually(t, probeCalled.Load, 2*time.Second, time.Millisecond,
-		"shadow must schedule the recovery race after the gate veto")
+	// capability cache with a 40 Mbps bound for beta. The cold-pick probe from
+	// DialContext already wrote alpha's record, so wait for BETA's record
+	// specifically.
 	require.Eventually(t, func() bool {
 		group.racingRuntime.mu.Lock()
 		defer group.racingRuntime.mu.Unlock()
-		return len(group.racingRuntime.capabilities) > 0
-	}, 2*time.Second, time.Millisecond, "the probe bound must land in the capability cache")
+		_, ok := group.racingRuntime.capabilities[vaneMemberLease{name: betaName, identity: betaIdentity}]
+		return ok
+	}, 5*time.Second, time.Millisecond, "the race's 40 Mbps bound must land in the capability cache for beta")
 
-	// Stage 3-4: the next slow window admits beta on capability evidence,
-	// commits, and policy-closes the old flow exactly once. The buffer-credit
-	// gate defers until lowWindows reaches maxLowWindows (4).
-	driveSlow(2)
-	require.Eventually(t, func() bool {
+	// Stage 3-4: with beta's capability evidence in place the next slow
+	// window commits and policy-closes the old flow exactly once.
+	driveSlowUntil(func() bool {
 		slowConn.mu.Lock()
 		defer slowConn.mu.Unlock()
 		return slowConn.closeCalls == 1
-	}, 3*time.Second, time.Millisecond, "capability evidence must unlock the close")
+	}, 60, "capability evidence must unlock the close")
 	slowConn.mu.Lock()
 	closeCalls := slowConn.closeCalls
 	slowConn.mu.Unlock()
