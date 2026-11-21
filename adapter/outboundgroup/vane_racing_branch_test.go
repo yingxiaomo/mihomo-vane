@@ -347,8 +347,8 @@ func TestVaneRacingConfigRejectsFragmentAndOverflow(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	_, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{Racing: "on", RacingURL: "https://example.com/file#frag"}, fallback, nil)
 	require.Error(t, err)
-	_, err = NewVane(GroupCommonOption{Name: "vane"}, VaneOption{Racing: "on", RacingBudgetMBHour: int64(^uint64(0)>>1)/(1024*1024) + 1}, fallback, nil)
-	require.Error(t, err)
+	// RACING-BUDGET-OPTION was removed with the hardcode; the fragment
+	// rejection above is the remaining config-validation case here.
 }
 
 // RACE-LIFECYCLE-001: close is idempotent.

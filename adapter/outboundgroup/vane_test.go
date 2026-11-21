@@ -234,12 +234,13 @@ func TestVaneMediaRemovedKeysRejected(t *testing.T) {
 		"media-low-throughput", "media-low-windows", "media-min-age", "media-min-bytes",
 		"media-buffer-guard", "media-reconnect-cooldown", "media-slow-cooldown", "media-hint-ttl",
 		"media-challenger-ratio", "media-reconnect-budget", "media-budget-window",
+		"media-max-low-windows", "racing-budget-mb-hour",
 	}
 	proxyMap := map[string]C.Proxy{
 		"COMPATIBLE": newVaneTestProxy("COMPATIBLE", true, false),
 		"alpha":      newVaneTestProxy("alpha", true, true),
 	}
-	config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "media-max-low-windows": 4, "media-demand-bps": 5_000_000}
+	config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "media-demand-bps": 5_000_000}
 	providers := map[string]P.ProxyProvider{}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
@@ -253,16 +254,75 @@ func TestVaneMediaRemovedKeysRejected(t *testing.T) {
 	}
 	config["MEDIA-LOW-THROUGHPUT"] = nil
 	config["media-buffer-guard"] = 3
+	config["media-max-low-windows"] = 0
 	_, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
-	require.EqualError(t, err, "vane media thresholds media-low-throughput, media-buffer-guard are now hardcoded in the kernel; remove them from the config")
+	require.EqualError(t, err, "vane media thresholds media-low-throughput, media-buffer-guard, media-max-low-windows are now hardcoded in the kernel; remove them from the config")
 	delete(config, "MEDIA-LOW-THROUGHPUT")
 	delete(config, "media-buffer-guard")
+	delete(config, "media-max-low-windows")
 	parsed, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
 	require.NoError(t, err)
 	group := parsed.(*Vane)
 	t.Cleanup(func() { _ = group.Close() })
 	require.Equal(t, 4, group.media.maxLowWindows)
 	require.Equal(t, float64(5_000_000), group.media.demandBPS)
+}
+
+// DEMAND-01..04: media-demand-bps accepts a decimal-suffixed string ("10M")
+// and a plain byte count interchangeably; "10M" is exactly 10000000, so the
+// string form never shifts the demand.
+func TestVaneMediaDemandBandwidthParsing(t *testing.T) {
+	proxyMap := map[string]C.Proxy{
+		"COMPATIBLE": newVaneTestProxy("COMPATIBLE", true, false),
+		"alpha":      newVaneTestProxy("alpha", true, true),
+	}
+	parseDemand := func(t *testing.T, value any) (float64, error) {
+		t.Helper()
+		config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "media-demand-bps": value}
+		parsed, err := ParseProxyGroup(config, proxyMap, map[string]P.ProxyProvider{}, nil, nil)
+		if err != nil {
+			return 0, err
+		}
+		group := parsed.(*Vane)
+		t.Cleanup(func() { _ = group.Close() })
+		return group.media.demandBPS, nil
+	}
+
+	t.Run("DEMAND-01 decimal suffixes", func(t *testing.T) {
+		for _, tc := range []struct {
+			text string
+			want float64
+		}{{"10M", 10_000_000}, {"5M", 5_000_000}, {"1.5M", 1_500_000}, {"500K", 500_000}} {
+			got, err := parseDemand(t, tc.text)
+			require.NoError(t, err, tc.text)
+			require.Equal(t, tc.want, got, tc.text)
+		}
+	})
+
+	t.Run("DEMAND-02 plain bytes stay compatible", func(t *testing.T) {
+		got, err := parseDemand(t, 10_000_000)
+		require.NoError(t, err)
+		require.Equal(t, float64(10_000_000), got)
+	})
+
+	t.Run("DEMAND-03 invalid values fail with clear errors", func(t *testing.T) {
+		_, err := parseDemand(t, "abc")
+		require.ErrorContains(t, err, "bandwidth")
+		_, err = parseDemand(t, "10X")
+		require.ErrorContains(t, err, "bandwidth")
+		_, err = parseDemand(t, int64(vaneMaximumMediaThroughputBPS)+1)
+		require.ErrorContains(t, err, "media-demand-bps must be between 0 and")
+		_, err = parseDemand(t, "2G")
+		require.ErrorContains(t, err, "media-demand-bps must be between 0 and")
+	})
+
+	t.Run("DEMAND-04 string and integer forms agree", func(t *testing.T) {
+		fromString, err := parseDemand(t, "10M")
+		require.NoError(t, err)
+		fromInt, err := parseDemand(t, 10_000_000)
+		require.NoError(t, err)
+		require.Equal(t, fromInt, fromString, `"10M" must be exactly 10000000`)
+	})
 }
 
 func TestParseVaneProxyGroup(t *testing.T) {
@@ -292,7 +352,6 @@ func TestParseVaneProxyGroup(t *testing.T) {
 			"gray-failure-observation": true,
 			"media-reconnect":          true,
 			"media-reconnect-domains":  []string{"video.example"},
-			"media-max-low-windows":    8,
 			"media-demand-bps":         2_000_000,
 			"disable-udp":              false,
 			"expected-status":          "204",
@@ -317,7 +376,7 @@ func TestParseVaneProxyGroup(t *testing.T) {
 		require.True(t, group.gray.isEnabled())
 		require.True(t, group.media.enabled)
 		require.Equal(t, vaneDefaultMediaLowWindows, group.media.lowWindows)
-		require.Equal(t, 8, group.media.maxLowWindows)
+		require.Equal(t, vaneDefaultMediaMaxLowWindows, group.media.maxLowWindows)
 		require.Equal(t, []string{"video.example"}, group.media.domains)
 		require.Equal(t, float64(2_000_000), group.media.demandBPS)
 	})

@@ -29,27 +29,25 @@ const (
 )
 
 type VaneOption struct {
-	CollectEvents          bool     `group:"collect-events,omitempty"`
-	CollectorDir           string   `group:"collector-dir,omitempty"`
-	CollectorQueueSize     int      `group:"collector-queue-size,omitempty"`
-	CollectorMaxFileSize   int64    `group:"collector-max-file-size,omitempty"`
-	CollectorMaxFileAge    int      `group:"collector-max-file-age,omitempty"`
-	CollectorFlushInterval int      `group:"collector-flush-interval,omitempty"`
-	SceneRules             []string `group:"scene-rules,omitempty"`
-	SwitchMargin           float64  `group:"switch-margin,omitempty"`
-	TargetCooldown         int      `group:"target-cooldown,omitempty"`
-	StateTTL               int      `group:"state-ttl,omitempty"`
-	MaxStates              int      `group:"max-states,omitempty"`
-	Exploration            bool     `group:"exploration,omitempty"`
-	ExplorationInterval    int      `group:"exploration-interval,omitempty"`
-	GrayFailureObservation bool     `group:"gray-failure-observation,omitempty"`
-	MediaReconnect         bool     `group:"media-reconnect,omitempty"`
-	MediaReconnectDomains  []string `group:"media-reconnect-domains,omitempty"`
-	MediaMaxLowWindows     int      `group:"media-max-low-windows,omitempty"`
-	MediaDemandBPS         int64    `group:"media-demand-bps,omitempty"`
-	Racing                 string   `group:"racing,omitempty"`
-	RacingURL              string   `group:"racing-url,omitempty"`
-	RacingBudgetMBHour     int64    `group:"racing-budget-mb-hour,omitempty"`
+	CollectEvents          bool          `group:"collect-events,omitempty"`
+	CollectorDir           string        `group:"collector-dir,omitempty"`
+	CollectorQueueSize     int           `group:"collector-queue-size,omitempty"`
+	CollectorMaxFileSize   int64         `group:"collector-max-file-size,omitempty"`
+	CollectorMaxFileAge    int           `group:"collector-max-file-age,omitempty"`
+	CollectorFlushInterval int           `group:"collector-flush-interval,omitempty"`
+	SceneRules             []string      `group:"scene-rules,omitempty"`
+	SwitchMargin           float64       `group:"switch-margin,omitempty"`
+	TargetCooldown         int           `group:"target-cooldown,omitempty"`
+	StateTTL               int           `group:"state-ttl,omitempty"`
+	MaxStates              int           `group:"max-states,omitempty"`
+	Exploration            bool          `group:"exploration,omitempty"`
+	ExplorationInterval    int           `group:"exploration-interval,omitempty"`
+	GrayFailureObservation bool          `group:"gray-failure-observation,omitempty"`
+	MediaReconnect         bool          `group:"media-reconnect,omitempty"`
+	MediaReconnectDomains  []string      `group:"media-reconnect-domains,omitempty"`
+	MediaDemandBPS         vaneBandwidth `group:"media-demand-bps,omitempty"`
+	Racing                 string        `group:"racing,omitempty"`
+	RacingURL              string        `group:"racing-url,omitempty"`
 }
 
 type vaneTransport uint8

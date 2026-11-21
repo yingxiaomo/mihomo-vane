@@ -44,7 +44,7 @@ func (p *vaneNetworkTestProxy) DialContext(ctx context.Context, metadata *C.Meta
 
 func configureVaneRacingForTest(t *testing.T, group *Vane, mode vaneRacingMode) {
 	t.Helper()
-	config, err := newVaneRacingConfig(VaneOption{Racing: mode.String(), RacingBudgetMBHour: 120})
+	config, err := newVaneRacingConfig(VaneOption{Racing: mode.String()})
 	require.NoError(t, err)
 	group.racing = config
 }
@@ -56,15 +56,15 @@ func TestVaneRacingConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, vaneRacingOff, group.racing.mode)
 	require.Equal(t, vaneDefaultRacingURL, group.racing.url.String())
-	require.Equal(t, int64(120*1024*1024), group.racing.budgetBytesHour)
+	require.Equal(t, int64(64*1024*1024), group.racing.budgetBytesHour)
 
 	for _, mode := range []string{"off", "shadow", "on", "SHADOW"} {
 		t.Run(mode, func(t *testing.T) {
 			configured, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{
-				Racing: mode, RacingURL: "https://example.com/download", RacingBudgetMBHour: 7,
+				Racing: mode, RacingURL: "https://example.com/download",
 			}, fallback, nil)
 			require.NoError(t, err)
-			require.Equal(t, int64(7*1024*1024), configured.racing.budgetBytesHour)
+			require.Equal(t, int64(64*1024*1024), configured.racing.budgetBytesHour)
 		})
 	}
 	for _, option := range []VaneOption{
@@ -72,7 +72,6 @@ func TestVaneRacingConfig(t *testing.T) {
 		{Racing: "on", RacingURL: "http://example.com/file"},
 		{Racing: "shadow", RacingURL: "https://user:pass@example.com/file"},
 		{Racing: "on", RacingURL: "https:///missing-host"},
-		{Racing: "on", RacingBudgetMBHour: -1},
 	} {
 		_, err := NewVane(GroupCommonOption{Name: "vane"}, option, fallback, nil)
 		require.Error(t, err)
@@ -85,11 +84,11 @@ func TestVaneRacingConfig(t *testing.T) {
 	}
 	parsed, err := ParseProxyGroup(map[string]any{
 		"name": "vane-racing", "type": "vane", "proxies": []string{"alpha"}, "empty-fallback": "fallback",
-		"racing": "shadow", "racing-url": "https://example.com/probe", "racing-budget-mb-hour": 9,
+		"racing": "shadow", "racing-url": "https://example.com/probe",
 	}, proxyMap, map[string]P.ProxyProvider{}, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, vaneRacingShadow, parsed.(*Vane).racing.mode)
-	require.Equal(t, int64(9*1024*1024), parsed.(*Vane).racing.budgetBytesHour)
+	require.Equal(t, int64(64*1024*1024), parsed.(*Vane).racing.budgetBytesHour)
 }
 
 // RACE-PROBE-001: probe byte/time boundaries are repeatable and charge real bytes.

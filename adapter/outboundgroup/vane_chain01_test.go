@@ -193,6 +193,24 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 		require.Empty(t, reason)
 		require.Equal(t, beta.Name(), plan.challenger)
 		require.True(t, plan.knownGood)
+
+		// The close is only half of the story: the committed handoff must also
+		// settle and build the target preference (CHAIN-03's full chain, pinned
+		// at the unit level for the knownGood path).
+		require.Empty(t, group.commitMediaReconnectDetailed(plan))
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+		require.NotNil(t, decision.handoff)
+		// The settle member is what the reconnected flow would carry: the
+		// baseline token has no toLease of its own (the hint carried it).
+		member := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: plan.challengerEpoch}
+		group.settleTargetHandoff(decision.handoff, member, vaneThroughputObservation{
+			BitsPerSecond: 40_000_000, TotalBytes: 24 * 1024 * 1024, Age: 3 * time.Second,
+		})
+		group.mu.Lock()
+		_, hasPreference := group.targetPreferences[plan.targetStateKey]
+		group.mu.Unlock()
+		require.True(t, hasPreference, "an improved settlement must build the target preference")
+		require.Positive(t, group.VaneDiagnostics().Counters.HandoffImproved)
 	})
 
 	t.Run("6 Mbps below the 10M bar does not close", func(t *testing.T) {
@@ -335,6 +353,24 @@ func TestVaneChain01TargetEvidenceWinnerCommits(t *testing.T) {
 		group.mu.Lock()
 		require.Len(t, group.targetHandoffs, 1)
 		group.mu.Unlock()
+	})
+
+	// CHAIN-01-07 (explicit 3M case): target evidence below the close bar
+	// rejects the commit even though it is the winning tier. CHAIN-01-08
+	// covers the same semantics from the priority angle; this one pins the
+	// winner path itself.
+	t.Run("below-bar target evidence rejects the commit", func(t *testing.T) {
+		group, _, _, beta, metadata := newTargetGroupForTest(t)
+		chain01ProductionValues(t, group, 2_000_000)
+		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+		now := group.clock.Now()
+		group.mu.Lock()
+		group.targetEvidence[vaneTargetEvidenceKey{
+			target: plan.targetStateKey,
+			member: vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: plan.challengerEpoch},
+		}] = vaneTargetEvidence{bitsPerSecond: 3_000_000, observedAt: now}
+		group.mu.Unlock()
+		require.Equal(t, "challenger-evidence-degraded", group.commitTargetHandoff(plan))
 	})
 }
 

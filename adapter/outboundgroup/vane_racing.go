@@ -21,7 +21,7 @@ import (
 
 const (
 	vaneDefaultRacingURL          = "https://speed.cloudflare.com/__down?bytes=4194304"
-	vaneDefaultRacingBudgetMBHour = int64(120)
+	vaneDefaultRacingBudgetMBHour = int64(64)
 	vaneRacingProbeByteCap        = int64(4 * 1024 * 1024)
 	vaneRacingProbeTimeout        = 4 * time.Second
 	vaneRacingMaxChallengers      = 2
@@ -161,15 +161,6 @@ func newVaneRacingConfig(option VaneOption) (vaneRacingConfig, error) {
 		return vaneRacingConfig{}, fmt.Errorf("racing-url must not contain a fragment")
 	}
 	config.url = parsed
-	if option.RacingBudgetMBHour < 0 {
-		return vaneRacingConfig{}, fmt.Errorf("racing-budget-mb-hour must not be negative")
-	}
-	if option.RacingBudgetMBHour > 0 {
-		if option.RacingBudgetMBHour > int64(^uint64(0)>>1)/(1024*1024) {
-			return vaneRacingConfig{}, fmt.Errorf("racing-budget-mb-hour is too large")
-		}
-		config.budgetBytesHour = option.RacingBudgetMBHour * 1024 * 1024
-	}
 	config.probe = probeVaneCapability
 	return config, nil
 }

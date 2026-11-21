@@ -35,6 +35,7 @@ var vaneRemovedMediaKeys = []string{
 	"media-low-throughput", "media-low-windows", "media-min-age", "media-min-bytes",
 	"media-buffer-guard", "media-reconnect-cooldown", "media-slow-cooldown", "media-hint-ttl",
 	"media-challenger-ratio", "media-reconnect-budget", "media-budget-window",
+	"media-max-low-windows", "racing-budget-mb-hour",
 }
 
 var (

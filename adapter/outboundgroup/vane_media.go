@@ -19,7 +19,7 @@ const (
 	// Changing them requires a kernel rebuild; demand, scope and switches remain configurable.
 	vaneDefaultMediaLowThroughputBPS = int64(5_000_000)
 	vaneDefaultMediaLowWindows       = 3
-	vaneDefaultMediaMaxLowWindows    = 6
+	vaneDefaultMediaMaxLowWindows    = 4
 	vaneDefaultMediaMinAge           = 15 * time.Second
 	vaneDefaultMediaMinBytes         = int64(2 * 1024 * 1024)
 	vaneDefaultMediaDemandBPS        = int64(1_000_000)
@@ -136,17 +136,7 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 		config.domains = append(config.domains, domain)
 	}
 
-	if option.MediaMaxLowWindows < 0 {
-		return vaneMediaConfig{}, fmt.Errorf("media-max-low-windows must not be negative")
-	}
-	if option.MediaMaxLowWindows > 0 {
-		config.maxLowWindows = option.MediaMaxLowWindows
-	}
-	if config.maxLowWindows < config.lowWindows {
-		return vaneMediaConfig{}, fmt.Errorf("media-max-low-windows must be at least media-low-windows")
-	}
-
-	if option.MediaDemandBPS < 0 || option.MediaDemandBPS > vaneMaximumMediaThroughputBPS {
+	if int64(option.MediaDemandBPS) < 0 || int64(option.MediaDemandBPS) > vaneMaximumMediaThroughputBPS {
 		return vaneMediaConfig{}, fmt.Errorf("media-demand-bps must be between 0 and %d", vaneMaximumMediaThroughputBPS)
 	}
 	if option.MediaDemandBPS > 0 {
@@ -581,6 +571,13 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 	return func() bool {
 		f.mu.Lock()
 		aborted, closed := f.aborted, f.closed
+		// SYNC-RECHECK: the queued action can sit in pendingAction while the
+		// flow keeps reading. If a fast window ran observe() in between, the
+		// low-window streak was reset — the recovery already happened and the
+		// close must not fire. Known limit: a flow that only reads via direct
+		// reads keeps its old lowWindows here, so this re-check catches
+		// recoveries that observe() actually saw, nothing more.
+		lowWindowsNow := f.lowWindows
 		f.mu.Unlock()
 		if closed {
 			// The connection already won the close race. Do not turn a
@@ -590,6 +587,15 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 		if aborted {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "reconnect-rejected", reason: "already-committed", handoffID: plan.raceID,
+				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
+				bps: sample.BitsPerSecond, force: true,
+			})
+			return false
+		}
+		if lowWindowsNow < f.group.media.lowWindows {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind: "reconnect-rejected", reason: "recovered", handoffID: plan.raceID,
 				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
 				bps: sample.BitsPerSecond, force: true,

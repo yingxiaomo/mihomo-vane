@@ -753,7 +753,6 @@ func TestVaneMediaConfigValidation(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	group, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{
 		MediaReconnect:        true,
-		MediaMaxLowWindows:    8,
 		MediaDemandBPS:        2_000_000,
 		MediaReconnectDomains: []string{"GoogleVideo.Com."},
 	}, fallback, nil)
@@ -761,7 +760,7 @@ func TestVaneMediaConfigValidation(t *testing.T) {
 	require.True(t, group.media.enabled)
 	require.Equal(t, float64(5_000_000), group.media.lowThroughputBPS)
 	require.Equal(t, vaneDefaultMediaLowWindows, group.media.lowWindows)
-	require.Equal(t, 8, group.media.maxLowWindows)
+	require.Equal(t, vaneDefaultMediaMaxLowWindows, group.media.maxLowWindows)
 	require.Equal(t, []string{"googlevideo.com"}, group.media.domains)
 	require.Equal(t, vaneDefaultMediaMinAge, group.media.minAge)
 	require.Equal(t, vaneDefaultMediaMinBytes, group.media.minBytes)
@@ -775,10 +774,8 @@ func TestVaneMediaConfigValidation(t *testing.T) {
 	require.Equal(t, vaneDefaultMediaBudgetWindow, group.media.budgetWindow)
 
 	invalid := []VaneOption{
-		{MediaMaxLowWindows: -1},
-		{MediaMaxLowWindows: 2}, // low-windows is now a fixed 3
-		{MediaDemandBPS: -1},
-		{MediaDemandBPS: vaneMaximumMediaThroughputBPS + 1},
+		{MediaDemandBPS: vaneBandwidth(-1)},
+		{MediaDemandBPS: vaneBandwidth(vaneMaximumMediaThroughputBPS + 1)},
 		{MediaReconnectDomains: []string{".."}},
 		{MediaReconnectDomains: []string{".googlevideo.com"}},
 		{MediaReconnectDomains: []string{"rr..googlevideo.com"}},
