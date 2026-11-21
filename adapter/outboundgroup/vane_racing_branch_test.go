@@ -215,7 +215,8 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 			group.targetPreferences[key] = vaneTargetPreference{to: lease, expiresAt: clock.Now().Add(time.Hour), updatedAt: clock.Now()}
 			group.mu.Unlock()
 
-			decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+			suppressColdPickProbeForTest(t, group, metadata)
+			decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 			require.NotEmpty(t, decision.proxy.Name(), "an unusable preference must fall back to normal scoring")
 			require.Nil(t, decision.handoff, "a rejected preference never hands out a token")
 			group.mu.Lock()
@@ -323,7 +324,8 @@ func TestVaneTargetSettleRejectsForeignAndExpiredTokens(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
 
 	group.settleTargetHandoff(nil, vaneMemberLease{}, vaneThroughputObservation{BitsPerSecond: 1})
@@ -815,7 +817,8 @@ func TestVaneHandoffLifecycleSharesOneDiagnosticID(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
 	id := decision.handoff.id
 	group.settleTargetHandoff(decision.handoff, decision.handoff.toLease, vaneThroughputObservation{
@@ -859,7 +862,7 @@ func TestVaneDiagnosticsSnapshotIsReadOnly(t *testing.T) {
 	require.Equal(t, preferences, len(group.targetPreferences))
 	require.Equal(t, evidence, len(group.targetEvidence))
 	group.mu.Unlock()
-	require.Equal(t, "beta", group.pickDecision(metadata, vaneTransportTCP, false, false).proxy.Name(),
+	require.Equal(t, "beta", group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, false).proxy.Name(),
 		"reads must not consume the handoff token or change the preferred member")
 }
 

@@ -2,6 +2,7 @@ package outboundgroup
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -345,7 +346,7 @@ func TestVaneDelayedFailureCooldownDoesNotAffectSameNameReplacement(t *testing.T
 	beta := newVaneTestProxy("beta", true, true)
 	group, provider := newVaneGroupForTest(clock, 10, time.Hour, oldAlpha, beta)
 	metadata := &C.Metadata{Host: "example.com", DstPort: 443, NetWork: C.TCP}
-	decision := group.pickInternalDecision(metadata, vaneTransportTCP, false, true, false)
+	decision := group.pickInternalDecision(context.Background(), metadata, vaneTransportTCP, false, true, false)
 	require.Equal(t, "alpha", decision.proxy.Name())
 
 	newAlpha := newVaneTestProxy("alpha", true, true)

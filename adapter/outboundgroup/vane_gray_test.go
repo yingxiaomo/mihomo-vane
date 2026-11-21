@@ -723,7 +723,7 @@ func TestVaneGrayShadowDoesNotChangeSelectionOrPolicyState(t *testing.T) {
 	enableVaneGrayForTest(on)
 	metadata := vaneGrayTestMetadata(C.TCP)
 
-	require.Equal(t, off.pickDecision(metadata, vaneTransportTCP, false, false).proxy.Name(), on.pickDecision(metadata, vaneTransportTCP, false, false).proxy.Name())
+	require.Equal(t, off.pickDecision(t.Context(), metadata, vaneTransportTCP, false, false).proxy.Name(), on.pickDecision(t.Context(), metadata, vaneTransportTCP, false, false).proxy.Name())
 	offConn, offErr := off.DialContext(context.Background(), metadata)
 	onConn, onErr := on.DialContext(context.Background(), metadata)
 	require.Equal(t, offErr, onErr)
@@ -748,7 +748,7 @@ func TestVaneGrayShadowDoesNotChangeSelectionOrPolicyState(t *testing.T) {
 	require.Equal(t, offPacket.Close(), onPacket.Close())
 
 	require.Equal(t, vanePolicySnapshotForGrayTest(off), vanePolicySnapshotForGrayTest(on))
-	require.Equal(t, off.pickDecision(metadata, vaneTransportTCP, false, false).proxy.Name(), on.pickDecision(metadata, vaneTransportTCP, false, false).proxy.Name())
+	require.Equal(t, off.pickDecision(t.Context(), metadata, vaneTransportTCP, false, false).proxy.Name(), on.pickDecision(t.Context(), metadata, vaneTransportTCP, false, false).proxy.Name())
 	require.False(t, off.VaneDiagnostics().GrayFailure.Enabled)
 	require.True(t, on.VaneDiagnostics().GrayFailure.Enabled)
 	require.Zero(t, off.VaneDiagnostics().GrayFailure.Counters.AttemptEligible)

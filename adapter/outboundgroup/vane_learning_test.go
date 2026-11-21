@@ -755,7 +755,7 @@ func TestVaneLearningExpiredFlowCallbackCannotResurrectNode(t *testing.T) {
 	owner := newVaneLearningState("late-expired-flow", clock, newVaneLearningTestStore(), time.Hour, 16)
 	group, provider := newVaneGroupForTest(clock, 16, time.Hour, alpha, beta)
 	attachVaneLearningForTest(group, owner, owner.generation)
-	decision := group.pickDecision(nil, vaneTransportTCP, false, true)
+	decision := group.pickDecision(context.Background(), nil, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
 	group.observeConnectEpochIdentity("alpha", decision.identity, decision.nodeEpoch, vaneTransportTCP, clock.Now(), 25*time.Millisecond)
 

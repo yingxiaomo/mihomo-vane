@@ -153,7 +153,9 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	}
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	// COLD-PICK: the probes below belong to the race under test.
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
@@ -237,7 +239,9 @@ func TestVaneRaceRoundRecoversAfterCleanFinish(t *testing.T) {
 	}
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	// COLD-PICK: the probes below belong to the race under test.
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
@@ -311,7 +315,9 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		}
 
 		metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		// COLD-PICK: the probes below belong to the race under test.
+		suppressColdPickProbeForTest(t, group, metadata)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
@@ -372,7 +378,9 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		group.media.maxLowWindows = 3
 
 		metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		// COLD-PICK: the probes below belong to the race under test.
+		suppressColdPickProbeForTest(t, group, metadata)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
@@ -440,7 +448,9 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	}
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	// COLD-PICK: the probes below belong to the race under test.
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
@@ -571,7 +581,9 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 	}
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	// COLD-PICK: the probes below belong to the race under test.
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
@@ -648,7 +660,9 @@ func TestVaneRaceTokenReleasedWhenEngineHasNoWinner(t *testing.T) {
 	}
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	// COLD-PICK: the probes below belong to the race under test.
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch

@@ -357,7 +357,13 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 
 func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) vaneRaceRequest {
 	t.Helper()
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	// COLD-PICK: suppress the cold-pick probe so the pick does not consume
+	// budget or write capability evidence; race tests measure the race probe.
+	group.mu.Lock()
+	group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target] = group.clock.Now()
+	group.mu.Unlock()
+	suppressColdPickProbeForTest(t, group, metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
 	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
@@ -541,7 +547,8 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 				return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
 			}
 			metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-			decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+			suppressColdPickProbeForTest(t, group, metadata)
+			decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 			flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 			flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 			actions := make(chan vanePolicyAction, 1)

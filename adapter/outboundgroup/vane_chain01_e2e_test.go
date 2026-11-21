@@ -62,8 +62,16 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 
 	probeCalled := atomic.Bool{}
+	// The DialContext pick runs the cold-pick probe first; make it return an
+	// invalid result so the capability cache stays empty and the CHAIN-01 gate
+	// vetoes the first slow-window trigger. The race probe afterwards returns
+	// the 40 Mbps bound that unlocks the switch.
+	var probeInvocations atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		probeCalled.Store(true)
+		if probeInvocations.Add(1) == 1 {
+			return vaneProbeResult{reason: "nil-connection"}
+		}
 		return vaneProbeResult{
 			valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
 			duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true,

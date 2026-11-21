@@ -172,6 +172,11 @@ type Vane struct {
 	targetPreferences  map[vaneTargetKey]vaneTargetPreference
 	targetEvidence     map[vaneTargetEvidenceKey]vaneTargetEvidence
 	targetFailures     map[vaneTargetFailureKey]vaneTargetFailureState
+	// Cold-pick probe throttle (COLD-PICK): per target scope. Both maps are
+	// guarded by a.mu and only touched in pickInternalDecision's (a)/(c)
+	// stages — never inside racingRuntime.mu (see snapshotFreshCapabilities).
+	pickProbeInflight  map[string]bool
+	lastPickProbeAt    map[string]time.Time
 	explorationScopes  [vaneExplorationScopeCount]vaneExplorationScopeState
 	explorationOrdinal uint64
 
@@ -301,6 +306,8 @@ func newVaneWithClock(
 		targetPreferences:  make(map[vaneTargetKey]vaneTargetPreference),
 		targetEvidence:     make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
 		targetFailures:     make(map[vaneTargetFailureKey]vaneTargetFailureState),
+		pickProbeInflight:  make(map[string]bool),
+		lastPickProbeAt:    make(map[string]time.Time),
 		nodes:              make(map[string]*vaneNodeState),
 		nodeControls:       make(map[string]*vaneNodeControlState),
 		nodeIdentities:     make(map[string]string),
@@ -428,7 +435,7 @@ func vaneDurationOption(name string, seconds int, fallback time.Duration) (time.
 }
 
 func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	decision := a.pickDecision(metadata, vaneTransportTCP, true, true)
+	decision := a.pickDecision(ctx, metadata, vaneTransportTCP, true, true)
 	proxy, handoff, exploration := decision.proxy, decision.handoff, decision.exploration
 	identity, nodeEpoch := decision.identity, decision.nodeEpoch
 	start := a.clock.Now()
@@ -598,7 +605,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 }
 
 func (a *Vane) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
-	decision := a.pickDecision(metadata, vaneTransportUDP, true, true)
+	decision := a.pickDecision(ctx, metadata, vaneTransportUDP, true, true)
 	proxy, exploration := decision.proxy, decision.exploration
 	identity, nodeEpoch := decision.identity, decision.nodeEpoch
 	start := a.clock.Now()
@@ -879,19 +886,22 @@ func (a *Vane) URLTest(ctx context.Context, url string, expectedStatus utils.Int
 }
 
 func (a *Vane) pick(metadata *C.Metadata, transport vaneTransport, touch, commit bool) C.Proxy {
-	return a.pickInternalDecision(metadata, transport, touch, commit, false).proxy
+	return a.pickInternalDecision(context.Background(), metadata, transport, touch, commit, false).proxy
 }
 
 func (a *Vane) pickWithHandoff(metadata *C.Metadata, transport vaneTransport, touch, commit bool) (C.Proxy, *vaneHandoffToken) {
-	decision := a.pickInternalDecision(metadata, transport, touch, commit, true)
+	decision := a.pickInternalDecision(context.Background(), metadata, transport, touch, commit, true)
 	return decision.proxy, decision.handoff
 }
 
-func (a *Vane) pickDecision(metadata *C.Metadata, transport vaneTransport, touch, commit bool) vanePickDecision {
-	return a.pickInternalDecision(metadata, transport, touch, commit, true)
+func (a *Vane) pickDecision(ctx context.Context, metadata *C.Metadata, transport vaneTransport, touch, commit bool) vanePickDecision {
+	return a.pickInternalDecision(ctx, metadata, transport, touch, commit, true)
 }
 
-func (a *Vane) pickInternalDecision(metadata *C.Metadata, transport vaneTransport, touch, commit, claimHandoff bool) vanePickDecision {
+func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, transport vaneTransport, touch, commit, claimHandoff bool) vanePickDecision {
+	// COLD-PICK stage (a0): capability snapshot before any lock. This helper
+	// only takes racingRuntime.mu (see its lock-order comment).
+	freshCaps := a.snapshotFreshCapabilities(a.clock.Now())
 	proxies := a.GetProxies(touch)
 	if commit {
 		a.refreshNodeIdentities(proxies)
@@ -1083,8 +1093,125 @@ func (a *Vane) pickInternalDecision(metadata *C.Metadata, transport vaneTranspor
 		a.pruneLocked(now, proxies)
 		a.learning.markDirtyLocked(now)
 	}
+	// COLD-PICK stage (a): while still holding a.mu, decide whether the cold
+	// pick probe should run. Anything other than a cold ranking fallback
+	// keeps the normal commit path. inflightRejected marks a pick that lost
+	// the in-flight race on this scope: it fails open to ranking and records
+	// pick-probe-selected reason=inflight for observability.
+	coldPickScope := ""
+	coldPickInflightRejected := false
+	var coldPick *coldPickProbe
+	var coldPickTop2 []vaneRankedProxy
+	if commit && transport == vaneTransportTCP && scene == vaneSceneMedia &&
+		explorationSelection == nil && claimHandoff {
+		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
+			coldPickScope = targetKey.targetScope
+			if coldPickScope != "" && len(ranked) >= 2 {
+				top2 := []vaneRankedProxy{ranked[0], ranked[1]}
+				if a.coldPickGateLocked(freshCaps, coldPickScope, top2, now) {
+					coldPickTop2 = top2
+					a.pickProbeInflight[coldPickScope] = true
+				} else if a.pickProbeInflight[coldPickScope] {
+					coldPickInflightRejected = true
+				}
+			}
+		}
+	}
+	if coldPickTop2 != nil {
+		candidates := make([]pickProbeCandidate, 0, len(coldPickTop2))
+		for _, candidate := range coldPickTop2 {
+			member := a.memberLeaseLocked(candidate.proxy.Name(), vaneProxyPersistentIdentity(candidate.proxy))
+			if member.epoch == 0 {
+				if epoch := a.learning.nodeEpochs[vaneLearningNodeKey(member.name, member.identity)]; epoch != 0 {
+					member.epoch = epoch
+				}
+			}
+			candidates = append(candidates, pickProbeCandidate{proxy: candidate.proxy, member: member})
+		}
+		coldPick = &coldPickProbe{
+			scope:      coldPickScope,
+			candidates: candidates,
+			baseline:   chosen.proxy,
+			generation: a.learningGeneration,
+		}
+	}
 	a.learning.mu.Unlock()
 	a.mu.Unlock()
+
+	// COLD-PICK: an in-flight rejection fails open without probing.
+	if coldPickInflightRejected {
+		a.diagnostics.record(vaneDiagnosticRecord{
+			kind: "pick-probe-selected", reason: "inflight",
+			target: coldPickScope, bucket: coldPickScope, to: chosen.name,
+			force: true,
+		})
+		decision := vanePickDecision{proxy: chosen.proxy}
+		decision.reportedAliveAtSelection = hasAlive
+		if selectedState != nil {
+			decision.identity = selectedState.identity
+			decision.nodeEpoch = selectedState.epoch
+		}
+		if explorationSelection != nil {
+			decision.exploration = a.diagnostics.recordExplorationSelection(*explorationSelection)
+		}
+		return decision
+	}
+
+	// COLD-PICK stage (b): probe outside every lock. The context is the
+	// caller's, so a canceled dial cancels the probe too.
+	var coldPickOutcomes []pickProbeOutcome
+	probed := false
+	if coldPick != nil {
+		coldPickOutcomes = a.runColdPickProbe(ctx, *coldPick)
+		probed = true
+	}
+
+	// COLD-PICK stage (c): re-validate under a.mu and fold the outcome into
+	// the commit path. The ranking choice and the normal commit bookkeeping
+	// already ran under the original lock hold; only the probe verdict can
+	// still replace the chosen proxy.
+	if probed {
+		now = a.clock.Now()
+		a.mu.Lock()
+		a.learning.mu.Lock()
+		defer func() {
+			a.learning.mu.Unlock()
+			a.mu.Unlock()
+		}()
+		a.lastPickProbeAt[coldPick.scope] = now
+		delete(a.pickProbeInflight, coldPick.scope)
+		reason := "ranked-fallback"
+		var winner pickProbeCandidate
+		if len(coldPickOutcomes) > 0 {
+			winner, reason = a.settleColdPickProbeLocked(coldPick.scope, *coldPick, coldPickOutcomes, now)
+		}
+		if reason == "probe" {
+			for _, candidate := range ranked {
+				if candidate.proxy.Name() == winner.proxy.Name() {
+					chosen = candidate
+					break
+				}
+			}
+			// The probe replaces the ranking choice; run the same commit
+			// bookkeeping the normal path would have run.
+			a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
+			selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
+			a.pruneLocked(now, proxies)
+			a.learning.markDirtyLocked(now)
+		}
+		a.diagnostics.record(vaneDiagnosticRecord{
+			kind: "pick-probe-selected", reason: reason,
+			target: coldPick.scope, bucket: coldPick.scope, to: chosen.name,
+			force: true,
+		})
+		decision := vanePickDecision{proxy: chosen.proxy}
+		decision.reportedAliveAtSelection = hasAlive
+		if selectedState != nil {
+			decision.identity = selectedState.identity
+			decision.nodeEpoch = selectedState.epoch
+		}
+		return decision
+	}
 	decision := vanePickDecision{proxy: chosen.proxy}
 	decision.reportedAliveAtSelection = hasAlive
 	if selectedState != nil {

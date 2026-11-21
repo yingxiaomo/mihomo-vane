@@ -14,7 +14,7 @@ import (
 
 func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata, challenger C.Proxy) vaneMediaPlan {
 	t.Helper()
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
 	mediaKey := group.mediaTargetKey(metadata.Host, metadata.DstPort)
 	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
@@ -75,7 +75,7 @@ func TestVaneBaselineTokenIDNeverCollidesWithRaceTaskID(t *testing.T) {
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 		require.Zero(t, plan.raceID, "a plan without a race task ID takes the baseline derivation")
 		require.Empty(t, group.commitTargetHandoff(plan))
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 		require.Greater(t, decision.handoff.id, vaneBaselineTokenIDBase,
 			"a Sequence-derived ID would sit inside the race task ID space (1, 2, 3, ...)")
@@ -86,7 +86,7 @@ func TestVaneBaselineTokenIDNeverCollidesWithRaceTaskID(t *testing.T) {
 		otherPort.DstPort = 8443
 		second := prepareTargetHandoffForTest(t, group, &otherPort, beta)
 		require.Empty(t, group.commitTargetHandoff(second))
-		secondDecision := group.pickDecision(&otherPort, vaneTransportTCP, false, true)
+		secondDecision := group.pickDecision(t.Context(), &otherPort, vaneTransportTCP, false, true)
 		require.NotNil(t, secondDecision.handoff)
 		require.Greater(t, secondDecision.handoff.id, decision.handoff.id, "baseline IDs must be strictly increasing")
 	})
@@ -95,7 +95,7 @@ func TestVaneBaselineTokenIDNeverCollidesWithRaceTaskID(t *testing.T) {
 		group, _, _, beta, metadata := newTargetGroupForTest(t)
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 		require.Empty(t, group.commitTargetHandoff(plan))
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 
 		// Task ID 1 is what the very first race on a fresh group carries; the
@@ -133,7 +133,7 @@ func TestVaneBaselineTokenIDNeverCollidesWithRaceTaskID(t *testing.T) {
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 		plan.raceID = 3
 		require.Empty(t, group.commitTargetHandoff(plan))
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 		require.Equal(t, uint64(3), decision.handoff.id, "a caller-supplied race task ID must win unchanged")
 		group.settleTargetHandoff(decision.handoff, decision.handoff.toLease, vaneThroughputObservation{
@@ -149,21 +149,21 @@ func TestVaneTargetHandoffLeaseScopeAndSingleOutcomeToken(t *testing.T) {
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
 
-	first := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	first := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "beta", first.proxy.Name())
 	require.NotNil(t, first.handoff)
-	second := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	second := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "beta", second.proxy.Name(), "TTL-related concurrent connections must still prefer the handoff member")
 	require.Nil(t, second.handoff, "only the first matching reconnect owns the outcome token")
 
 	otherPort := *metadata
 	otherPort.DstPort = 8443
-	require.Equal(t, "alpha", group.pickDecision(&otherPort, vaneTransportTCP, false, true).proxy.Name())
+	require.Equal(t, "alpha", group.pickDecision(t.Context(), &otherPort, vaneTransportTCP, false, true).proxy.Name())
 	otherFamily := *metadata
 	otherFamily.Host = "cdn.other.example"
-	require.Equal(t, "alpha", group.pickDecision(&otherFamily, vaneTransportTCP, false, true).proxy.Name())
+	require.Equal(t, "alpha", group.pickDecision(t.Context(), &otherFamily, vaneTransportTCP, false, true).proxy.Name())
 	interactive := &C.Metadata{Host: "interactive.example", DstPort: 443, NetWork: C.TCP}
-	require.Equal(t, "alpha", group.pickDecision(interactive, vaneTransportTCP, false, true).proxy.Name())
+	require.Equal(t, "alpha", group.pickDecision(t.Context(), interactive, vaneTransportTCP, false, true).proxy.Name())
 }
 
 // TARGET-FEEDBACK-001: preference forms only after real improvement.
@@ -171,7 +171,7 @@ func TestVaneTargetFeedbackCreatesPreferenceOnlyAfterImprovement(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
 	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata, decision.handoff)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
@@ -186,7 +186,7 @@ func TestVaneTargetFeedbackCreatesPreferenceOnlyAfterImprovement(t *testing.T) {
 	require.True(t, preferred)
 	require.Equal(t, "beta", preference.to.name)
 	require.False(t, leaseStillPresent)
-	require.Equal(t, "beta", group.pickDecision(metadata, vaneTransportTCP, false, true).proxy.Name())
+	require.Equal(t, "beta", group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true).proxy.Name())
 	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffImproved)
 }
 
@@ -195,7 +195,7 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata, decision.handoff)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	flow.observe(vaneThroughputObservation{BitsPerSecond: 500_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second})
@@ -317,7 +317,7 @@ func TestVaneTargetHandoffFailureAndDiscardContracts(t *testing.T) {
 		group, _, _, beta, metadata := newTargetGroupForTest(t)
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 		require.Empty(t, group.commitTargetHandoff(plan))
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 		key := decision.handoff.targetKey
 		stale := *decision.handoff
@@ -333,7 +333,7 @@ func TestVaneTargetHandoffFailureAndDiscardContracts(t *testing.T) {
 		group, _, _, beta, metadata := newTargetGroupForTest(t)
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 		require.Empty(t, group.commitTargetHandoff(plan))
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 		key := decision.handoff.targetKey
 		group.mu.Lock()
@@ -357,7 +357,7 @@ func TestVaneTargetHandoffFailureAndDiscardContracts(t *testing.T) {
 		group, _, _, beta, metadata := newTargetGroupForTest(t)
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 		require.Empty(t, group.commitTargetHandoff(plan))
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 		key := decision.handoff.targetKey
 		group.mu.Lock()
@@ -380,7 +380,7 @@ func TestVaneTargetHandoffFailureAndDiscardContracts(t *testing.T) {
 		group, _, _, beta, metadata := newTargetGroupForTest(t)
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 		require.Empty(t, group.commitTargetHandoff(plan))
-		decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 		key := decision.handoff.targetKey
 		group.discardTargetHandoff(decision.handoff)
@@ -401,7 +401,7 @@ func TestVaneTargetStatePruneAndCapabilityWrapper(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
 	key := decision.handoff.targetKey
 
@@ -463,7 +463,7 @@ func TestVaneTargetPruneLRUAndEvidenceBranches(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	decision := group.pickDecision(metadata, vaneTransportTCP, false, true)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	now := group.clock.Now()
 
 	group.mu.Lock()
