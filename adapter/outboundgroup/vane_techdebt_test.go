@@ -707,10 +707,13 @@ func TestVaneUnwrappedWriterDrainsPendingAction(t *testing.T) {
 }
 
 // P1 (audit 2026-11-22): a never-selected node (learning epoch set, no live
-// a.nodes entry) qualifies as a race challenger — the removed epoch promotion
-// used to make validateRaceWinner demand a live state the node cannot have,
-// silently discarding every probe result for exactly racing's target
-// demographic.
+// a.nodes entry) must come through snapshotRaceCandidates with its zero epoch
+// intact and qualify as a race challenger. The removed epoch promotion used to
+// rewrite the lease here, making validateRaceWinner demand a live a.nodes
+// entry the node cannot have (adoption happens only when something actually
+// selects it) — every probe result for a never-selected node was discarded as
+// false stale-generation. The assertions run through
+// snapshotRaceCandidates so restoring the promotion fails the epoch check.
 func TestVaneRaceQualifiesNodeWithoutLiveState(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
@@ -739,12 +742,19 @@ func TestVaneRaceQualifiesNodeWithoutLiveState(t *testing.T) {
 	group.learning.mu.Unlock()
 	group.mu.Unlock()
 
-	group.mu.Lock()
-	member := group.memberLeaseLocked(beta.Name(), beta.identity)
-	group.mu.Unlock()
-	require.Zero(t, member.epoch, "the lease keeps its zero epoch without live state")
-	require.True(t, group.validateRaceWinner(request, member),
-		"a zero-epoch lease must qualify on identity match")
+	candidates, reason := group.snapshotRaceCandidates(request)
+	require.Empty(t, reason)
+	var betaCandidate *vaneRaceCandidate
+	for index := range candidates {
+		if candidates[index].member.name == beta.Name() {
+			betaCandidate = &candidates[index]
+		}
+	}
+	require.NotNil(t, betaCandidate, "the never-selected node must be a race candidate")
+	require.Zero(t, betaCandidate.member.epoch,
+		"snapshotRaceCandidates must keep the zero epoch — promoting the learning epoch (7 here) would make validateRaceWinner demand a live state the node cannot have")
+	require.True(t, group.validateRaceWinner(request, betaCandidate.member),
+		"the zero-epoch lease must qualify on identity match")
 }
 
 // P2 (audit 2026-11-22): an evicting victim is not handed out by the acquire
