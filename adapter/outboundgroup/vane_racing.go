@@ -465,12 +465,17 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 		if proxy.Name() == request.current.name || !item.alive || identity == "" {
 			continue
 		}
+		// P1 (audit 2026-11-22): the lease keeps its zero epoch for a node
+		// without live state. Promoting the persisted learning epoch here
+		// made validateRaceWinner demand a live a.nodes entry the node cannot
+		// have (adoption happens only when something actually selects it), so
+		// every probe result for a never-selected node was discarded as false
+		// stale-generation — racing was silently inert for exactly its target
+		// demographic, burning the probe budget on repeats. Zero-epoch leases
+		// pass memberLeaseCurrentLocked on identity match, and the capability
+		// records written under epoch 0 are found by the zero-epoch fallback
+		// in prepare/commit.
 		member := a.memberLeaseLocked(proxy.Name(), identity)
-		if member.epoch == 0 {
-			if epoch := a.learning.nodeEpochs[vaneLearningNodeKey(member.name, member.identity)]; epoch != 0 {
-				member.epoch = epoch
-			}
-		}
 		snapshot := vaneMetricsSnapshot{}
 		if state := a.nodes[proxy.Name()]; state != nil && state.identity == identity {
 			snapshot = state.snapshot(vaneTransportTCP, now)

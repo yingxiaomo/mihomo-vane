@@ -160,7 +160,11 @@ type vaneLearningState struct {
 	persistRunning    bool
 	// §H: the registry's access stamp at the last touch (read under the
 	// registry lock during eviction).
-	lastAccess     uint64
+	lastAccess uint64
+	// §H: set while an eviction is flushing this state — the acquire hit path
+	// must not hand an evicting victim out (a reload re-acquiring the same
+	// group mid-flush would otherwise adopt it and lose it to the delete).
+	evicting       bool
 	persistRetryAt time.Time
 	persistWG      sync.WaitGroup
 	retiring       bool
@@ -271,7 +275,7 @@ func vaneLearningNoStoreCandidate(group string, clock vaneClock, stateTTL time.D
 func acquireVaneLearningState(group string, clock vaneClock, stateTTL time.Duration, maxStates int) *vaneLearningState {
 	key := vaneLearningStorageKey(group)
 	vaneLearningRegistry.Lock()
-	if current := vaneLearningRegistry.entries[key]; current != nil {
+	if current := vaneLearningRegistry.entries[key]; current != nil && !current.evicting {
 		vaneLearningRegistry.access++
 		current.lastAccess = vaneLearningRegistry.access
 		vaneLearningRegistry.Unlock()
@@ -285,14 +289,24 @@ func acquireVaneLearningState(group string, clock vaneClock, stateTTL time.Durat
 		// the victim and degrades the new group exactly like before.
 		victimKey, victim := vaneLearningEvictOldestLocked()
 		vaneLearningRegistry.Unlock()
-		if victim == nil || victim.flush() != nil {
-			return vaneLearningNoStoreCandidate(group, clock, stateTTL, maxStates, "node-state registry capacity unavailable")
+		var flushErr error
+		if victim != nil {
+			flushErr = victim.flush()
 		}
 		vaneLearningRegistry.Lock()
-		if current := vaneLearningRegistry.entries[victimKey]; current == victim {
-			delete(vaneLearningRegistry.entries, victimKey)
+		if victim != nil {
+			if current := vaneLearningRegistry.entries[victimKey]; current == victim {
+				if flushErr == nil {
+					delete(vaneLearningRegistry.entries, victimKey)
+				} else {
+					// P2 (audit 2026-11-22): the eviction gave up — clear the
+					// flag so the surviving victim is handed out again.
+					victim.evicting = false
+				}
+			}
+			// else: replaced concurrently while flushing; nothing to delete.
 		}
-		if len(vaneLearningRegistry.entries) >= vaneLearningRegistryLimit {
+		if victim == nil || flushErr != nil || len(vaneLearningRegistry.entries) >= vaneLearningRegistryLimit {
 			// Concurrent acquires refilled the registry while the victim was
 			// flushing; degrade rather than evict a second victim here.
 			vaneLearningRegistry.Unlock()
@@ -322,9 +336,17 @@ func vaneLearningEvictOldestLocked() (string, *vaneLearningState) {
 	var victim *vaneLearningState
 	var oldest uint64
 	for candidateKey, candidate := range vaneLearningRegistry.entries {
+		// P2 (audit 2026-11-22): another evictor is already flushing this
+		// entry — never hand it out or evict it twice.
+		if candidate.evicting {
+			continue
+		}
 		if victim == nil || candidate.lastAccess < oldest {
 			victimKey, victim, oldest = candidateKey, candidate, candidate.lastAccess
 		}
+	}
+	if victim != nil {
+		victim.evicting = true
 	}
 	return victimKey, victim
 }

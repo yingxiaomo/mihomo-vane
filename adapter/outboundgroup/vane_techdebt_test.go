@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -703,4 +704,195 @@ func TestVaneUnwrappedWriterDrainsPendingAction(t *testing.T) {
 	drained := observed.pendingAction == nil
 	observed.mu.Unlock()
 	require.True(t, drained)
+}
+
+// P1 (audit 2026-11-22): a never-selected node (learning epoch set, no live
+// a.nodes entry) qualifies as a race challenger — the removed epoch promotion
+// used to make validateRaceWinner demand a live state the node cannot have,
+// silently discarding every probe result for exactly racing's target
+// demographic.
+func TestVaneRaceQualifiesNodeWithoutLiveState(t *testing.T) {
+	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
+	chain01ProductionValues(t, group, 2_000_000)
+	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	suppressColdPickProbeForTest(t, group, metadata)
+	plan := prepareTargetHandoffForTest(t, group, metadata, alpha)
+	request := vaneRaceRequest{
+		targetKey:   plan.targetStateKey,
+		mediaKey:    plan.targetKey,
+		target:      plan.target,
+		port:        plan.port,
+		current:     vaneMemberLease{name: alpha.Name(), identity: alpha.identity, epoch: plan.nodeEpoch},
+		currentBPS:  plan.currentBPS,
+		requiredBPS: 2_000_000,
+		generation:  group.learningGeneration,
+		requestedAt: clock.Now(),
+	}
+
+	// beta holds a persisted learning epoch but no live node state — the
+	// exact shape a TTL-expired or restart-truncated node has.
+	group.mu.Lock()
+	group.learning.mu.Lock()
+	require.NotNil(t, group.ensureProxyNodeLocked(beta, clock.Now()))
+	delete(group.nodes, beta.Name())
+	group.learning.nodeEpochs[vaneLearningNodeKey(beta.Name(), beta.identity)] = 7
+	group.learning.mu.Unlock()
+	group.mu.Unlock()
+
+	group.mu.Lock()
+	member := group.memberLeaseLocked(beta.Name(), beta.identity)
+	group.mu.Unlock()
+	require.Zero(t, member.epoch, "the lease keeps its zero epoch without live state")
+	require.True(t, group.validateRaceWinner(request, member),
+		"a zero-epoch lease must qualify on identity match")
+}
+
+// P2 (audit 2026-11-22): an evicting victim is not handed out by the acquire
+// hit path, and a failed eviction clears the flag so the survivor works again.
+func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
+	store := newVaneLearningTestStore()
+	previousFactory := vaneLearningRegistry.storeFactory
+	vaneLearningRegistry.storeFactory = func() vaneLearningStore { return store }
+	t.Cleanup(func() {
+		vaneLearningRegistry.Lock()
+		vaneLearningRegistry.storeFactory = previousFactory
+		vaneLearningRegistry.Unlock()
+	})
+	vaneLearningRegistry.Lock()
+	previousEntries := vaneLearningRegistry.entries
+	vaneLearningRegistry.entries = make(map[string]*vaneLearningState)
+	vaneLearningRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneLearningRegistry.Lock()
+		vaneLearningRegistry.entries = previousEntries
+		vaneLearningRegistry.Unlock()
+	})
+
+	clock := newVaneConnTestClock()
+
+	// Phase 1: the hit path must not hand an evicting victim out — the
+	// acquire falls through and builds a fresh state that replaces it.
+	victim := acquireVaneLearningState("evicting-group", clock, time.Hour, 64)
+	require.NotNil(t, victim.store)
+	vaneLearningRegistry.Lock()
+	victim.evicting = true // simulates the eviction flush being in flight
+	vaneLearningRegistry.Unlock()
+	fresh := acquireVaneLearningState("evicting-group", clock, time.Hour, 64)
+	require.NotNil(t, fresh)
+	require.NotSame(t, victim, fresh, "an evicting victim must not be adopted mid-flush")
+	vaneLearningRegistry.Lock()
+	require.Same(t, fresh, vaneLearningRegistry.entries[vaneLearningStorageKey("evicting-group")])
+	vaneLearningRegistry.Unlock()
+
+	// Phase 2: a failed eviction keeps the victim, clears the flag, and the
+	// survivor is handed out again by the next acquire of its group.
+	store.mu.Lock()
+	store.fail = errors.New("save failed")
+	store.mu.Unlock()
+	t.Cleanup(func() {
+		store.mu.Lock()
+		store.fail = nil
+		store.mu.Unlock()
+	})
+	// Fill the registry to one under the limit, then take the last slot with
+	// the survivor so the next acquire has to evict someone.
+	for len(vaneLearningRegistry.entries) < vaneLearningRegistryLimit-1 {
+		key := vaneLearningStorageKey(fmt.Sprintf("filler-%d", len(vaneLearningRegistry.entries)))
+		if vaneLearningRegistry.entries[key] == nil {
+			filler := newVaneLearningState("filler", clock, nil, time.Hour, 1)
+			vaneLearningRegistry.access++
+			filler.lastAccess = vaneLearningRegistry.access
+			vaneLearningRegistry.entries[key] = filler
+		}
+	}
+	survivor := acquireVaneLearningState("survivor", clock, time.Hour, 64)
+	require.NotNil(t, survivor.store)
+	// Give the survivor dirty data so its eviction flush actually attempts a
+	// Save (an all-clean flush returns success without touching the store).
+	survivor.mu.Lock()
+	node := &vaneNodeState{name: "alpha", identity: "test:alpha", lastObservedAt: clock.Now()}
+	node.tcp.observeConnect(clock.Now(), 10*time.Millisecond)
+	survivor.nodes[vaneLearningTestNodeKey("alpha")] = node
+	survivor.markDirtyLocked(clock.Now())
+	survivor.mu.Unlock()
+	vaneLearningRegistry.Lock()
+	vaneLearningRegistry.access++
+	survivor.lastAccess = vaneLearningRegistry.access
+	vaneLearningRegistry.Unlock()
+	// Mark every other entry above the survivor's stamp so the survivor is
+	// the least-recently-accessed (the eviction's pick).
+	vaneLearningRegistry.Lock()
+	vaneLearningRegistry.access++
+	floor := vaneLearningRegistry.access
+	for _, state := range vaneLearningRegistry.entries {
+		if state != survivor && state.lastAccess < floor {
+			vaneLearningRegistry.access++
+			state.lastAccess = vaneLearningRegistry.access
+		}
+	}
+	vaneLearningRegistry.Unlock()
+
+	degraded := acquireVaneLearningState("overflow-group", clock, time.Hour, 64)
+	require.Nil(t, degraded.store, "the failed victim flush degrades the new group")
+	require.Equal(t, "node-state registry capacity unavailable", degraded.lastError)
+	vaneLearningRegistry.Lock()
+	_, survivorKept := vaneLearningRegistry.entries[vaneLearningStorageKey("survivor")]
+	survivorNow := vaneLearningRegistry.entries[vaneLearningStorageKey("survivor")]
+	vaneLearningRegistry.Unlock()
+	require.True(t, survivorKept, "the failed flush keeps the victim")
+	require.NotNil(t, survivorNow)
+	require.False(t, survivorNow.evicting, "the eviction gave up and cleared the flag")
+	again := acquireVaneLearningState("survivor", clock, time.Hour, 64)
+	require.Same(t, survivor, again, "the survivor is handed out again after the flag clears")
+}
+
+// P2 (audit 2026-11-22): flushForShutdown honors the persistRetryAt backoff —
+// a fast-failing store gets one attempt, not a busy loop.
+type vaneDiagnosticsCountingFailStore struct {
+	mu       sync.Mutex
+	attempts int
+}
+
+func (s *vaneDiagnosticsCountingFailStore) Load(string) ([]byte, error) { return nil, nil }
+
+func (s *vaneDiagnosticsCountingFailStore) Save(string, []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attempts++
+	return errors.New("disk full")
+}
+
+func TestVaneFlushDiagnosticsContextBacksOff(t *testing.T) {
+	store := &vaneDiagnosticsCountingFailStore{}
+	clock := newVaneConnTestClock()
+	diagnostics := newVaneDiagnostics("backoff-test", clock, store)
+	key := vaneDiagnosticsStorageKey("backoff-test")
+	vaneDiagnosticsRegistry.Lock()
+	previous := vaneDiagnosticsRegistry.entries[key]
+	vaneDiagnosticsRegistry.entries[key] = diagnostics
+	vaneDiagnosticsRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneDiagnosticsRegistry.Lock()
+		if previous != nil {
+			vaneDiagnosticsRegistry.entries[key] = previous
+		} else {
+			delete(vaneDiagnosticsRegistry.entries, key)
+		}
+		vaneDiagnosticsRegistry.Unlock()
+	})
+
+	diagnostics.record(vaneDiagnosticRecord{kind: "throughput-sample", bps: 8_000_000})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := FlushVaneDiagnosticsContext(ctx)
+	elapsed := time.Since(start)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, elapsed, 2*time.Second, "the flush must end with the ctx, not run past it")
+	// The failure is bounded: the waitPersistence/retry loop must have made
+	// only a handful of Save attempts in the 300ms window, not thousands.
+	store.mu.Lock()
+	attempts := store.attempts
+	store.mu.Unlock()
+	require.LessOrEqual(t, attempts, 5, "the backoff must prevent hot-looping the failing store")
 }

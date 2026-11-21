@@ -1008,9 +1008,11 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 		// lease and its zero-epoch form, because a probe that never selected
 		// the challenger wrote its record under epoch 0.
 		// §B: target-scoped real traffic outranks both node tiers — the same
-		// priority checkChallengerEvidenceLocked applies at commit. In racing
-		// off mode target evidence is never written (recordTargetEvidenceLocked
-		// returns early), so this tier is a shadow/on-only admission path.
+		// priority checkChallengerEvidenceLocked applies at commit. Target
+		// evidence exists in every racing mode: the public recordTargetEvidence
+		// gates off, but baseline settlements write through the Locked variant
+		// (intentional — the off-mode baseline learns from its own settled
+		// handoffs), so this tier works in off too.
 		bestEvidence := 0.0
 		if targetBPS, fresh := a.targetEvidenceLocked(stateKey, member, now); fresh {
 			bestEvidence = targetBPS

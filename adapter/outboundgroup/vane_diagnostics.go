@@ -1036,12 +1036,31 @@ func (d *vaneDiagnostics) flushForShutdown(ctx context.Context) error {
 			}
 			d.mu.Lock()
 			revoked := d.store == nil || d.retired || d.retiring
-			if !revoked {
+			retryAt := d.persistRetryAt
+			if !revoked && !retryAt.After(d.clock.Now()) {
+				// No scheduled retry (the last persist loop exited without
+				// one): schedule the next attempt directly.
 				d.schedulePersistLocked(d.clock.Now().UTC())
 			}
 			d.mu.Unlock()
 			if revoked {
 				return nil
+			}
+			// P2 (audit 2026-11-22): a persistRetryAt from a failed save means
+			// the store is failing fast — wait out the backoff instead of
+			// hot-looping marshal+Save for the whole shutdown window.
+			if !retryAt.After(d.clock.Now()) {
+				continue
+			}
+			remaining := retryAt.Sub(d.clock.Now().UTC())
+			if remaining > 0 {
+				timer := time.NewTimer(remaining)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
 			}
 		}
 	}
