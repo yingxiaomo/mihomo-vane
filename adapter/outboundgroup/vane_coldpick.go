@@ -84,7 +84,8 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 		return nil, true
 	}
 	type entry struct {
-		outcome pickProbeOutcome
+		outcome  pickProbeOutcome
+		panicked any
 	}
 	results := make(chan entry, len(probe.candidates))
 	probeCtx, cancel := context.WithCancel(ctx)
@@ -96,6 +97,14 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 	for index, candidate := range probe.candidates {
 		limit := limits[index]
 		go func(candidate pickProbeCandidate, limit int64) {
+			// §J: a panicking probe must not crash the process past the flag
+			// clearing — recover here and surface the panic to the collector,
+			// which re-panics after the results are gathered.
+			defer func() {
+				if r := recover(); r != nil {
+					results <- entry{panicked: r}
+				}
+			}()
 			result := probeFunc(probeCtx, candidate.proxy, a.racing.url, limit)
 			a.settleRaceBudget(limit, result.bytes)
 			results <- entry{outcome: pickProbeOutcome{proxy: candidate.proxy, member: candidate.member, result: result}}
@@ -107,6 +116,9 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 		case <-ctx.Done():
 			return outcomes, false
 		case entry := <-results:
+			if entry.panicked != nil {
+				panic(entry.panicked)
+			}
 			outcomes = append(outcomes, entry.outcome)
 		}
 	}

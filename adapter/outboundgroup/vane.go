@@ -1174,7 +1174,19 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	probed := false
 	if coldPick != nil {
 		var budgetDenied bool
-		coldPickOutcomes, budgetDenied = a.runColdPickProbe(ctx, *coldPick)
+		func() {
+			// §J + the budget-denied leak Hermes flagged: the in-flight flag
+			// must clear as soon as the probe stage has run. A budget denial
+			// or a re-surfaced probe panic skips stage (c) entirely — a leaked
+			// flag would freeze cold-pick for this scope until restart. The
+			// panic itself still propagates; only the flag is touched here.
+			defer func() {
+				a.mu.Lock()
+				delete(a.pickProbeInflight, coldPick.scope)
+				a.mu.Unlock()
+			}()
+			coldPickOutcomes, budgetDenied = a.runColdPickProbe(ctx, *coldPick)
+		}()
 		probed = !budgetDenied
 	}
 
@@ -1190,7 +1202,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		if probed {
 			a.lastPickProbeAt[coldPick.scope] = now
 		}
-		delete(a.pickProbeInflight, coldPick.scope)
+		// The in-flight flag was cleared when stage (b) returned (§J).
 		var winner pickProbeCandidate
 		var cacheOutcomes []pickProbeOutcome
 		reason := "ranked-fallback"

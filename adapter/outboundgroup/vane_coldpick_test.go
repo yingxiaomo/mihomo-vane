@@ -298,3 +298,66 @@ func TestVaneColdPickOffModeThrottleRegression(t *testing.T) {
 	require.Equal(t, alpha.Name(), second.proxy.Name())
 	require.Equal(t, int32(2), calls.Load(), "the second pick is warm (capability + timestamp) and must not probe")
 }
+
+// COLDPICK-PANIC-01 (§J): a panicking probe surfaces through pickDecision
+// after clearing the in-flight flag — the flag must not leak, and the next
+// pick on the same scope probes again.
+func TestVaneColdPickPanickingProbeClearsInflight(t *testing.T) {
+	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	scope := group.mediaTargetKey(metadata.Host, metadata.DstPort).target
+	probeCalls := atomic.Int32{}
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probeCalls.Add(1)
+		panic("probe exploded")
+	}
+
+	require.Panics(t, func() {
+		group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	}, "the probe panic must propagate out of the pick")
+
+	group.mu.Lock()
+	_, leaked := group.pickProbeInflight[scope]
+	group.mu.Unlock()
+	require.False(t, leaked, "the panicking probe must not leak the in-flight flag")
+
+	// The scope is still cold (no timestamp) and no longer in flight: the
+	// next pick probes again.
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probeCalls.Add(1)
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+	}
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.NotEmpty(t, decision.proxy.Name())
+	calls := probeCalls.Load()
+	require.GreaterOrEqual(t, calls, int32(3), "the scope must probe again after the panic")
+}
+
+// COLD-PICK-04 (Hermes' leak): a budget-denied probe attempt must still clear
+// the in-flight flag — stage (c) is skipped entirely, and a leaked flag would
+// freeze cold-pick for this scope until restart.
+func TestVaneColdPickBudgetDeniedClearsInflight(t *testing.T) {
+	group, clock, _, _, metadata := newColdPickGroupForTest(t, vaneRacingOff)
+	scope := group.mediaTargetKey(metadata.Host, metadata.DstPort).target
+	group.racingRuntime.mu.Lock()
+	group.racingRuntime.budget = vaneRacingBudget{startedAt: clock.Now(), used: 120 * 1024 * 1024}
+	group.racingRuntime.mu.Unlock()
+	probeCalls := atomic.Int32{}
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probeCalls.Add(1)
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+	}
+
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, decision.proxy.Name(), "alpha")
+	group.mu.Lock()
+	_, leaked := group.pickProbeInflight[scope]
+	group.mu.Unlock()
+	require.False(t, leaked, "the budget-denied attempt must not leak the in-flight flag")
+
+	// Budget recovered: the next pick on the still-cold scope probes again.
+	group.racingRuntime.mu.Lock()
+	group.racingRuntime.budget = vaneRacingBudget{startedAt: clock.Now(), used: 0}
+	group.racingRuntime.mu.Unlock()
+	group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Positive(t, probeCalls.Load(), "the scope must probe again once budget recovers")
+}
