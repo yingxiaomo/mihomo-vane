@@ -142,6 +142,13 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 	if option.MediaDemandBPS > 0 {
 		config.demandBPS = float64(option.MediaDemandBPS)
 	}
+	// §L: the low-window trigger line follows the group's demand (floored at
+	// the 5M default). demand already dominates the close bar, knownGood and
+	// the settlement line; a 4K-demand group must also accumulate low windows
+	// below its own bar, or a 40→10 drop never triggers at all.
+	if config.demandBPS > config.lowThroughputBPS {
+		config.lowThroughputBPS = config.demandBPS
+	}
 	return config, nil
 }
 
@@ -695,6 +702,10 @@ type vaneMediaChallenger struct {
 	throughputBPS float64
 	scoreMicros   int64
 	delay         uint16
+	// §C: the evidence value that admitted this candidate (target tier >
+	// node throughput > capability). Admission only used to gate candidates;
+	// this ranks admitted candidates whose evidence differs.
+	evidenceBPS float64
 }
 
 type vaneMediaPlan struct {
@@ -890,8 +901,14 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		// has no node state, so its lease epoch is 0; try both the computed
 		// lease and its zero-epoch form, because a probe that never selected
 		// the challenger wrote its record under epoch 0.
+		// §B: target-scoped real traffic outranks both node tiers — the same
+		// priority checkChallengerEvidenceLocked applies at commit. In racing
+		// off mode target evidence is never written (recordTargetEvidenceLocked
+		// returns early), so this tier is a shadow/on-only admission path.
 		bestEvidence := 0.0
-		if freshThroughput {
+		if targetBPS, fresh := a.targetEvidenceLocked(stateKey, member, now); fresh {
+			bestEvidence = targetBPS
+		} else if freshThroughput {
 			bestEvidence = recent.bitsPerSecond
 		} else if capBPS, ok := capSnapshot[member]; ok {
 			bestEvidence = capBPS
@@ -915,6 +932,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 			throughputBPS: throughputBPS,
 			scoreMicros:   scoreVaneMetrics(vaneSceneMedia, snapshot),
 			delay:         item.delay,
+			evidenceBPS:   bestEvidence,
 		})
 	}
 	if len(candidates) == 0 {
@@ -938,6 +956,13 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 			if left.throughputBPS != right.throughputBPS {
 				return left.throughputBPS > right.throughputBPS
 			}
+		}
+		// §C: among candidates of the same knownGood class, higher admitted
+		// evidence wins before delay. For knownGood pairs this is a no-op
+		// (evidenceBPS == throughputBPS, already compared above); it ranks
+		// capability/target-admitted candidates by what admitted them.
+		if left.evidenceBPS != right.evidenceBPS {
+			return left.evidenceBPS > right.evidenceBPS
 		}
 		if left.delay != right.delay {
 			return left.delay < right.delay
@@ -1055,7 +1080,23 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		(recent.bitsPerSecond < a.media.lowThroughputBPS ||
 			recent.bitsPerSecond < plan.currentBPS*a.media.challengerRatio ||
 			(plan.knownGood && recent.bitsPerSecond < a.media.demandBPS)) {
-		return "challenger-evidence-degraded"
+		// §L exemption: a fresh target-tier measurement at or above the bar is
+		// the authority (target > node), and checkChallengerEvidenceLocked
+		// below would accept the plan through that tier. Vetoing here would
+		// let the node-level signal override the more specific one — once the
+		// low line follows demand, that inversion would kill exactly the
+		// plans §B admits on target evidence alone.
+		to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: plan.challengerEpoch}
+		bar := a.media.lowThroughputBPS
+		if required := plan.currentBPS * a.media.challengerRatio; required > bar {
+			bar = required
+		}
+		if a.media.demandBPS > bar {
+			bar = a.media.demandBPS
+		}
+		if targetBPS, targetFresh := a.targetEvidenceLocked(plan.targetStateKey, to, now); !(targetFresh && targetBPS >= bar) {
+			return "challenger-evidence-degraded"
+		}
 	}
 	// CHAIN-01: the challenger must still have fresh evidence above the close
 	// bar when the close happens, across all evidence tiers. This also covers

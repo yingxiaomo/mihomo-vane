@@ -794,6 +794,11 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		if failure.stallFrequent() {
 			snapshot.Runtime.B2StallFrequentTargets++
 		}
+		// §A: per-target capability observation tallies (record-only).
+		if failure.capSamples > 0 {
+			snapshot.Runtime.TargetCapabilities++
+			snapshot.Runtime.TargetCapabilitySamples += failure.capSamples
+		}
 	}
 	// B2 item 4: copy the live per-node flow counts — never expose the
 	// internal map's reference. An empty counter set keeps the zero Runtime

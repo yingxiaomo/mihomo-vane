@@ -81,6 +81,12 @@ type vaneTargetFailureState struct {
 	attemptCount        int64
 	suspectedStallCount int64
 	lastObservedAt      time.Time
+	// §A (§12.3 step 1): the real-traffic throughput this (target, candidate)
+	// pair last delivered, recorded at settlement. Record-only for now — no
+	// selection path reads it; the read side is targetCapabilityLocked.
+	capBPS     float64
+	capAt      time.Time
+	capSamples int64
 }
 
 // B2 loss EMA weights early evidence more heavily and stabilizes the estimate
@@ -388,6 +394,20 @@ func (a *Vane) targetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, n
 	return record.bitsPerSecond, true
 }
 
+// targetCapabilityLocked is the read side of the §12.3 per-target capability
+// observation (§A): the real-traffic throughput this (target, candidate) pair
+// last delivered at settlement. Expired means no evidence — never a downgrade
+// to the node-level capability cache. Record-only in this batch; the second
+// step (ranking per-target capability above the node-level cache) wires this
+// into selection once shadow data justifies it.
+func (a *Vane) targetCapabilityLocked(key vaneTargetKey, member vaneMemberLease, now time.Time) (float64, bool) {
+	record, ok := a.targetFailures[vaneTargetFailureKey{target: key, member: member}]
+	if !ok || record.capSamples == 0 || record.capAt.IsZero() || now.Sub(record.capAt) > vaneTargetEvidenceTTL || !a.memberLeaseCurrentLocked(member) {
+		return 0, false
+	}
+	return record.capBPS, true
+}
+
 func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, now time.Time, claimHandoff bool) (C.Proxy, *vaneHandoffToken, string) {
 	if a.racing.mode != vaneRacingOn {
 		return nil, nil, ""
@@ -600,6 +620,10 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	}
 	kind := "handoff-no-gain"
 	a.mu.Lock()
+	// §A: read the existing capability sample count before the branch — an
+	// improved verdict clears the failure record, and the count must survive.
+	capKey := vaneTargetFailureKey{target: token.targetKey, member: member}
+	prevCapSamples := a.targetFailures[capKey].capSamples
 	current := a.memberLeaseCurrentLocked(member)
 	if lease, ok := a.targetHandoffs[token.targetKey]; ok && lease.id == token.id {
 		if lease.to != member || !current {
@@ -614,7 +638,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		return
 	}
 	a.recordTargetEvidenceLocked(token.targetKey, member, sample.BitsPerSecond, now)
-	if sample.BitsPerSecond >= required {
+	if sample.BitsPerSecond >= required && sample.BitsPerSecond >= a.media.lowThroughputBPS {
 		a.targetPreferences[token.targetKey] = vaneTargetPreference{
 			to: member, expiresAt: now.Add(vaneTargetPreferenceTTL), updatedAt: now,
 		}
@@ -628,6 +652,28 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 			identity:           member.identity,
 		}
 		a.mediaSlowCooldowns[legacyKey] = now.Add(a.media.slowCooldown)
+		// §D: the handoff did not help — the reconnect cooldown written at
+		// commit must not keep blocking re-evaluation for this target. The 30
+		// minute slow cooldown above still stops this same candidate from
+		// being picked again; the two cooldowns guard different things.
+		delete(a.mediaReconnects, legacyKey.vaneMediaTargetKey)
+	}
+	// §A: fold the settlement's real-traffic sample into the (target, member)
+	// record — the per-target capability observation, record-only for now.
+	// Written after the improved/no-gain branch because an improved verdict
+	// clears the failure record first (the sample count was read above and is
+	// carried over; the failure fields are not); small transfers stay out
+	// (same minBytes gate as the sample path). The record is created
+	// observation-only if it does not exist, which can never block (zero
+	// streak/blockUntil), and lastObservedAt keeps the LRU eviction from
+	// treating a cap-only record as the oldest.
+	if sample.TotalBytes >= a.media.minBytes {
+		state := a.targetFailures[capKey]
+		state.capBPS = sample.BitsPerSecond
+		state.capAt = now
+		state.capSamples = prevCapSamples + 1
+		state.lastObservedAt = now
+		a.targetFailures[capKey] = state
 	}
 	a.pruneTargetStateLocked(now)
 	a.mu.Unlock()

@@ -611,7 +611,9 @@ type vaneMetricsSnapshot struct {
 	connect    vaneMetricEstimate
 	response   vaneMetricEstimate
 	throughput vaneMetricEstimate
-	// jitter is σ of connect latency in raw milliseconds.
+	// jitter is the RMSE of one-step prediction residuals against the previous
+	// mean (not a strict σ — the first sample's delta is always 0), in raw
+	// milliseconds.
 	jitter vaneMetricEstimate
 }
 

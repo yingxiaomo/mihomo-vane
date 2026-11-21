@@ -204,7 +204,11 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	member := vaneMemberLease{name: decision.proxy.Name(), identity: decision.identity, epoch: decision.nodeEpoch}
 	group.mu.Lock()
 	_, preferred := group.targetPreferences[key]
-	_, hardFailed := group.targetFailures[vaneTargetFailureKey{target: key, member: member}]
+	// §A may leave an observation-only record here (the capability sample);
+	// a hard failure means a failure streak or an active block, never the
+	// observation fields.
+	state, hasRecord := group.targetFailures[vaneTargetFailureKey{target: key, member: member}]
+	hardFailed := hasRecord && (state.streak > 0 || state.blockUntil.After(group.clock.Now()))
 	slowUntil := group.mediaSlowCooldowns[vaneMediaCandidateKey{
 		vaneMediaTargetKey: group.mediaTargetKey(metadata.Host, metadata.DstPort), candidate: member.name, identity: member.identity,
 	}]

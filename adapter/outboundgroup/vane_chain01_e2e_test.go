@@ -158,11 +158,12 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), betaDials.Load(), "the reconnect must land on beta via the hint")
 
-	// Stage 5: the new flow's real throughput settles the handoff. 384 KiB per
-	// simulated second is ~3.1 Mbps: above the settlement required
-	// (max(0.5 Mbps x 1.25, 2M demand) = 2M), so it records an improvement.
+	// Stage 5: the new flow's real throughput settles the handoff. 704 KiB per
+	// simulated second is ~5.6 Mbps: above the settlement required
+	// (max(0.5 Mbps x 1.25, 2M demand) = 2M) AND above the 5M settlement line
+	// §M adds, so it records an improvement instead of a no-gain.
 	fastReader, fastCounters := second.(*vaneObservedConn).UnwrapReader()
-	fastPayload := make([]byte, 384*1024)
+	fastPayload := make([]byte, 704*1024)
 	for i := 0; i < 12; i++ {
 		if i > 0 {
 			clock.Advance(time.Second)
@@ -178,7 +179,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	require.Positive(t, snapshot.Counters.ReconnectCommitted)
 	require.Positive(t, snapshot.Counters.HandoffMeasured)
 	require.Positive(t, snapshot.Counters.HandoffImproved,
-		"~3.1 Mbps real throughput must settle as an improvement over 0.5 Mbps")
+		"~5.6 Mbps real throughput must settle as an improvement over 0.5 Mbps")
 	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	group.mu.Lock()

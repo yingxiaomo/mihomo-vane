@@ -342,13 +342,12 @@ func TestVaneTargetSettleRejectsForeignAndExpiredTokens(t *testing.T) {
 	group.discardTargetHandoff(nil)
 }
 
-// RACE-CONFIG-001: fragment and overflow configurations are rejected.
-func TestVaneRacingConfigRejectsFragmentAndOverflow(t *testing.T) {
+// RACE-CONFIG-001: fragment configurations are rejected. The overflow case
+// was removed with the racing-budget-mb-hour hardcode.
+func TestVaneRacingConfigRejectsFragment(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	_, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{Racing: "on", RacingURL: "https://example.com/file#frag"}, fallback, nil)
 	require.Error(t, err)
-	// RACING-BUDGET-OPTION was removed with the hardcode; the fragment
-	// rejection above is the remaining config-validation case here.
 }
 
 // RACE-LIFECYCLE-001: close is idempotent.

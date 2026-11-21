@@ -785,13 +785,15 @@ func TestVaneGoodputWindows(t *testing.T) {
 	t.Run("64KiB and two seconds are inclusive boundaries", func(t *testing.T) {
 		tests := []struct {
 			name     string
-			bytes    int
+			bytes    int64
 			duration time.Duration
 			want     bool
 		}{
-			{name: "exact", bytes: 64 * 1024, duration: 2 * time.Second, want: true},
-			{name: "one byte short", bytes: 64*1024 - 1, duration: 2 * time.Second},
-			{name: "one nanosecond short", bytes: 64 * 1024, duration: 2*time.Second - time.Nanosecond},
+			// §F halved the sample gate (64KB/2s → 32KB/1s); the inclusive
+			// boundary semantics are unchanged and pinned at the new gate.
+			{name: "exact", bytes: 32 * 1024, duration: 1 * time.Second, want: true},
+			{name: "one byte short", bytes: 32*1024 - 1, duration: 1 * time.Second},
+			{name: "one nanosecond short", bytes: 32 * 1024, duration: 1*time.Second - time.Nanosecond},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {

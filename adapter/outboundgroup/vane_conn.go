@@ -13,10 +13,13 @@ import (
 )
 
 const (
-	vaneThroughputGap        = 2 * time.Second
-	vaneThroughputWindow     = 5 * time.Second
-	vaneThroughputMinWindow  = 2 * time.Second
-	vaneThroughputMinPayload = 64 * 1024
+	vaneThroughputGap    = 2 * time.Second
+	vaneThroughputWindow = 5 * time.Second
+	// §F: the sample gate, halved (64KB/2s → 32KB/1s) so short and small
+	// transfers still produce evidence. Paced, not calibrated; the trigger
+	// gates (3 low windows / 15s / 2MiB) and the close bar are untouched.
+	vaneThroughputMinWindow  = 1 * time.Second
+	vaneThroughputMinPayload = 32 * 1024
 )
 
 // firstWriteVaneCallbackConn settles a deferred handshake exactly once on

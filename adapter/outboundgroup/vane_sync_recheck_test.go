@@ -138,5 +138,4 @@ func TestVaneSyncRecheckQueuedRecoveredRejected(t *testing.T) {
 	require.False(t, action())
 	snapshot := group.VaneDiagnostics()
 	require.Equal(t, uint64(1), snapshot.Rejections["recovered"])
-	_ = group
 }
