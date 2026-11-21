@@ -9,6 +9,9 @@ package outboundgroup
 // (SAMPLE).
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -463,3 +466,154 @@ func newTargetGroupForTest3(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestP
 func clockZero() time.Time { return time.Unix(0, 0) }
 
 var _ = url.Parse
+
+// §G: the shutdown flush forces a persist and waits for the store to catch up.
+func TestVaneFlushDiagnosticsContextPersists(t *testing.T) {
+	store := newVaneDiagnosticsTestStore()
+	clock := newVaneConnTestClock()
+	diagnostics := newVaneDiagnostics("flush-test", clock, store)
+	key := vaneDiagnosticsStorageKey("flush-test")
+	vaneDiagnosticsRegistry.Lock()
+	previous := vaneDiagnosticsRegistry.entries[key]
+	vaneDiagnosticsRegistry.entries[key] = diagnostics
+	vaneDiagnosticsRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneDiagnosticsRegistry.Lock()
+		if previous != nil {
+			vaneDiagnosticsRegistry.entries[key] = previous
+		} else {
+			delete(vaneDiagnosticsRegistry.entries, key)
+		}
+		vaneDiagnosticsRegistry.Unlock()
+	})
+
+	// FLUSH-01: a recorded counter survives the flush into the store.
+	diagnostics.record(vaneDiagnosticRecord{kind: "throughput-sample", bps: 8_000_000})
+	require.NoError(t, FlushVaneDiagnosticsContext(context.Background()))
+	require.Positive(t, store.writeCount(), "the flush must persist the recorded counters")
+
+	// FLUSH-02: an empty registry is a no-op, not an error.
+	vaneDiagnosticsRegistry.Lock()
+	restored := vaneDiagnosticsRegistry.entries
+	vaneDiagnosticsRegistry.entries = make(map[string]*vaneDiagnostics)
+	vaneDiagnosticsRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneDiagnosticsRegistry.Lock()
+		vaneDiagnosticsRegistry.entries = restored
+		vaneDiagnosticsRegistry.Unlock()
+	})
+	require.NoError(t, FlushVaneDiagnosticsContext(context.Background()))
+}
+
+// §H: a full learning registry evicts its least-recently-accessed entry,
+// flush-first, instead of silently dropping the new group's persistence.
+func TestVaneLearningRegistryEvictsOldestWhenFull(t *testing.T) {
+	store := newVaneLearningTestStore()
+	previousFactory := vaneLearningRegistry.storeFactory
+	vaneLearningRegistry.storeFactory = func() vaneLearningStore { return store }
+	t.Cleanup(func() {
+		vaneLearningRegistry.Lock()
+		vaneLearningRegistry.storeFactory = previousFactory
+		vaneLearningRegistry.Unlock()
+	})
+	vaneLearningRegistry.Lock()
+	previousEntries := vaneLearningRegistry.entries
+	vaneLearningRegistry.entries = make(map[string]*vaneLearningState)
+	vaneLearningRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneLearningRegistry.Lock()
+		vaneLearningRegistry.entries = previousEntries
+		vaneLearningRegistry.Unlock()
+	})
+
+	clock := newVaneConnTestClock()
+	for i := 0; i < vaneLearningRegistryLimit; i++ {
+		state := acquireVaneLearningState(fmt.Sprintf("group-%d", i), clock, time.Hour, 64)
+		require.NotNil(t, state.store)
+	}
+	// group-0 carries the oldest access stamp; refresh group-42 so the victim
+	// choice cannot depend on map iteration order.
+	require.NotNil(t, acquireVaneLearningState("group-42", clock, time.Hour, 64))
+	vaneLearningRegistry.Lock()
+	oldest := vaneLearningRegistry.entries[vaneLearningStorageKey("group-0")]
+	vaneLearningRegistry.Unlock()
+	require.NotNil(t, oldest)
+	oldest.mu.Lock()
+	oldest.markDirtyLocked(clock.Now())
+	oldest.mu.Unlock()
+
+	// REGISTRY-01: the next acquire evicts the flushed oldest and gets a real
+	// store instead of the old silent degradation.
+	fresh := acquireVaneLearningState("fresh", clock, time.Hour, 64)
+	require.NotNil(t, fresh.store, "the new group must get a store")
+	vaneLearningRegistry.Lock()
+	_, oldestGone := vaneLearningRegistry.entries[vaneLearningStorageKey("group-0")]
+	_, group42Kept := vaneLearningRegistry.entries[vaneLearningStorageKey("group-42")]
+	vaneLearningRegistry.Unlock()
+	require.False(t, oldestGone, "the oldest entry must be evicted")
+	require.True(t, group42Kept)
+	require.Positive(t, store.writes, "the victim must have been flushed before deletion")
+
+	// REGISTRY-03 (regression): the same name re-acquires the same state.
+	again := acquireVaneLearningState("fresh", clock, time.Hour, 64)
+	require.Same(t, fresh, again)
+	vaneLearningRegistry.Lock()
+	count := len(vaneLearningRegistry.entries)
+	vaneLearningRegistry.Unlock()
+	require.Equal(t, vaneLearningRegistryLimit, count, "re-acquisition must not occupy a new slot")
+}
+
+// §H: a victim whose flush fails stays in the registry; the new group
+// degrades to the store-less candidate exactly like the old behavior.
+func TestVaneLearningRegistryKeepsVictimOnFlushFailure(t *testing.T) {
+	store := newVaneLearningTestStore()
+	previousFactory := vaneLearningRegistry.storeFactory
+	vaneLearningRegistry.storeFactory = func() vaneLearningStore { return store }
+	t.Cleanup(func() {
+		vaneLearningRegistry.Lock()
+		vaneLearningRegistry.storeFactory = previousFactory
+		vaneLearningRegistry.Unlock()
+	})
+	vaneLearningRegistry.Lock()
+	previousEntries := vaneLearningRegistry.entries
+	vaneLearningRegistry.entries = make(map[string]*vaneLearningState)
+	vaneLearningRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneLearningRegistry.Lock()
+		vaneLearningRegistry.entries = previousEntries
+		vaneLearningRegistry.Unlock()
+	})
+
+	clock := newVaneConnTestClock()
+	for i := 0; i < vaneLearningRegistryLimit; i++ {
+		state := acquireVaneLearningState(fmt.Sprintf("group-%d", i), clock, time.Hour, 64)
+		require.NotNil(t, state.store)
+	}
+	// The victim holds unflushed changes, so the eviction's flush hits the
+	// failing store.
+	vaneLearningRegistry.Lock()
+	victim := vaneLearningRegistry.entries[vaneLearningStorageKey("group-0")]
+	vaneLearningRegistry.Unlock()
+	require.NotNil(t, victim)
+	victim.mu.Lock()
+	victim.markDirtyLocked(clock.Now())
+	victim.mu.Unlock()
+	store.mu.Lock()
+	store.fail = errors.New("save failed")
+	store.mu.Unlock()
+	t.Cleanup(func() {
+		store.mu.Lock()
+		store.fail = nil
+		store.mu.Unlock()
+	})
+
+	// REGISTRY-02: the victim's flush fails during eviction — the victim
+	// stays and the new group degrades.
+	candidate := acquireVaneLearningState("newcomer", clock, time.Hour, 64)
+	require.Nil(t, candidate.store, "the failed eviction degrades the new group")
+	require.Equal(t, "node-state registry capacity unavailable", candidate.lastError)
+	vaneLearningRegistry.Lock()
+	_, victimKept := vaneLearningRegistry.entries[vaneLearningStorageKey("group-0")]
+	vaneLearningRegistry.Unlock()
+	require.True(t, victimKept, "a failed victim flush must not delete the victim")
+}

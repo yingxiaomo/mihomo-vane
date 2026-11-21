@@ -158,9 +158,12 @@ type vaneLearningState struct {
 	lastScheduled     time.Time
 	persistTimer      *time.Timer
 	persistRunning    bool
-	persistRetryAt    time.Time
-	persistWG         sync.WaitGroup
-	retiring          bool
+	// §H: the registry's access stamp at the last touch (read under the
+	// registry lock during eviction).
+	lastAccess     uint64
+	persistRetryAt time.Time
+	persistWG      sync.WaitGroup
+	retiring       bool
 
 	available     bool
 	restoredNodes int
@@ -174,6 +177,10 @@ type vaneLearningRegistryState struct {
 	sync.Mutex
 	entries      map[string]*vaneLearningState
 	storeFactory func() vaneLearningStore
+	// §H: a monotonically increasing access stamp for the LRU eviction —
+	// touched on key hits and at entry creation, read when the registry is
+	// full and the least-recently-accessed victim must go.
+	access uint64
 }
 
 var vaneLearningRegistry = vaneLearningRegistryState{
@@ -251,20 +258,46 @@ func newVaneLearningState(group string, clock vaneClock, store vaneLearningStore
 	return state
 }
 
+// vaneLearningNoStoreCandidate builds the degraded candidate a full registry
+// hands out when it cannot make room (§H keeps this as the failure path).
+func vaneLearningNoStoreCandidate(group string, clock vaneClock, stateTTL time.Duration, maxStates int, lastError string) *vaneLearningState {
+	candidate := newVaneLearningState(group, clock, nil, stateTTL, maxStates)
+	candidate.mu.Lock()
+	candidate.lastError = lastError
+	candidate.mu.Unlock()
+	return candidate
+}
+
 func acquireVaneLearningState(group string, clock vaneClock, stateTTL time.Duration, maxStates int) *vaneLearningState {
 	key := vaneLearningStorageKey(group)
 	vaneLearningRegistry.Lock()
 	if current := vaneLearningRegistry.entries[key]; current != nil {
+		vaneLearningRegistry.access++
+		current.lastAccess = vaneLearningRegistry.access
 		vaneLearningRegistry.Unlock()
 		return current
 	}
 	if len(vaneLearningRegistry.entries) >= vaneLearningRegistryLimit {
+		// §H: the registry used to degrade straight to a store-less state,
+		// silently losing persistence for the new group. Evict the
+		// least-recently-accessed entry instead — flush-first so the victim's
+		// latest revision survives, then delete. A failed victim flush keeps
+		// the victim and degrades the new group exactly like before.
+		victimKey, victim := vaneLearningEvictOldestLocked()
 		vaneLearningRegistry.Unlock()
-		candidate := newVaneLearningState(group, clock, nil, stateTTL, maxStates)
-		candidate.mu.Lock()
-		candidate.lastError = "node-state registry capacity unavailable"
-		candidate.mu.Unlock()
-		return candidate
+		if victim == nil || victim.flush() != nil {
+			return vaneLearningNoStoreCandidate(group, clock, stateTTL, maxStates, "node-state registry capacity unavailable")
+		}
+		vaneLearningRegistry.Lock()
+		if current := vaneLearningRegistry.entries[victimKey]; current == victim {
+			delete(vaneLearningRegistry.entries, victimKey)
+		}
+		if len(vaneLearningRegistry.entries) >= vaneLearningRegistryLimit {
+			// Concurrent acquires refilled the registry while the victim was
+			// flushing; degrade rather than evict a second victim here.
+			vaneLearningRegistry.Unlock()
+			return vaneLearningNoStoreCandidate(group, clock, stateTTL, maxStates, "node-state registry capacity unavailable")
+		}
 	}
 	storeFactory := vaneLearningRegistry.storeFactory
 	if storeFactory == nil {
@@ -274,9 +307,26 @@ func acquireVaneLearningState(group string, clock vaneClock, stateTTL time.Durat
 	// publication serialized so a losing first-registration candidate cannot
 	// fence the canonical owner that wins this key.
 	candidate := newVaneLearningState(group, clock, storeFactory(), stateTTL, maxStates)
+	vaneLearningRegistry.access++
+	candidate.lastAccess = vaneLearningRegistry.access
 	vaneLearningRegistry.entries[key] = candidate
 	vaneLearningRegistry.Unlock()
 	return candidate
+}
+
+// vaneLearningEvictOldestLocked picks the least-recently-accessed entry.
+// Caller holds the registry lock; the victim is flushed with the lock
+// released, then re-verified before deletion.
+func vaneLearningEvictOldestLocked() (string, *vaneLearningState) {
+	var victimKey string
+	var victim *vaneLearningState
+	var oldest uint64
+	for candidateKey, candidate := range vaneLearningRegistry.entries {
+		if victim == nil || candidate.lastAccess < oldest {
+			victimKey, victim, oldest = candidateKey, candidate, candidate.lastAccess
+		}
+	}
+	return victimKey, victim
 }
 
 func activateVaneLearningState(state *vaneLearningState, stateTTL time.Duration, maxStates int) uint64 {

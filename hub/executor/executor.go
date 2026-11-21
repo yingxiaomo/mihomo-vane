@@ -550,6 +550,11 @@ func Shutdown() {
 	if err := outboundgroup.FlushVaneNativeCollectorsContext(ctx); err != nil {
 		log.Warnln("flush Vane native collector on shutdown failed: %s", err.Error())
 	}
+	// §G: the diagnostics persist interval is 30 seconds — without this, a
+	// restart loses the last interval's counters.
+	if err := outboundgroup.FlushVaneDiagnosticsContext(ctx); err != nil {
+		log.Warnln("flush Vane diagnostics on shutdown failed: %s", err.Error())
+	}
 
 	log.Warnln("Mihomo shutting down")
 }

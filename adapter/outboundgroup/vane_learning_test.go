@@ -1035,7 +1035,11 @@ func TestVaneLearningConcurrentFirstRegistrationPublishesOneCanonicalOwner(t *te
 	first.state.mu.Unlock()
 }
 
-func TestVaneLearningRegistryCapacityFailsClosedAndStaysBounded(t *testing.T) {
+// §H changed the full-registry behavior: instead of degrading the new group,
+// the least-recently-accessed entry is evicted (flush-first) and the new group
+// gets a real store. The registry still stays bounded; the degraded path
+// survives only as the victim-flush-failure fallback (see the §H tests).
+func TestVaneLearningRegistryCapacityEvictsOldestAndStaysBounded(t *testing.T) {
 	store := newVaneLearningTestStore()
 	vaneLearningRegistry.Lock()
 	previousFactory := vaneLearningRegistry.storeFactory
@@ -1059,8 +1063,7 @@ func TestVaneLearningRegistryCapacityFailsClosedAndStaysBounded(t *testing.T) {
 	})
 
 	state, _ := sharedVaneLearningState("capacity-overflow", newVaneConnTestClock(), time.Hour, 1)
-	require.Nil(t, state.store)
-	require.Contains(t, state.status().LastError, "registry capacity")
+	require.NotNil(t, state.store, "a full registry must evict, not degrade the new group")
 	vaneLearningRegistry.Lock()
 	require.LessOrEqual(t, len(vaneLearningRegistry.entries), vaneLearningRegistryLimit)
 	vaneLearningRegistry.Unlock()

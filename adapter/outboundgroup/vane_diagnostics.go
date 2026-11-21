@@ -1,9 +1,11 @@
 package outboundgroup
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1001,6 +1003,76 @@ func (d *vaneDiagnostics) waitPersistence() {
 		return
 	}
 	d.persistWG.Wait()
+}
+
+// flushForShutdown forces one persist and waits until the store has caught up
+// with the current revision — the same wait the registry eviction uses. The
+// ctx bounds the wait for the shutdown caller.
+func (d *vaneDiagnostics) flushForShutdown(ctx context.Context) error {
+	if d == nil {
+		return nil
+	}
+	for {
+		d.mu.Lock()
+		if d.store == nil || d.retired || d.retiring {
+			d.mu.Unlock()
+			return nil
+		}
+		targetRevision := d.revision
+		d.schedulePersistLocked(d.clock.Now().UTC())
+		d.mu.Unlock()
+		for {
+			d.waitPersistence()
+			d.persistMu.Lock()
+			processedRevision := d.processedRevision
+			d.persistMu.Unlock()
+			if processedRevision >= targetRevision {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			d.mu.Lock()
+			revoked := d.store == nil || d.retired || d.retiring
+			if !revoked {
+				d.schedulePersistLocked(d.clock.Now().UTC())
+			}
+			d.mu.Unlock()
+			if revoked {
+				return nil
+			}
+		}
+	}
+}
+
+// FlushVaneDiagnosticsContext drains the latest durable revision for every
+// registered diagnostics group — the counterpart of
+// FlushVaneLearningStatesContext. Shutdown calls it so the last persist
+// interval's counters survive a restart.
+func FlushVaneDiagnosticsContext(ctx context.Context) error {
+	vaneDiagnosticsRegistry.Lock()
+	diagnostics := make([]*vaneDiagnostics, 0, len(vaneDiagnosticsRegistry.entries))
+	for _, d := range vaneDiagnosticsRegistry.entries {
+		diagnostics = append(diagnostics, d)
+	}
+	vaneDiagnosticsRegistry.Unlock()
+
+	results := make(chan error, len(diagnostics))
+	for _, d := range diagnostics {
+		go func(d *vaneDiagnostics) { results <- d.flushForShutdown(ctx) }(d)
+	}
+	var result error
+	for range diagnostics {
+		select {
+		case err := <-results:
+			result = errors.Join(result, err)
+		case <-ctx.Done():
+			return errors.Join(result, ctx.Err())
+		}
+	}
+	return result
 }
 
 func (d *vaneDiagnostics) snapshot() VaneDiagnosticsSnapshot {
