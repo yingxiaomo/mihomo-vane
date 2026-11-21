@@ -173,8 +173,12 @@ type Vane struct {
 	// Cold-pick probe throttle (COLD-PICK): per target scope. Both maps are
 	// guarded by a.mu and only touched in pickInternalDecision's (a)/(c)
 	// stages — never inside racingRuntime.mu (see snapshotFreshCapabilities).
-	pickProbeInflight  map[string]bool
-	lastPickProbeAt    map[string]time.Time
+	pickProbeInflight map[string]bool
+	lastPickProbeAt   map[string]time.Time
+	// §E: the per-target valve throttle — a target re-runs its prepare at most
+	// once per vaneMediaValveThrottle, regardless of how many flows ask.
+	// Guarded by a.mu.
+	mediaValveLastRun  map[vaneTargetKey]time.Time
 	explorationScopes  [vaneExplorationScopeCount]vaneExplorationScopeState
 	explorationOrdinal uint64
 
@@ -306,6 +310,7 @@ func newVaneWithClock(
 		targetFailures:     make(map[vaneTargetFailureKey]vaneTargetFailureState),
 		pickProbeInflight:  make(map[string]bool),
 		lastPickProbeAt:    make(map[string]time.Time),
+		mediaValveLastRun:  make(map[vaneTargetKey]time.Time),
 		nodes:              make(map[string]*vaneNodeState),
 		nodeControls:       make(map[string]*vaneNodeControlState),
 		nodeIdentities:     make(map[string]string),
@@ -597,6 +602,9 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		}
 		if mediaFlow != nil {
 			mediaFlow.setPolicySubmitter(observed.submitPolicyAction)
+			// §E: the switched-to flow counts empty windows on its own
+			// connection; other connections on the same hint never arm it.
+			observed.setOnEmptyWindow(mediaFlow.noteEmptyWindow)
 		}
 	}
 	return controlled, nil

@@ -32,6 +32,12 @@ const (
 	vaneDefaultMediaBudgetWindow     = 30 * time.Minute
 	vaneMediaEvidenceMaxAge          = 10 * time.Minute
 	vaneMaximumMediaThroughputBPS    = int64(1_000_000_000)
+	// §E: the re-evaluation valve. A flow that was just switched to and keeps
+	// producing no qualified samples gets one prepare re-run per target per
+	// throttle window, so a bad challenger cannot lock the target for the full
+	// reconnect cooldown while it never produces enough bytes to settle.
+	vaneMediaValveEmptyWindows = 2
+	vaneMediaValveThrottle     = 10 * time.Minute
 )
 
 type vaneMediaConfig struct {
@@ -194,6 +200,12 @@ type vaneMediaFlow struct {
 	raceToken       uint64
 	policySubmitter func(vanePolicyAction, bool)
 	flowCountOnce   sync.Once
+	// §E: only the flow that claimed the handoff token (the connection the
+	// switch was made for) arms the re-evaluation valve. valveCurrentBPS
+	// keeps the pre-switch speed from the token for the re-run prepare.
+	switchedTo        bool
+	valveCurrentBPS   float64
+	valveEmptyWindows int
 }
 
 // mediaFlowStarted and mediaFlowEnded maintain the per-node live media-flow
@@ -243,8 +255,12 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 		return nil
 	}
 	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey}
-	if len(handoff) > 0 {
+	if len(handoff) > 0 && handoff[0] != nil {
 		flow.handoff = handoff[0]
+		// §E: this flow is the one the switch was made for — arm the
+		// re-evaluation valve with the pre-switch speed.
+		flow.switchedTo = true
+		flow.valveCurrentBPS = handoff[0].previousBPS
 	}
 	group.diagnostics.record(vaneDiagnosticRecord{
 		kind:   "media-flow-started",
@@ -346,6 +362,8 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		// to the previous low-window streak, not the next one (RACE-06).
 		f.raceToken = 0
 	}
+	// §E: a qualified sample resets the valve's empty-window streak.
+	f.valveEmptyWindows = 0
 	lowWindows := f.lowWindows
 	handoff := f.handoff
 	f.handoff = nil
@@ -584,6 +602,8 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 		// close must not fire. Known limit: a flow that only reads via direct
 		// reads keeps its old lowWindows here, so this re-check catches
 		// recoveries that observe() actually saw, nothing more.
+		// §E: valve plans skip this recheck — their flow has not produced any
+		// samples, so lowWindows == 0 means "no data", not "recovered".
 		lowWindowsNow := f.lowWindows
 		f.mu.Unlock()
 		if closed {
@@ -600,7 +620,7 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 			})
 			return false
 		}
-		if lowWindowsNow < f.group.media.lowWindows {
+		if !plan.skipReconnectCooldown && lowWindowsNow < f.group.media.lowWindows {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "reconnect-rejected", reason: "recovered", handoffID: plan.raceID,
 				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
@@ -639,6 +659,76 @@ func (f *vaneMediaFlow) policyAborted() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.aborted
+}
+
+// noteEmptyWindow is §E's counter hook: the connection settled a 5-second
+// window that produced no qualified sample. Only the flow the switch was
+// made for counts, and only under shadow/on — off has no probes, so a re-run
+// would reach the same verdict. A qualified sample resets the streak in
+// observe(); two consecutive empty windows fire the valve once.
+func (f *vaneMediaFlow) noteEmptyWindow() {
+	if f == nil || !f.switchedTo {
+		return
+	}
+	mode := f.group.racing.mode
+	if mode != vaneRacingShadow && mode != vaneRacingOn {
+		return
+	}
+	f.mu.Lock()
+	aborted, closed := f.aborted, f.closed
+	if aborted || closed {
+		f.mu.Unlock()
+		return
+	}
+	f.valveEmptyWindows++
+	trigger := f.valveEmptyWindows >= vaneMediaValveEmptyWindows
+	if trigger {
+		f.valveEmptyWindows = 0
+	}
+	f.mu.Unlock()
+	if trigger {
+		f.runReconnectValve()
+	}
+}
+
+// runReconnectValve re-runs prepare for the switch that just went bad. The
+// re-run starts from the challenger we switched TO (the flow's own node) with
+// the pre-switch speed from the handoff token, skips the reconnect cooldown
+// the original commit wrote, and closes this flow early when a better-evidenced
+// candidate exists. Finding nothing does nothing — the next low window (or the
+// next valve fire after the throttle) re-evaluates again. The per-target
+// throttle keeps this to one run per window.
+func (f *vaneMediaFlow) runReconnectValve() {
+	f.mu.Lock()
+	currentBPS := f.valveCurrentBPS
+	f.mu.Unlock()
+	if currentBPS <= 0 {
+		return
+	}
+	now := f.group.clock.Now()
+	f.group.mu.Lock()
+	if until, ok := f.group.mediaValveLastRun[f.targetStateKey]; ok && now.Sub(until) < vaneMediaValveThrottle {
+		f.group.mu.Unlock()
+		return
+	}
+	f.group.mediaValveLastRun[f.targetStateKey] = now
+	f.group.mu.Unlock()
+
+	plan, reason := f.group.prepareMediaReconnectForNodeDetailedSkipCooldown(
+		f.targetKey, f.target, f.port, f.candidate, f.identity, f.nodeEpoch, currentBPS, true)
+	f.group.diagnostics.record(vaneDiagnosticRecord{
+		kind: "reconnect-valve", reason: reason,
+		target: f.target, bucket: f.targetKey.target, port: f.port,
+		from: f.candidate, to: plan.challenger,
+		bps: currentBPS, force: true,
+	})
+	if reason != "" {
+		return
+	}
+	// The early close rides the normal commit path with the §E skip flag; the
+	// sample below only feeds the diagnostics on the rejection paths.
+	sample := vaneThroughputObservation{BitsPerSecond: currentBPS, Age: f.group.clock.Now().Sub(now)}
+	f.submitPolicyAction(f.policyActionForPlan(plan, sample, 0, false), true)
 }
 
 // beginRaceToken reserves this flow's race round before the engine is called.
@@ -727,6 +817,11 @@ type vaneMediaPlan struct {
 	totalBytes         int64
 	age                time.Duration
 	lowWindows         int
+	// §E: set on valve-triggered plans. Both the prepare reconnect-cooldown
+	// gate and the commit one honor it, and the execution-time recovery
+	// recheck (SYNC-RECHECK) skips it — a valve flow has no samples yet, so
+	// lowWindows == 0 there means "no data", not "recovered".
+	skipReconnectCooldown bool
 }
 
 type vaneLockedProxyProvider interface {
@@ -794,6 +889,13 @@ func (a *Vane) prepareMediaReconnectDetailed(targetKey vaneMediaTargetKey, targe
 }
 
 func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey, target string, port uint16, current, identity string, nodeEpoch uint64, currentBPS float64) (vaneMediaPlan, string) {
+	return a.prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey, target, port, current, identity, nodeEpoch, currentBPS, false)
+}
+
+// prepareMediaReconnectForNodeDetailedSkipCooldown is the §E valve entry: the
+// re-run must bypass the reconnect cooldown the original commit wrote (the
+// flag rides the plan so both commit checks honor it too).
+func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMediaTargetKey, target string, port uint16, current, identity string, nodeEpoch uint64, currentBPS float64, skipReconnectCooldown bool) (vaneMediaPlan, string) {
 	proxies := a.GetProxies(false)
 	health := make([]vaneMediaHealth, 0, len(proxies))
 	for _, proxy := range proxies {
@@ -836,8 +938,12 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		}
 	}
 	a.pruneMediaLocked(now)
-	if until := a.mediaReconnects[targetKey]; until.After(now) {
-		return vaneMediaPlan{}, "reconnect-cooldown"
+	// §E: the valve's re-run carries its own skip flag — the cooldown it would
+	// hit was written by the very commit being re-evaluated.
+	if !skipReconnectCooldown {
+		if until := a.mediaReconnects[targetKey]; until.After(now) {
+			return vaneMediaPlan{}, "reconnect-cooldown"
+		}
 	}
 	budget := a.mediaBudgets[targetKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
@@ -990,6 +1096,9 @@ func (a *Vane) prepareMediaReconnectForNodeDetailed(targetKey vaneMediaTargetKey
 		knownGood:      candidates[0].knownGood,
 		currentBPS:     currentBPS,
 		preparedAt:     now,
+		// §E: valve-triggered plans carry the skip so both commit checks and
+		// the execution-time recovery recheck honor it.
+		skipReconnectCooldown: skipReconnectCooldown,
 	}, ""
 }
 
@@ -1037,7 +1146,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 	if now.Sub(plan.preparedAt) > a.media.hintTTL {
 		return "plan-expired"
 	}
-	if a.mediaReconnects[plan.targetKey].After(now) {
+	if !plan.skipReconnectCooldown && a.mediaReconnects[plan.targetKey].After(now) {
 		return "reconnect-cooldown"
 	}
 	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: plan.target, port: plan.port, candidate: plan.challenger, identity: plan.challengerIdentity}
@@ -1359,6 +1468,12 @@ func (a *Vane) pruneMediaLocked(now time.Time) {
 	for key, budget := range a.mediaBudgets {
 		if !budget.startedAt.Add(a.media.budgetWindow).After(now) {
 			delete(a.mediaBudgets, key)
+		}
+	}
+	// §E: expired valve throttle entries fall out with the rest.
+	for key, until := range a.mediaValveLastRun {
+		if now.Sub(until) >= vaneMediaValveThrottle {
+			delete(a.mediaValveLastRun, key)
 		}
 	}
 }

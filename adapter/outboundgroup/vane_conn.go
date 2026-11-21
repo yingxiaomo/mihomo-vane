@@ -145,6 +145,9 @@ type vaneObservedConn struct {
 	onNativeClose           func(vaneConnectionCloseObservation)
 	onNativeWindow          func(vaneThroughputObservation, string)
 	onNaturalCloseOwnership func()
+	// §E: fired when a settled 5-second window produced no qualified sample;
+	// wired to the flow's valve counter. Registered post-construction.
+	onEmptyWindow func()
 
 	mu               sync.Mutex
 	createdAt        time.Time
@@ -519,6 +522,7 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 	var recordThroughput bool
 	var observation vaneThroughputObservation
 	var throughputReason string
+	var emptyWindow bool
 
 	c.mu.Lock()
 	c.totalReadBytes += count
@@ -555,6 +559,9 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 		if recordThroughput {
 			observation = c.throughputObservationLocked(throughput, c.segmentStart, now, c.segmentBytes, now)
 			throughputReason = "window"
+		} else {
+			// §E: a full window with no qualified sample arms the valve.
+			emptyWindow = true
 		}
 		c.clearSegmentLocked()
 	} else if c.closing {
@@ -572,6 +579,9 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 	}
 	if recordThroughput && c.onThroughput != nil {
 		c.onThroughput(throughput)
+	}
+	if emptyWindow && c.onEmptyWindow != nil {
+		c.onEmptyWindow()
 	}
 	if recordThroughput && c.onNativeWindow != nil {
 		c.onNativeWindow(observation, throughputReason)
@@ -618,6 +628,14 @@ func (c *vaneObservedConn) enableDirectPolicy() {
 func (c *vaneObservedConn) enableShadowObserve() {
 	c.mu.Lock()
 	c.shadowObserve = true
+	c.mu.Unlock()
+}
+
+// setOnEmptyWindow registers the §E valve counter hook (one per connection,
+// set right after construction before any read runs).
+func (c *vaneObservedConn) setOnEmptyWindow(fn func()) {
+	c.mu.Lock()
+	c.onEmptyWindow = fn
 	c.mu.Unlock()
 }
 

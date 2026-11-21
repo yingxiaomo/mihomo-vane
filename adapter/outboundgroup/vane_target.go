@@ -516,7 +516,9 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if now.Sub(plan.preparedAt) > a.media.hintTTL {
 		return "plan-expired"
 	}
-	if a.mediaReconnects[plan.targetKey].After(now) {
+	// §E: valve plans skip the cooldown they are re-evaluating (no valve plan
+	// reaches the target commit today, but the flag rides the shared plan).
+	if !plan.skipReconnectCooldown && a.mediaReconnects[plan.targetKey].After(now) {
 		return "reconnect-cooldown"
 	}
 	to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: challengerState.epoch}
