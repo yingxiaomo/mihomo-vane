@@ -46,17 +46,20 @@ func newColdPickGroupForTest(t *testing.T, mode vaneRacingMode) (*Vane, *vaneCon
 // both valid results land in the capability cache.
 func TestVaneColdPickSelectsFasterAndWritesCapability(t *testing.T) {
 	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
-	var calls atomic.Int32
-	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
-		if calls.Add(1) == 1 {
+	alphaName := alpha.Name()
+	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+		// alpha is the ranking choice; its 6M result ties the margin against
+		// beta's 40M (within 5%? no — 40M is way past the margin, but the tie
+		// rule only promotes a challenger that beats the baseline by >5%).
+		if proxy.Name() == alphaName {
 			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 6_000_000, capHit: true}
 		}
-		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 6_100_000, capHit: true}
 	}
 
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name(),
-		"alpha ranks first; its 6M result ties the margin against the baseline")
+		"beta's 6.1M is within 5% of alpha's 6M: a tie, and the baseline alpha wins it")
 	snapshot := group.VaneDiagnostics()
 	require.Equal(t, uint64(2), snapshot.Counters.PickProbeCount)
 	require.Equal(t, uint64(2), snapshot.Counters.PickProbeSuccess)
@@ -127,6 +130,19 @@ func TestVaneColdPickBudgetDeniedFallsBack(t *testing.T) {
 	require.False(t, probeCalled.Load())
 	snapshot := group.VaneDiagnostics()
 	require.Zero(t, snapshot.Counters.PickProbeCount)
+	// A budget-denied probe never ran, so the per-scope timestamp must stay
+	// unset: the next pick is still allowed to probe once budget recovers.
+	group.mu.Lock()
+	_, timestampSet := group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target]
+	group.mu.Unlock()
+	require.False(t, timestampSet)
+	budgetDeniedSeen := false
+	for _, event := range snapshot.RecentEvents {
+		if event.Kind == "pick-probe-budget-denied" {
+			budgetDeniedSeen = true
+		}
+	}
+	require.True(t, budgetDeniedSeen)
 }
 
 // COLD-PICK-05: warm pick (fresh capability for a top-2 candidate, or a fresh
@@ -172,19 +188,26 @@ func TestVaneColdPickWarmSkipsProbe(t *testing.T) {
 // falls back to ranking.
 func TestVaneColdPickGenerationChangeDiscards(t *testing.T) {
 	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
-	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+	alphaName := alpha.Name()
+	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
 		// Simulate a reload mid-probe: bump the generation from the probe
 		// goroutine (the lock is released during stage b).
 		group.mu.Lock()
 		group.attachLearningState(group.learning, group.learning.generation+1)
 		group.mu.Unlock()
-		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+		// Challenger faster than the baseline: with the stale veto the pick
+		// must still fall back to alpha; without it beta would win.
+		if proxy.Name() != alphaName {
+			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+		}
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 6_000_000, capHit: true}
 	}
 
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	require.Equal(t, alpha.Name(), decision.proxy.Name(), "stale probe results must fall back to ranking")
+	require.Equal(t, alphaName, decision.proxy.Name(),
+		"stale probe results must fall back to ranking even when the challenger probed faster")
 	// The probe still ran and recorded its results; only the selection fell back.
-	require.Positive(t, group.VaneDiagnostics().Counters.PickProbeCount)
+	require.Equal(t, uint64(2), group.VaneDiagnostics().Counters.PickProbeSuccess)
 }
 
 // COLD-PICK-08: concurrent cold picks on the same scope — the second pick
@@ -230,23 +253,48 @@ func TestVaneColdPickConcurrentFailsOpen(t *testing.T) {
 	require.Equal(t, uint64(2), snapshot.Counters.PickProbeSuccess)
 }
 
-// COLD-PICK-07: an exploration selection preempts the cold-pick probe.
+// COLD-PICK-07: an exploration selection preempts the cold-pick probe. The
+// first pick is cold and probes once; the per-scope timestamp is then cleared
+// so the second pick would be cold again — only the exploration ownership
+// stands between it and another probe.
 func TestVaneColdPickExplorationPreempts(t *testing.T) {
 	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingOff)
 	group.exploration = vaneExplorationConfig{enabled: true, interval: 1}
-	probeCalled := atomic.Bool{}
+	var probeCalls atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
-		probeCalled.Store(true)
+		probeCalls.Add(1)
 		return vaneProbeResult{reason: "nil-connection"}
 	}
 
-	// interval=1 triggers on the second eligible selection (the first pick
-	// only arms the scope counter), so pick twice. The first pick is cold and
-	// runs the cold-pick probe (the gate comes after exploration in stage a),
-	// so the probe is called once there.
 	group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, int32(2), probeCalls.Load(), "the first cold pick probes both candidates")
+
+	// Clear the throttle timestamp: without the exploration preemption the
+	// second pick would probe again.
+	group.mu.Lock()
+	group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target] = time.Time{}
+	group.mu.Unlock()
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.exploration, "exploration must own this pick")
-	require.True(t, probeCalled.Load(),
-		"the first pick's cold-pick probe ran; the exploration-owned second pick must not probe again")
+	require.Equal(t, int32(2), probeCalls.Load(),
+		"the exploration-owned pick must not run the cold-pick probe")
+}
+
+// COLD-PICK-09: the off-mode throttle regression (defect 1). The first cold
+// pick probes and writes capability; the second pick on the same scope must
+// not probe again — the old targetEvidence-based gate could never warm up in
+// off mode, so it probed on every connection.
+func TestVaneColdPickOffModeThrottleRegression(t *testing.T) {
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingOff)
+	var calls atomic.Int32
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		calls.Add(1)
+		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}
+	}
+
+	group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, int32(2), calls.Load(), "the first cold pick probes both candidates")
+	second := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, alpha.Name(), second.proxy.Name())
+	require.Equal(t, int32(2), calls.Load(), "the second pick is warm (capability + timestamp) and must not probe")
 }

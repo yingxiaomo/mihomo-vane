@@ -1162,8 +1162,9 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	var coldPickOutcomes []pickProbeOutcome
 	probed := false
 	if coldPick != nil {
-		coldPickOutcomes = a.runColdPickProbe(ctx, *coldPick)
-		probed = true
+		var budgetDenied bool
+		coldPickOutcomes, budgetDenied = a.runColdPickProbe(ctx, *coldPick)
+		probed = !budgetDenied
 	}
 
 	// COLD-PICK stage (c): re-validate under a.mu and fold the outcome into
@@ -1174,16 +1175,16 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		now = a.clock.Now()
 		a.mu.Lock()
 		a.learning.mu.Lock()
-		defer func() {
-			a.learning.mu.Unlock()
-			a.mu.Unlock()
-		}()
-		a.lastPickProbeAt[coldPick.scope] = now
+		probed := coldPickOutcomes != nil && len(coldPickOutcomes) > 0
+		if probed {
+			a.lastPickProbeAt[coldPick.scope] = now
+		}
 		delete(a.pickProbeInflight, coldPick.scope)
-		reason := "ranked-fallback"
 		var winner pickProbeCandidate
-		if len(coldPickOutcomes) > 0 {
-			winner, reason = a.settleColdPickProbeLocked(coldPick.scope, *coldPick, coldPickOutcomes, now)
+		var cacheOutcomes []pickProbeOutcome
+		reason := "ranked-fallback"
+		if probed {
+			winner, cacheOutcomes, reason = a.settleColdPickProbeLocked(coldPick.scope, *coldPick, coldPickOutcomes, now)
 		}
 		if reason == "probe" {
 			for _, candidate := range ranked {
@@ -1209,6 +1210,13 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		if selectedState != nil {
 			decision.identity = selectedState.identity
 			decision.nodeEpoch = selectedState.epoch
+		}
+		a.learning.mu.Unlock()
+		a.mu.Unlock()
+		// Capability cache write happens after releasing a.mu — a.mu and
+		// racingRuntime.mu must never nest (CHAIN-01 lock-order rule).
+		if len(cacheOutcomes) > 0 {
+			a.writeColdPickCapabilityLocked(cacheOutcomes, now)
 		}
 		return decision
 	}

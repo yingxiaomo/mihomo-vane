@@ -47,18 +47,21 @@ type coldPickProbe struct {
 
 // coldPickGateLocked reports whether the ranking fallback path should run the
 // cold-pick probe. Caller holds a.mu (+ learning.mu). freshCaps must be
-// snapshotted before any lock (see snapshotFreshCapabilities).
+// snapshotted before any lock (see snapshotFreshCapabilities). Capability
+// records are matched by (name, identity) regardless of epoch: a deleted and
+// re-added node keeps its identity but gains a new epoch, and its old probe
+// evidence is still about the same endpoint.
 func (a *Vane) coldPickGateLocked(freshCaps map[vaneMemberLease]float64, scope string, top2 []vaneRankedProxy, now time.Time) bool {
 	if len(top2) < 2 {
 		return false
 	}
 	for _, candidate := range top2 {
 		identity := vaneProxyPersistentIdentity(candidate.proxy)
-		if _, ok := freshCaps[vaneMemberLease{name: candidate.proxy.Name(), identity: identity, epoch: 1}]; ok {
-			return false
-		}
-		if _, ok := freshCaps[vaneMemberLease{name: candidate.proxy.Name(), identity: identity}]; ok {
-			return false
+		name := candidate.proxy.Name()
+		for member := range freshCaps {
+			if member.name == name && member.identity == identity {
+				return false
+			}
 		}
 	}
 	if a.lastPickProbeAt[scope].Add(vaneRacingCapabilityTTL).After(now) {
@@ -70,10 +73,15 @@ func (a *Vane) coldPickGateLocked(freshCaps map[vaneMemberLease]float64, scope s
 // runColdPickProbe is the unlocked stage (b): reserve budget, probe both
 // candidates in parallel, wait for both results, settle the budget. It never
 // touches a.mu or learning.mu; all shared state writes happen in stage (c).
-func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) []pickProbeOutcome {
+func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outcomes []pickProbeOutcome, budgetDenied bool) {
 	limits := a.reserveRaceBudget(len(probe.candidates), a.clock.Now())
 	if len(limits) == 0 {
-		return nil
+		a.diagnostics.record(vaneDiagnosticRecord{
+			kind:   "pick-probe-budget-denied",
+			target: probe.scope, bucket: probe.scope,
+			force: true,
+		})
+		return nil, true
 	}
 	type entry struct {
 		outcome pickProbeOutcome
@@ -93,11 +101,11 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) []pick
 			results <- entry{outcome: pickProbeOutcome{proxy: candidate.proxy, member: candidate.member, result: result}}
 		}(candidate, limit)
 	}
-	outcomes := make([]pickProbeOutcome, 0, len(probe.candidates))
+	outcomes = make([]pickProbeOutcome, 0, len(probe.candidates))
 	for len(outcomes) < len(probe.candidates) {
 		select {
 		case <-ctx.Done():
-			return outcomes
+			return outcomes, false
 		case entry := <-results:
 			outcomes = append(outcomes, entry.outcome)
 		}
@@ -114,24 +122,34 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) []pick
 		}
 		return outcomes[i].member.name < outcomes[j].member.name
 	})
-	return outcomes
+	return outcomes, false
 }
 
-// settleColdPickProbe is stage (c) under a.mu (+ learning.mu): record
-// diagnostics, write capability cache for valid results, and pick the
-// selected candidate per §2.3. Returns the winner (empty on fail-open) and
-// the pick-probe-selected reason. A stale generation (reload mid-probe)
-// poisons the measurement's ownership (RACE-06 lesson): diagnostics are still
-// recorded, but the capability cache is never written and the pick falls
-// back to ranking.
-func (a *Vane) settleColdPickProbeLocked(scope string, probe coldPickProbe, outcomes []pickProbeOutcome, now time.Time) (pickProbeCandidate, string) {
+// settleColdPickProbe records probe diagnostics and returns the pick verdict.
+// It is called under a.mu (+ learning.mu) but performs NO blocking work: it
+// reads only a.mu-guarded state and returns. The capability cache write is
+// the caller's job, after releasing a.mu — a.mu and racingRuntime.mu must
+// never nest (CHAIN-01 lock-order rule; snapshotFreshCapabilities is the
+// matching pre-lock snapshot).
+//
+// A stale generation (reload mid-probe) poisons the measurement's ownership
+// (RACE-06 lesson): diagnostics are still recorded, but the verdict is always
+// ranked-fallback and the capability cache is never written.
+func (a *Vane) settleColdPickProbeLocked(scope string, probe coldPickProbe, outcomes []pickProbeOutcome, now time.Time) (pickProbeCandidate, []pickProbeOutcome, string) {
 	rankingFirst := probe.baseline.Name()
 	stale := a.learningGeneration != probe.generation || a.learning.generation != probe.generation
+	validOutcomes := make([]pickProbeOutcome, 0, len(outcomes))
 	for _, outcome := range outcomes {
 		member := vaneMemberLease{name: outcome.member.name, identity: outcome.member.identity, epoch: outcome.member.epoch}
 		kind := "pick-probe-invalid"
 		if outcome.result.valid {
 			kind = "pick-probe-success"
+			if !stale {
+				// Only genuinely measured, current-generation results are
+				// eligible for the capability cache; the caller writes them
+				// after releasing a.mu.
+				validOutcomes = append(validOutcomes, outcome)
+			}
 		}
 		a.diagnostics.record(vaneDiagnosticRecord{
 			kind: kind, reason: outcome.result.reason,
@@ -139,34 +157,63 @@ func (a *Vane) settleColdPickProbeLocked(scope string, probe coldPickProbe, outc
 			bps: outcome.result.lowerBoundBPS, totalBytes: outcome.result.bytes,
 			age: outcome.result.duration, force: true,
 		})
-		if stale || !outcome.result.valid {
-			continue
-		}
-		a.racingRuntime.mu.Lock()
-		a.racingRuntime.capabilities[member] = vaneCapabilityRecord{
-			member: member, lowerBoundBPS: outcome.result.lowerBoundBPS,
-			bytes: outcome.result.bytes, observedAt: now,
-		}
-		a.pruneCapabilitiesLocked(now)
-		a.racingRuntime.mu.Unlock()
 	}
+	if stale {
+		return pickProbeCandidate{}, nil, "ranked-fallback"
+	}
+	// §2.3: find the fastest valid+usable outcome. The baseline (ranking
+	// choice) wins any tie — a result within the 5% relative margin of the
+	// fastest does not displace it, because the margin compares against the
+	// FASTEST result, not against the running best (a descending-ordered scan
+	// would never let the baseline win a close second).
 	var best *pickProbeOutcome
+	fastest := 0.0
 	for index := range outcomes {
 		outcome := &outcomes[index]
 		if !outcome.result.valid || !a.memberLeaseCurrentLocked(outcome.member) ||
 			!outcome.proxy.AliveForTestUrl(a.testURL) {
 			continue
 		}
-		if best == nil {
-			best = outcome
-			continue
+		if outcome.result.lowerBoundBPS > fastest {
+			fastest = outcome.result.lowerBoundBPS
 		}
-		if best.result.lowerBoundBPS*(1+pickProbeRelativeMargin) < outcome.result.lowerBoundBPS {
+		if best == nil || outcome.result.lowerBoundBPS > best.result.lowerBoundBPS {
 			best = outcome
 		}
 	}
-	if best == nil || best.proxy.Name() == rankingFirst {
-		return pickProbeCandidate{}, "ranked-fallback"
+	if best == nil || fastest == 0 {
+		return pickProbeCandidate{}, validOutcomes, "ranked-fallback"
 	}
-	return pickProbeCandidate{proxy: best.proxy, member: best.member}, "probe"
+	// The ranking choice wins ties: if it is valid and within the margin of
+	// the fastest result, keep the ranking choice.
+	if best.proxy.Name() != rankingFirst {
+		for index := range outcomes {
+			outcome := &outcomes[index]
+			if !outcome.result.valid || outcome.proxy.Name() != rankingFirst ||
+				!a.memberLeaseCurrentLocked(outcome.member) || !outcome.proxy.AliveForTestUrl(a.testURL) {
+				continue
+			}
+			if outcome.result.lowerBoundBPS >= fastest*(1-pickProbeRelativeMargin) {
+				return pickProbeCandidate{}, validOutcomes, "ranked-fallback"
+			}
+			break
+		}
+	}
+	return pickProbeCandidate{proxy: best.proxy, member: best.member}, validOutcomes, "probe"
+}
+
+// writeColdPickCapabilityLocked writes the probe results into the capability
+// cache under racingRuntime.mu. It must be called AFTER releasing a.mu —
+// never while holding it (CHAIN-01 lock-order rule).
+func (a *Vane) writeColdPickCapabilityLocked(outcomes []pickProbeOutcome, now time.Time) {
+	a.racingRuntime.mu.Lock()
+	defer a.racingRuntime.mu.Unlock()
+	for _, outcome := range outcomes {
+		member := vaneMemberLease{name: outcome.member.name, identity: outcome.member.identity, epoch: outcome.member.epoch}
+		a.racingRuntime.capabilities[member] = vaneCapabilityRecord{
+			member: member, lowerBoundBPS: outcome.result.lowerBoundBPS,
+			bytes: outcome.result.bytes, observedAt: now,
+		}
+	}
+	a.pruneCapabilitiesLocked(now)
 }
