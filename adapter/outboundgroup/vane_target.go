@@ -62,6 +62,10 @@ type vaneTargetEvidenceKey struct {
 type vaneTargetEvidence struct {
 	bitsPerSecond float64
 	observedAt    time.Time
+	// degraded marks a window whose throughput was healthy but whose loss or
+	// latency crossed its line: the node is bad for this target even though it
+	// is fast. Readers must not treat it as admitting evidence.
+	degraded bool
 }
 
 type vaneTargetFailureKey struct {
@@ -365,33 +369,34 @@ func (a *Vane) seedB2StateFromLearning(flow *vaneMediaFlow, state vaneTargetFail
 	return state
 }
 
-func (a *Vane) recordTargetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64, now time.Time) {
+func (a *Vane) recordTargetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64, degraded bool, now time.Time) {
 	if bitsPerSecond <= 0 || !a.memberLeaseCurrentLocked(member) {
 		return
 	}
 	a.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}] = vaneTargetEvidence{
 		bitsPerSecond: bitsPerSecond,
 		observedAt:    now,
+		degraded:      degraded,
 	}
 }
 
-func (a *Vane) recordTargetEvidence(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64) {
+func (a *Vane) recordTargetEvidence(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64, degraded bool) {
 	if bitsPerSecond <= 0 {
 		return
 	}
 	now := a.clock.Now()
 	a.mu.Lock()
-	a.recordTargetEvidenceLocked(key, member, bitsPerSecond, now)
+	a.recordTargetEvidenceLocked(key, member, bitsPerSecond, degraded, now)
 	a.pruneTargetStateLocked(now)
 	a.mu.Unlock()
 }
 
-func (a *Vane) targetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, now time.Time) (float64, bool) {
+func (a *Vane) targetEvidenceLocked(key vaneTargetKey, member vaneMemberLease, now time.Time) (float64, bool, bool) {
 	record, ok := a.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}]
 	if !ok || record.observedAt.IsZero() || now.Sub(record.observedAt) > vaneTargetEvidenceTTL || !a.memberLeaseCurrentLocked(member) {
-		return 0, false
+		return 0, false, false
 	}
-	return record.bitsPerSecond, true
+	return record.bitsPerSecond, true, record.degraded
 }
 
 // targetCapabilityLocked is the read side of the §12.3 per-target capability
@@ -529,7 +534,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if requiredBPS < a.media.demandBPS {
 		requiredBPS = a.media.demandBPS
 	}
-	if targetBPS, fresh := a.targetEvidenceLocked(key, to, now); fresh && targetBPS < requiredBPS {
+	if targetBPS, fresh, degraded := a.targetEvidenceLocked(key, to, now); fresh && (degraded || targetBPS < requiredBPS) {
 		return "challenger-evidence-degraded"
 	}
 	// A capability-cache win carries no target-scoped evidence and is therefore
@@ -639,8 +644,19 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		a.mu.Unlock()
 		return
 	}
-	a.recordTargetEvidenceLocked(token.targetKey, member, sample.BitsPerSecond, now)
-	if sample.BitsPerSecond >= required && sample.BitsPerSecond >= a.media.lowThroughputBPS {
+	a.recordTargetEvidenceLocked(token.targetKey, member, sample.BitsPerSecond, false, now)
+	// B.7: the verdict uses the same signal set as the low-window line. An
+	// improved verdict pins a preference and keeps the reconnect cooldown, so a
+	// node that is merely fast must not win one. The health signals are trusted
+	// only once the first window has enough delivered bytes: a fresh socket's
+	// cumulative retransmission ratio is noise, and no-gain writes a 30-minute
+	// slow cooldown for the very node we just switched to.
+	signalOK := sample.TotalBytes >= a.media.minBytes && sample.Delivered
+	improved := sample.BitsPerSecond >= required &&
+		sample.BitsPerSecond >= a.media.lowThroughputBPS &&
+		(!signalOK || !sample.LossSupported || sample.LossRate <= vaneDefaultMediaHighLossRate) &&
+		(!signalOK || !sample.LatencySupported || sample.Latency <= vaneDefaultMediaHighLatency)
+	if improved {
 		a.targetPreferences[token.targetKey] = vaneTargetPreference{
 			to: member, expiresAt: now.Add(vaneTargetPreferenceTTL), updatedAt: now,
 		}
@@ -750,7 +766,7 @@ func (a *Vane) refreshTargetPreference(key vaneTargetKey, member vaneMemberLease
 	}
 	now := a.clock.Now()
 	a.mu.Lock()
-	a.recordTargetEvidenceLocked(key, member, bitsPerSecond, now)
+	a.recordTargetEvidenceLocked(key, member, bitsPerSecond, false, now)
 	if preference, ok := a.targetPreferences[key]; ok && preference.to == member && a.memberLeaseCurrentLocked(member) {
 		preference.expiresAt = now.Add(vaneTargetPreferenceTTL)
 		preference.updatedAt = now

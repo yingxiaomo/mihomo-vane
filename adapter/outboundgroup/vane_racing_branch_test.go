@@ -250,28 +250,28 @@ func TestVaneTargetEvidenceAndFailureGuards(t *testing.T) {
 	lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.mu.Unlock()
 
-	group.recordTargetEvidence(key, lease, 0)
+	group.recordTargetEvidence(key, lease, 0, false)
 	group.mu.Lock()
 	require.Empty(t, group.targetEvidence, "non-positive evidence must be dropped")
 	group.mu.Unlock()
 
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
-	group.recordTargetEvidence(key, lease, 5_000_000)
+	group.recordTargetEvidence(key, lease, 5_000_000, false)
 	group.mu.Lock()
 	require.Len(t, group.targetEvidence, 1, "dry-run still collects trusted evidence")
 	delete(group.targetEvidence, vaneTargetEvidenceKey{target: key, member: lease})
 	group.mu.Unlock()
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
-	group.recordTargetEvidence(key, vaneMemberLease{name: "beta", identity: "test:beta-old"}, 5_000_000)
+	group.recordTargetEvidence(key, vaneMemberLease{name: "beta", identity: "test:beta-old"}, 5_000_000, false)
 	group.mu.Lock()
 	require.Empty(t, group.targetEvidence, "evidence for a replaced identity must be dropped")
 	group.mu.Unlock()
 
-	group.recordTargetEvidence(key, lease, 5_000_000)
+	group.recordTargetEvidence(key, lease, 5_000_000, false)
 	clock.Advance(vaneTargetEvidenceTTL + time.Second)
 	group.mu.Lock()
-	_, fresh := group.targetEvidenceLocked(key, lease, clock.Now())
+	_, fresh, _ := group.targetEvidenceLocked(key, lease, clock.Now())
 	group.targetPreferences[key] = vaneTargetPreference{to: lease, expiresAt: clock.Now(), updatedAt: clock.Now()}
 	group.targetHandoffs[key] = vaneHandoffLease{id: 1, to: lease, from: lease, expiresAt: clock.Now(), updatedAt: clock.Now()}
 	group.targetFailures[vaneTargetFailureKey{target: key, member: vaneMemberLease{name: "beta", identity: "test:beta-old"}}] = vaneTargetFailureState{streak: 1, lastFailureAt: clock.Now()}
@@ -618,7 +618,7 @@ func TestVaneRaceSnapshotExcludesLowValueCandidates(t *testing.T) {
 		group.mu.Lock()
 		betaLease := group.memberLeaseLocked(beta.Name(), beta.identity)
 		group.mu.Unlock()
-		group.recordTargetEvidence(request.targetKey, betaLease, 1_000)
+		group.recordTargetEvidence(request.targetKey, betaLease, 1_000, false)
 
 		candidates, reason := group.snapshotRaceCandidates(request)
 		require.Empty(t, reason)
@@ -665,7 +665,7 @@ func TestVaneRaceSnapshotExcludesLowValueCandidates(t *testing.T) {
 		}
 		group.mu.Unlock()
 		for _, lease := range leases {
-			group.recordTargetEvidence(request.targetKey, lease, 1_000)
+			group.recordTargetEvidence(request.targetKey, lease, 1_000, false)
 		}
 
 		candidates, reason := group.snapshotRaceCandidates(request)
@@ -692,7 +692,7 @@ func TestVaneRaceSnapshotExcludesLowValueCandidates(t *testing.T) {
 		group.mu.Lock()
 		betaLease := group.memberLeaseLocked(beta.Name(), beta.identity)
 		group.mu.Unlock()
-		group.recordTargetEvidence(request.targetKey, betaLease, 1_000)
+		group.recordTargetEvidence(request.targetKey, betaLease, 1_000, false)
 
 		resultCh := make(chan vaneRaceResult, 1)
 		scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
@@ -716,8 +716,8 @@ func TestVaneRaceCandidateOrderingTieBreaks(t *testing.T) {
 	gammaLease := group.memberLeaseLocked(gamma.Name(), gamma.identity)
 	group.mu.Unlock()
 	// Two fresh target proofs with different rates: the faster one must lead.
-	group.recordTargetEvidence(request.targetKey, betaLease, 3_000_000)
-	group.recordTargetEvidence(request.targetKey, gammaLease, 6_000_000)
+	group.recordTargetEvidence(request.targetKey, betaLease, 3_000_000, false)
+	group.recordTargetEvidence(request.targetKey, gammaLease, 6_000_000, false)
 	candidates, reason := group.snapshotRaceCandidates(request)
 	require.Empty(t, reason)
 	require.Len(t, candidates, 2)

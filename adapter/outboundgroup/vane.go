@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -66,6 +67,20 @@ type vaneNodeState struct {
 	// lastObservedAt is durable retention metadata. It is not selection
 	// evidence and restoring it must never refresh the node's lifetime.
 	lastObservedAt time.Time
+	// B.3 cumulative TCP loss counters across every closed socket. The per
+	// window ratio says "this flow is lossy now"; these say "this node is
+	// lossy". Durable: a restart must not erase a node's reputation.
+	cumulSent    uint64
+	cumulRetrans uint64
+}
+
+// cumulLossRate is the node's lifetime TCP retransmission ratio. ok is false
+// when nothing was ever sent: no evidence, never "zero loss".
+func (s *vaneNodeState) cumulLossRate() (float64, bool) {
+	if s == nil || s.cumulSent == 0 {
+		return 0, false
+	}
+	return math.Min(float64(s.cumulRetrans)/float64(s.cumulSent), 1), true
 }
 
 // vaneNodeControlState is generation-local policy state. None of these
@@ -577,6 +592,9 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 				reason = "policy_close"
 			}
 			attempt.end(a.clock.Now(), reason, observation)
+			// B.3: fold this socket's raw segment counters into the node's
+			// lifetime loss ratio. Unsupported reads book nothing.
+			a.recordCumulativeLossIdentity(proxy.Name(), identity, nodeEpoch, observation)
 			if mediaFlow != nil {
 				// B2 items 2+3: passive loss and stall telemetry ride on
 				// media-flow settlement regardless of the racing mode.
@@ -1447,6 +1465,25 @@ func (a *Vane) observeResponseEpochIdentity(candidate, identity string, nodeEpoc
 
 func (a *Vane) observeThroughputIdentity(candidate, identity string, transport vaneTransport, now time.Time, bitsPerSecond float64) {
 	a.observeThroughputEpochIdentity(candidate, identity, 0, transport, now, bitsPerSecond)
+}
+
+// recordCumulativeLossIdentity books one closed socket's segment counters on
+// the node that carried it. LossSupported=false books nothing: no evidence is
+// not zero loss.
+func (a *Vane) recordCumulativeLossIdentity(candidate, identity string, nodeEpoch uint64, observation vaneConnectionCloseObservation) {
+	if !observation.LossSupported || observation.SegsOut == 0 {
+		return
+	}
+	now := a.clock.Now()
+	a.mu.Lock()
+	a.learning.mu.Lock()
+	if state := a.ensureNodeIdentityEpochLocked(candidate, identity, nodeEpoch, now); state != nil {
+		state.cumulSent += observation.SegsOut
+		state.cumulRetrans += observation.RetransSegs
+		a.learning.markDirtyLocked(now)
+	}
+	a.learning.mu.Unlock()
+	a.mu.Unlock()
 }
 
 func (a *Vane) observeThroughputEpochIdentity(candidate, identity string, nodeEpoch uint64, transport vaneTransport, now time.Time, bitsPerSecond float64) {

@@ -472,11 +472,11 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 		if state := a.nodes[proxy.Name()]; state != nil && state.identity == identity {
 			snapshot = state.snapshot(vaneTransportTCP, now)
 		}
-		targetBPS, targetFresh := a.targetEvidenceLocked(request.targetKey, member, now)
+		targetBPS, targetFresh, targetDegraded := a.targetEvidenceLocked(request.targetKey, member, now)
 		// Round3 item 8a: fresh real-target evidence below the race bar proves
 		// the candidate slow for this target — probing its generic capability
 		// would only spend budget on a loser.
-		if targetFresh && targetBPS < request.requiredBPS {
+		if targetFresh && (targetDegraded || targetBPS < request.requiredBPS) {
 			continue
 		}
 		// Round3 item 8a: a dial-cooldown candidate is rejected at commit time

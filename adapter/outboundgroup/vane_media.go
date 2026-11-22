@@ -32,6 +32,12 @@ const (
 	vaneDefaultMediaBudgetWindow     = 30 * time.Minute
 	vaneMediaEvidenceMaxAge          = 10 * time.Minute
 	vaneMaximumMediaThroughputBPS    = int64(1_000_000_000)
+	// B-part degradation lines. Loss reuses the 5% the B2 loss EMA already
+	// treats as degraded (healthy paths retransmit < 1%); latency is where a
+	// video path is visibly unusable (production saw 800 ms), far above the
+	// 50-200 ms a healthy CDN path keeps.
+	vaneDefaultMediaHighLossRate = 0.05
+	vaneDefaultMediaHighLatency  = 500 * time.Millisecond
 	// §E: the re-evaluation valve. A flow that was just switched to and keeps
 	// producing no qualified samples gets one prepare re-run per target per
 	// throttle window, so a bad challenger cannot lock the target for the full
@@ -477,7 +483,21 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		f.mu.Unlock()
 		return nil
 	}
-	low := sample.BitsPerSecond < config.lowThroughputBPS
+	lowLoss := sample.LossSupported && sample.LossRate > vaneDefaultMediaHighLossRate
+	// B-part: throughput is no longer the only degradation signal. Loss and
+	// latency only count when the kernel actually reported them; latency also
+	// needs delivered data this window, because srtt keeps its last value on a
+	// silent socket (a paused flow must not be judged by a stale RTT).
+	lowLatency := sample.LatencySupported && sample.Delivered && sample.Latency > vaneDefaultMediaHighLatency
+	low := sample.BitsPerSecond < config.lowThroughputBPS || lowLoss || lowLatency
+	lowSignal := ""
+	if sample.BitsPerSecond < config.lowThroughputBPS {
+		lowSignal = "throughput"
+	} else if lowLoss {
+		lowSignal = "loss"
+	} else if lowLatency {
+		lowSignal = "latency"
+	}
 	now := f.group.clock.Now()
 	graced := false
 	if low {
@@ -510,16 +530,19 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	f.mu.Unlock()
 
 	f.group.diagnostics.record(vaneDiagnosticRecord{
-		kind:       "throughput-sample",
-		target:     f.target,
-		bucket:     f.targetKey.target,
-		port:       f.port,
-		from:       f.candidate,
-		bps:        sample.BitsPerSecond,
-		totalBytes: sample.TotalBytes,
-		age:        sample.Age,
-		lowWindows: lowWindows,
-		low:        low,
+		kind:          "throughput-sample",
+		target:        f.target,
+		bucket:        f.targetKey.target,
+		port:          f.port,
+		from:          f.candidate,
+		bps:           sample.BitsPerSecond,
+		totalBytes:    sample.TotalBytes,
+		age:           sample.Age,
+		lowWindows:    lowWindows,
+		low:           low,
+		lowSignal:     lowSignal,
+		latencyMillis: sample.Latency.Milliseconds(),
+		lossRate:      sample.LossRate,
 	})
 	if graced {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
@@ -539,7 +562,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	untrusted := sample.untrusted || graced
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
 	if !untrusted {
-		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond)
+		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond, lowLoss || lowLatency)
 		if low {
 			f.group.invalidateTargetPreference(f.targetStateKey, member)
 		} else {
@@ -1150,6 +1173,12 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 		if freshThroughput {
 			throughputBPS = recent.bitsPerSecond
 			knownGood = throughputBPS >= a.media.lowThroughputBPS && throughputBPS >= a.media.demandBPS && throughputBPS >= currentBPS*a.media.challengerRatio
+			if rate, ok := a.nodes[proxy.Name()].cumulLossRate(); ok && rate > vaneDefaultMediaHighLossRate {
+				// B.3: a node that keeps retransmitting on a long horizon is
+				// not a knownGood candidate however fast one probe looked.
+				// Its capability probe still counts, just below this tier.
+				knownGood = false
+			}
 		}
 		// CHAIN-01: real traffic first, capability cache only when there is no
 		// fresh real-traffic sample. A candidate below the close bar is not a
@@ -1159,7 +1188,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 		// the challenger wrote its record under epoch 0.
 		// §B: target-scoped real traffic outranks both node tiers, as at commit.
 		bestEvidence := 0.0
-		if targetBPS, fresh := a.targetEvidenceLocked(stateKey, member, now); fresh {
+		if targetBPS, fresh, degraded := a.targetEvidenceLocked(stateKey, member, now); fresh && !degraded {
 			bestEvidence = targetBPS
 		} else if freshThroughput {
 			bestEvidence = recent.bitsPerSecond
@@ -1350,7 +1379,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		if a.media.demandBPS > bar {
 			bar = a.media.demandBPS
 		}
-		if targetBPS, targetFresh := a.targetEvidenceLocked(plan.targetStateKey, to, now); !(targetFresh && targetBPS >= bar) {
+		if targetBPS, targetFresh, degraded := a.targetEvidenceLocked(plan.targetStateKey, to, now); !(targetFresh && !degraded && targetBPS >= bar) {
 			return "challenger-evidence-degraded"
 		}
 	}
@@ -1413,7 +1442,11 @@ func (a *Vane) checkChallengerEvidenceLocked(plan vaneMediaPlan, caps map[vaneMe
 	lease := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: plan.challengerEpoch}
 	best := 0.0
 	if plan.targetStateKey.targetScope != "" {
-		if bps, fresh := a.targetEvidenceLocked(plan.targetStateKey, lease, now); fresh {
+		if bps, fresh, degraded := a.targetEvidenceLocked(plan.targetStateKey, lease, now); fresh && degraded {
+			// A target-scoped "bad for this target" record outranks every
+			// generic tier below it; do not fall through to node evidence.
+			return "challenger-evidence-degraded"
+		} else if fresh {
 			best = bps
 		}
 	}

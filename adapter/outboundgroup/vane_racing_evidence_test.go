@@ -61,7 +61,7 @@ func TestVaneRacingTargetEvidenceOutranksCapabilityAndProbing(t *testing.T) {
 	group.mu.Lock()
 	betaLease := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.mu.Unlock()
-	group.recordTargetEvidence(request.targetKey, betaLease, 9_000_000)
+	group.recordTargetEvidence(request.targetKey, betaLease, 9_000_000, false)
 	seedVaneCapability(group, clock, gamma, 50_000_000)
 
 	resultCh := make(chan vaneRaceResult, 1)

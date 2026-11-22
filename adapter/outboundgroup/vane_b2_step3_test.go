@@ -21,7 +21,7 @@ func seedVaneB2CandidateEvidence(t *testing.T, group *Vane, proxy *vaneTestProxy
 	require.NotZero(t, member.epoch)
 	key, ok := group.targetKeyForMedia("rr.googlevideo.com", 443)
 	require.True(t, ok)
-	group.recordTargetEvidence(key, member, bps)
+	group.recordTargetEvidence(key, member, bps, false)
 	return member
 }
 

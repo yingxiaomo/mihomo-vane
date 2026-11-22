@@ -34,6 +34,7 @@ func vaneReadTCPStats(conn net.Conn) *vaneTCPStats {
 			retransSegs:  uint64(info.Total_retrans),
 			bytesSent:    info.Bytes_sent,
 			bytesRetrans: info.Bytes_retrans,
+			rttMicros:    info.Rtt,
 		}
 	}); err != nil {
 		return nil

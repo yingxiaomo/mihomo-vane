@@ -206,6 +206,12 @@ type vaneThroughputObservation struct {
 	Age           time.Duration
 	Delivered     bool
 	untrusted     bool
+	// B-part window health, read fresh from TCP_INFO at window build. An
+	// unsupported read stays false and must never be read as a healthy zero.
+	LossRate         float64
+	LossSupported    bool
+	Latency          time.Duration
+	LatencySupported bool
 }
 
 // vaneConnectionCloseObservation describes only locally observable
@@ -220,6 +226,10 @@ type vaneConnectionCloseObservation struct {
 	// LossSupported=false and must never be mistaken for zero loss.
 	LossRate      float64
 	LossSupported bool
+	// B.3: the raw counters behind LossRate, so the group can accumulate a
+	// node-level cumulative loss ratio. Zero means the kernel reported none.
+	SegsOut     uint64
+	RetransSegs uint64
 	// B2 observation (round5 item 3): the first-response snapshot, taken at
 	// whichever write/read site recorded the response first. Zero bytes read
 	// after that point plus a long quiet tail is the header-stall signature.
@@ -444,6 +454,9 @@ func (c *vaneObservedConn) closeObservationLocked(closedAt time.Time) vaneConnec
 		PolicyClosed:   c.policyClosed,
 	}
 	observation.LossRate, observation.LossSupported = c.b2Stats.lossRate()
+	if observation.LossSupported {
+		observation.SegsOut, observation.RetransSegs = c.b2Stats.lossCounters()
+	}
 	observation.ResponseRecorded = c.responseRecorded
 	observation.ResponseBytes = c.responseBytes
 	observation.ResponseAt = c.responseAt
@@ -661,13 +674,20 @@ func (c *vaneObservedConn) drainPendingAbort() {
 }
 
 func (c *vaneObservedConn) throughputObservationLocked(bitsPerSecond float64, start, end time.Time, bytes int64, now time.Time) vaneThroughputObservation {
-	return vaneThroughputObservation{
+	observation := vaneThroughputObservation{
 		BitsPerSecond: bitsPerSecond,
 		Bytes:         bytes,
 		Duration:      vaneElapsed(start, end),
 		TotalBytes:    c.totalReadBytes,
 		Age:           vaneElapsed(c.createdAt, now),
 	}
+	// One fresh TCP_INFO read per window: c.b2Stats is only filled at close
+	// (the kernel counters die with the socket), so it cannot serve a live
+	// window. getsockopt is local and cheap; unsupported stays false.
+	stats := vaneReadTCPStats(c.Conn)
+	observation.LossRate, observation.LossSupported = stats.lossRate()
+	observation.Latency, observation.LatencySupported = stats.rtt()
+	return observation
 }
 
 func (c *vaneObservedConn) requestAbort(action vanePolicyAction) {

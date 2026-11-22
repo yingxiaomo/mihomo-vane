@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"net"
 	"reflect"
+	"time"
 	"unsafe"
 )
 
@@ -14,6 +15,31 @@ type vaneTCPStats struct {
 	retransSegs  uint64
 	bytesSent    uint64
 	bytesRetrans uint64
+	// rttMicros is TCP_INFO's smoothed RTT. Zero means the kernel has no timed
+	// sample yet, not "instant".
+	rttMicros uint32
+}
+
+// rtt returns the socket's smoothed RTT. ok is false when the kernel reported
+// no timed sample (or the read was unsupported) — never "zero latency".
+func (s *vaneTCPStats) rtt() (time.Duration, bool) {
+	if s == nil || s.rttMicros == 0 {
+		return 0, false
+	}
+	return time.Duration(s.rttMicros) * time.Microsecond, true
+}
+
+// lossCounters returns the raw denominator and numerator behind lossRate:
+// segments first, bytes as the fallback, so a node-level cumulative ratio
+// stays consistent with the per-socket one.
+func (s *vaneTCPStats) lossCounters() (uint64, uint64) {
+	if s == nil {
+		return 0, 0
+	}
+	if s.segsOut > 0 {
+		return s.segsOut, s.retransSegs
+	}
+	return s.bytesSent, s.bytesRetrans
 }
 
 // lossRate returns the socket's cumulative retransmission ratio. Segments are

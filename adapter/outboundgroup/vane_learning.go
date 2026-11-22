@@ -90,6 +90,10 @@ type vanePersistedNode struct {
 	LastSeen time.Time            `json:"lastSeen"`
 	TCP      vanePersistedMetrics `json:"tcp"`
 	UDP      vanePersistedMetrics `json:"udp"`
+	// B.9: the B.3 cumulative loss counters are durable. They are telemetry,
+	// not selection state, so they may cross a reload.
+	CumulSent    uint64 `json:"cumulSent,omitempty"`
+	CumulRetrans uint64 `json:"cumulRetrans,omitempty"`
 }
 
 // vanePersistedB2Target carries one target+member pair's B2 telemetry across
@@ -497,7 +501,10 @@ func restoreVaneNode(node vanePersistedNode, now time.Time) (*vaneNodeState, boo
 	if !tcpValid && !udpValid {
 		return nil, false, tcpInvalid || udpInvalid
 	}
-	return &vaneNodeState{name: node.Name, identity: node.Identity, tcp: tcp, udp: udp, lastObservedAt: node.LastSeen}, true, tcpInvalid || udpInvalid
+	return &vaneNodeState{
+		name: node.Name, identity: node.Identity, tcp: tcp, udp: udp, lastObservedAt: node.LastSeen,
+		cumulSent: node.CumulSent, cumulRetrans: node.CumulRetrans,
+	}, true, tcpInvalid || udpInvalid
 }
 
 func restoreVaneMetrics(metrics vanePersistedMetrics, now time.Time) (vaneMetrics, bool, bool) {
@@ -704,11 +711,13 @@ func (s *vaneLearningState) snapshotLocked(now time.Time) vaneLearningSnapshot {
 	for _, candidate := range candidates {
 		state := candidate.state
 		nodes = append(nodes, vanePersistedNode{
-			Name:     state.name,
-			Identity: state.identity,
-			LastSeen: state.lastObservedAt,
-			TCP:      persistVaneMetrics(state.tcp, now),
-			UDP:      persistVaneMetrics(state.udp, now),
+			Name:         state.name,
+			Identity:     state.identity,
+			LastSeen:     state.lastObservedAt,
+			TCP:          persistVaneMetrics(state.tcp, now),
+			UDP:          persistVaneMetrics(state.udp, now),
+			CumulSent:    state.cumulSent,
+			CumulRetrans: state.cumulRetrans,
 		})
 	}
 	targetPairs := make([]struct {

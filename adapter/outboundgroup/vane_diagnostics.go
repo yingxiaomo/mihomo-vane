@@ -37,6 +37,8 @@ type VaneDiagnosticCounters struct {
 	MediaFlows            uint64 `json:"mediaFlows"`
 	ThroughputSamples     uint64 `json:"throughputSamples"`
 	LowThroughputSamples  uint64 `json:"lowThroughputSamples"`
+	LowWindowsByLoss      uint64 `json:"lowWindowsByLoss"`
+	LowWindowsByLatency   uint64 `json:"lowWindowsByLatency"`
 	BufferCreditDeferrals uint64 `json:"bufferCreditDeferrals"`
 	ReconnectSuppressed   uint64 `json:"reconnectSuppressed"`
 	ReconnectPrepared     uint64 `json:"reconnectPrepared"`
@@ -306,7 +308,12 @@ type vaneDiagnosticRecord struct {
 	evidenceCoverageMicros int64
 	scopeEligibleOrdinal   uint64
 	low                    bool
-	force                  bool
+	// B.4: which signal made the window low, plus the raw metric values, so a
+	// suppression can be told apart from a throughput one after the fact.
+	lowSignal     string
+	latencyMillis int64
+	lossRate      float64
+	force         bool
 }
 
 type vaneDiagnosticsRegistryState struct {
@@ -710,6 +717,12 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		d.snapshotData.Counters.ThroughputSamples++
 		if record.low {
 			d.snapshotData.Counters.LowThroughputSamples++
+			switch record.lowSignal {
+			case "loss":
+				d.snapshotData.Counters.LowWindowsByLoss++
+			case "latency":
+				d.snapshotData.Counters.LowWindowsByLatency++
+			}
 		}
 	case "buffer-credit-deferred":
 		d.snapshotData.Counters.BufferCreditDeferrals++
