@@ -80,3 +80,27 @@ func TestVanePickScoredRecorded(t *testing.T) {
 	group.pickInternalDecision(context.Background(), metadata, vaneTransportTCP, false, true, false)
 	require.Len(t, got, 1, "an unchanged non-media anchor must not re-log")
 }
+
+// SCORE-EXPLAIN-04: the sticky early returns (target/media hint) never reach
+// the ranking loop, so they report through the snapshot helper instead.
+func TestVanePickScoredSnapshotRecord(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	var got []vaneDiagnosticRecord
+	group.diagnostics.sink = func(record vaneDiagnosticRecord) {
+		got = append(got, record)
+	}
+	snapshot := vaneMetricsSnapshot{
+		throughput: vaneMetricEstimate{value: 12_000_000, confidence: 1, valid: true},
+	}
+
+	group.recordPickScoredSnapshot("media-hint", vaneSceneMedia, vaneTransportTCP, "rr1---sn-x.googlevideo.com", 443, "alpha", snapshot)
+	require.Len(t, got, 1)
+	require.Equal(t, "pick-scored", got[0].kind)
+	require.Equal(t, "media-hint", got[0].reason)
+	require.Equal(t, "alpha", got[0].to)
+	require.Equal(t, "media", got[0].scene)
+	require.Greater(t, got[0].scoreMicros, int64(0))
+	require.Contains(t, got[0].scoreParts, "tp=")
+}

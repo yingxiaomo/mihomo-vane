@@ -1134,6 +1134,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					record.previousBPS = handoff.previousBPS
 				}
 				a.diagnostics.record(record)
+				a.recordPickScoredSnapshot("target-hint", scene, transport, target, port, selected.Name(), state.snapshot(transport, now))
 				return vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 			}
 		}
@@ -1159,6 +1160,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				record.previousBPS = handoff.previousBPS
 			}
 			a.diagnostics.record(record)
+			a.recordPickScoredSnapshot("media-hint", scene, transport, target, port, hinted.Name(), state.snapshot(transport, now))
 			return vanePickDecision{proxy: hinted, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 		}
 	}
@@ -1430,6 +1432,17 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		decision.exploration = a.diagnostics.recordExplorationSelection(*explorationSelection)
 	}
 	return decision
+}
+
+// recordPickScoredSnapshot covers the sticky early returns that never reach the
+// ranking loop: without it a media flow served from target memory logs nothing.
+func (a *Vane) recordPickScoredSnapshot(reason string, scene vaneScene, transport vaneTransport, target string, port uint16, name string, snapshot vaneMetricsSnapshot) {
+	parts := scoreVaneMetricsParts(scene, snapshot)
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind: "pick-scored", reason: reason, target: target, port: port,
+		transport: transport.String(), scene: scene.String(),
+		to: name, scoreMicros: parts.total, scoreParts: parts.explain(),
+	})
 }
 
 // recordPickScored explains one committed pick: the winner, its weighted
