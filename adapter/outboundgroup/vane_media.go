@@ -602,7 +602,13 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		return nil
 	}
 
-	plan, reason := f.group.prepareMediaReconnectForNodeDetailed(f.targetKey, f.target, f.port, f.candidate, f.identity, f.nodeEpoch, sample.BitsPerSecond)
+	// COOLDOWN-STARVE-01: a cooldown armed by an earlier commit must not freeze
+	// a flow that is already starving past the credit guard; the reconnect
+	// budget (3/30min) still bounds thrash. Same exemption rides the plan, so
+	// the commit gates honor it too; it also skips the queued-action recovery
+	// recheck, which only guards against a burst that arrives before the close.
+	starving := lowWindows >= config.maxLowWindows && creditBits < guardBits
+	plan, reason := f.group.prepareMediaReconnectForNodeDetailedSkipCooldown(f.targetKey, f.target, f.port, f.candidate, f.identity, f.nodeEpoch, sample.BitsPerSecond, starving)
 	mode := f.group.racing.mode
 	if reason != "" && reason != "no-challenger" && reason != "no-evidence-candidate" {
 		f.recordReconnectSuppressed(reason, sample, lowWindows)

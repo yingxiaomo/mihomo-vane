@@ -906,3 +906,30 @@ func TestVaneFlushDiagnosticsContextBacksOff(t *testing.T) {
 	store.mu.Unlock()
 	require.LessOrEqual(t, attempts, 5, "the backoff must prevent hot-looping the failing store")
 }
+
+// COOLDOWN-STARVE-01: the reconnect cooldown armed by an earlier commit blocks a
+// merely-slow flow, but must not freeze one that is starving past the credit
+// guard — that is exactly the switched-to node dying minutes after the switch.
+func TestVaneStarvedFlowBypassesReconnectCooldown(t *testing.T) {
+	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group.mu.Lock()
+	group.mediaReconnects[flow.targetKey] = clock.Now().Add(time.Minute)
+	group.mu.Unlock()
+
+	// Credit stays above the guard: the streak reaches the line, and the armed
+	// cooldown still refuses the close.
+	for i := 0; i < vaneDefaultMediaLowWindows; i++ {
+		clock.Advance(5 * time.Second)
+		require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
+	}
+	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "reconnect-cooldown"),
+		"only the window that crosses the line is attempted, and the cooldown refuses it")
+
+	// Same bytes, age far past demand*silence: credit is negative and the streak
+	// is past maxLowWindows, so the cooldown no longer applies.
+	clock.Advance(5 * time.Second)
+	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1, TotalBytes: 8 * 1024 * 1024, Age: 90 * time.Second}))
+	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "reconnect-cooldown"),
+		"a starved flow must not be frozen by the reconnect cooldown")
+	require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""), "the starved window reaches the race")
+}
