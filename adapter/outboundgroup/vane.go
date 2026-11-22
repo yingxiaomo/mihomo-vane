@@ -72,6 +72,44 @@ type vaneNodeState struct {
 	// lossy". Durable: a restart must not erase a node's reputation.
 	cumulSent    uint64
 	cumulRetrans uint64
+	// C batch node profile counters. They are durable with a 7 day age reset:
+	// a lifetime peak must not become a permanent label.
+	successCount    uint64
+	failureCount    uint64
+	countersAt      time.Time
+	maxDownloadRate float64
+	maxRateAt       time.Time
+	totalDuration   time.Duration
+	durationCount   uint64
+	downloadTotal   uint64
+	totalsAt        time.Time
+}
+
+// vaneProfileAgeReset is how long a profile counter stays meaningful. Older
+// counters are dropped so an old peak cannot pin a node forever.
+const vaneProfileAgeReset = 7 * 24 * time.Hour
+
+func (s *vaneNodeState) recordSample(now time.Time, success bool) {
+	if success {
+		s.successCount++
+	} else {
+		s.failureCount++
+	}
+	s.countersAt = now
+}
+
+func (s *vaneNodeState) recordMaxRate(now time.Time, bitsPerSecond float64) {
+	if bitsPerSecond <= 0 || math.IsNaN(bitsPerSecond) || math.IsInf(bitsPerSecond, 0) {
+		return
+	}
+	if bitsPerSecond > s.maxDownloadRate {
+		s.maxDownloadRate = bitsPerSecond
+	}
+	s.maxRateAt = now
+}
+
+func (s *vaneNodeState) profileFresh(now time.Time, at time.Time) bool {
+	return !at.IsZero() && now.Sub(at) < vaneProfileAgeReset
 }
 
 // cumulLossRate is the node's lifetime TCP retransmission ratio. ok is false
@@ -104,10 +142,73 @@ func (s *vaneNodeState) metrics(transport vaneTransport) *vaneMetrics {
 }
 
 func (s vaneNodeState) snapshot(transport vaneTransport, now time.Time) vaneMetricsSnapshot {
+	snapshot := s.tcp.snapshot(now)
 	if transport == vaneTransportUDP {
-		return s.udp.snapshot(now)
+		snapshot = s.udp.snapshot(now)
 	}
-	return s.tcp.snapshot(now)
+	snapshot.loss = s.lossEstimate()
+	snapshot.success = s.successEstimate(now)
+	snapshot.maxRate = s.maxRateEstimate(now)
+	snapshot.duration = s.durationEstimate(now)
+	snapshot.downloadTotal = s.downloadTotalEstimate(now)
+	return snapshot
+}
+
+func (s vaneNodeState) lossEstimate() vaneMetricEstimate {
+	rate, ok := s.cumulLossRate()
+	if !ok {
+		return vaneMetricEstimate{}
+	}
+	return vaneMetricEstimate{
+		value:      rate,
+		evidence:   float64(s.cumulSent),
+		confidence: vaneClamp(float64(s.cumulSent)/1000, 0, 1),
+		valid:      true,
+	}
+}
+
+func (s vaneNodeState) successEstimate(now time.Time) vaneMetricEstimate {
+	if !s.profileFresh(now, s.countersAt) {
+		return vaneMetricEstimate{}
+	}
+	total := s.successCount + s.failureCount
+	if total == 0 {
+		return vaneMetricEstimate{}
+	}
+	return vaneMetricEstimate{
+		value:      vaneClamp(float64(s.successCount)/float64(total), 0, 1),
+		evidence:   float64(total),
+		confidence: vaneClamp(float64(total)/10, 0, 1),
+		valid:      true,
+	}
+}
+
+func (s vaneNodeState) maxRateEstimate(now time.Time) vaneMetricEstimate {
+	if !s.profileFresh(now, s.maxRateAt) || s.maxDownloadRate <= 0 {
+		return vaneMetricEstimate{}
+	}
+	// Same convention as the throughput dimension: the cost curve expects log BPS.
+	return vaneMetricEstimate{value: math.Log(s.maxDownloadRate), evidence: 1, confidence: 1, valid: true}
+}
+
+func (s vaneNodeState) durationEstimate(now time.Time) vaneMetricEstimate {
+	if !s.profileFresh(now, s.totalsAt) || s.durationCount == 0 {
+		return vaneMetricEstimate{}
+	}
+	average := float64(s.totalDuration) / float64(s.durationCount) / float64(time.Second)
+	return vaneMetricEstimate{
+		value:      average,
+		evidence:   float64(s.durationCount),
+		confidence: vaneClamp(float64(s.durationCount)/10, 0, 1),
+		valid:      true,
+	}
+}
+
+func (s vaneNodeState) downloadTotalEstimate(now time.Time) vaneMetricEstimate {
+	if !s.profileFresh(now, s.totalsAt) || s.downloadTotal < 1<<20 {
+		return vaneMetricEstimate{}
+	}
+	return vaneMetricEstimate{value: math.Log10(float64(s.downloadTotal)), evidence: 1, confidence: 1, valid: true}
 }
 
 type vaneAnchorKey struct {
@@ -595,6 +696,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 			// B.3: fold this socket's raw segment counters into the node's
 			// lifetime loss ratio. Unsupported reads book nothing.
 			a.recordCumulativeLossIdentity(proxy.Name(), identity, nodeEpoch, observation)
+			a.recordCloseProfileIdentity(proxy.Name(), identity, nodeEpoch, observation)
 			if mediaFlow != nil {
 				// B2 items 2+3: passive loss and stall telemetry ride on
 				// media-flow settlement regardless of the racing mode.
@@ -1388,6 +1490,7 @@ func (a *Vane) recordDialFailureEpoch(ctx context.Context, metadata *C.Metadata,
 		return
 	}
 	state.metrics(transport).observeFailure(now, true)
+	state.recordSample(now, false)
 	a.learning.markDirtyLocked(now)
 	if a.nodeIdentityIsCurrentLocked(proxy.Name(), identity) {
 		target, port := vaneTarget(metadata)
@@ -1410,6 +1513,7 @@ func (a *Vane) recordDialSuccessEpoch(metadata *C.Metadata, transport vaneTransp
 		return
 	}
 	state.metrics(transport).observeFailure(now, false)
+	state.recordSample(now, true)
 	a.learning.markDirtyLocked(now)
 	if a.nodeIdentityIsCurrentLocked(candidate, identity) {
 		target, port := vaneTarget(metadata)
@@ -1486,6 +1590,32 @@ func (a *Vane) recordCumulativeLossIdentity(candidate, identity string, nodeEpoc
 	a.mu.Unlock()
 }
 
+// recordCloseProfileIdentity books duration and transferred bytes for the C
+// batch. Dial failures never reach here (they have no close observation) and
+// sockets shorter than a second say nothing about stability.
+func (a *Vane) recordCloseProfileIdentity(candidate, identity string, nodeEpoch uint64, observation vaneConnectionCloseObservation) {
+	if observation.Age < time.Second && observation.TotalReadBytes <= 0 {
+		return
+	}
+	now := a.clock.Now()
+	a.mu.Lock()
+	a.learning.mu.Lock()
+	if state := a.ensureNodeIdentityEpochLocked(candidate, identity, nodeEpoch, now); state != nil {
+		if observation.Age >= time.Second {
+			state.totalDuration += observation.Age
+			state.durationCount++
+			state.totalsAt = now
+		}
+		if observation.TotalReadBytes > 0 {
+			state.downloadTotal += uint64(observation.TotalReadBytes)
+			state.totalsAt = now
+		}
+		a.learning.markDirtyLocked(now)
+	}
+	a.learning.mu.Unlock()
+	a.mu.Unlock()
+}
+
 func (a *Vane) observeThroughputEpochIdentity(candidate, identity string, nodeEpoch uint64, transport vaneTransport, now time.Time, bitsPerSecond float64) {
 	a.mu.Lock()
 	a.learning.mu.Lock()
@@ -1496,6 +1626,7 @@ func (a *Vane) observeThroughputEpochIdentity(candidate, identity string, nodeEp
 		return
 	}
 	state.metrics(transport).observeThroughput(now, bitsPerSecond)
+	state.recordMaxRate(now, bitsPerSecond)
 	if transport == vaneTransportTCP && a.nodeIdentityIsCurrentLocked(candidate, identity) {
 		a.ensureNodeControlLocked(candidate, now).recentTCPThroughput = vaneRecentThroughput{bitsPerSecond: bitsPerSecond, observedAt: now}
 	}

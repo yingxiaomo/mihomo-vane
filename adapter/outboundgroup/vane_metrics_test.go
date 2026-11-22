@@ -222,7 +222,8 @@ func TestVaneMetricsDecayAndValidity(t *testing.T) {
 func TestVaneMetricsMissingCosts(t *testing.T) {
 	t.Run("MISS-01 all missing is conservative rather than perfect", func(t *testing.T) {
 		score := scoreVaneMetrics(vaneSceneDefault, vaneMetricsSnapshot{})
-		require.Equal(t, int64(502_500), score)
+		// Ten dimensions now: the five profile dimensions sit at their 0.5 neutral.
+		require.Equal(t, int64(502_083), score)
 		require.Greater(t, score, int64(0))
 	})
 
@@ -231,7 +232,7 @@ func TestVaneMetricsMissingCosts(t *testing.T) {
 			connect: vaneMetricEstimate{value: math.Log(1), confidence: 1, valid: true},
 		}
 		score := scoreVaneMetrics(vaneSceneDefault, snapshot)
-		require.Equal(t, int64(420_000), score)
+		require.Equal(t, int64(433_333), score)
 		require.Greater(t, score, int64(0))
 	})
 }

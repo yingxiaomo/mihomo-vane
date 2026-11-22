@@ -42,5 +42,6 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 		scores = append(scores, scoreVaneMetrics(scene, metrics.snapshot(clock.Now())))
 	}
 	require.Equal(t, []string{"alpha", "beta", "alpha", "beta"}, choices)
-	require.Equal(t, []int64{158917, 89561, 172942, 432878}, scores)
+	// Absolute scores shift by the neutral profile blend; the ordering is the contract.
+	require.Equal(t, []int64{215764, 157968, 227451, 444065}, scores)
 }

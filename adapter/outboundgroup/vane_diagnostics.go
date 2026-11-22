@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -284,6 +285,78 @@ type vaneDiagnostics struct {
 	pendingPayload    []byte
 	processedRevision uint64
 	persistWG         sync.WaitGroup
+
+	// sink captures the [vane] line in tests; nil means the mihomo log.
+	sink      func(vaneDiagnosticRecord)
+	logDedupe map[string]time.Time
+}
+
+// vaneLogDedupWindow collapses one (kind,target,reason) to a single Info line
+// per window: reconnect-suppressed runs per flow per five seconds and would
+// flood the log otherwise. Different reasons on one target stay visible.
+const vaneLogDedupWindow = 30 * time.Second
+
+// vaneLogLine is the fixed field order: kind, target, from, to, bps, reason,
+// lowWindows, then the B.4 metrics. Fixed so `grep '[vane]' | cut` works.
+func vaneLogLine(record vaneDiagnosticRecord) string {
+	fields := []string{"[vane]", "kind=" + record.kind}
+	if record.target != "" {
+		fields = append(fields, "target="+record.target)
+	}
+	if record.port != 0 {
+		fields = append(fields, "port="+strconv.Itoa(int(record.port)))
+	}
+	if record.from != "" {
+		fields = append(fields, "from="+record.from)
+	}
+	if record.to != "" {
+		fields = append(fields, "to="+record.to)
+	}
+	if record.bps > 0 {
+		fields = append(fields, "bps="+strconv.FormatFloat(record.bps, 'f', 0, 64))
+	}
+	if record.reason != "" {
+		fields = append(fields, "reason="+record.reason)
+	}
+	if record.lowSignal != "" {
+		fields = append(fields, "signal="+record.lowSignal)
+	}
+	if record.latencyMillis > 0 {
+		fields = append(fields, "latencyMs="+strconv.FormatInt(record.latencyMillis, 10))
+	}
+	if record.lossRate > 0 {
+		fields = append(fields, "lossRate="+strconv.FormatFloat(record.lossRate, 'f', 4, 64))
+	}
+	if record.lowWindows > 0 {
+		fields = append(fields, "lowWindows="+strconv.Itoa(record.lowWindows))
+	}
+	return strings.Join(fields, " ")
+}
+
+// emitLocked is the single carrier for every Vane event: a test sink, or one
+// deduplicated Info line with the [vane] tag. Per-window noise stays in the
+// counters only.
+func (d *vaneDiagnostics) emitLocked(record vaneDiagnosticRecord, now time.Time) {
+	switch record.kind {
+	case "throughput-sample", "churn-candidate", "churn-reset":
+		return
+	}
+	if d.sink != nil {
+		d.sink(record)
+		return
+	}
+	key := record.kind + "\x00" + record.target + "\x00" + record.reason
+	if last, ok := d.logDedupe[key]; ok && now.Sub(last) < vaneLogDedupWindow {
+		return
+	}
+	if len(d.logDedupe) > 512 {
+		d.logDedupe = make(map[string]time.Time)
+	}
+	if d.logDedupe == nil {
+		d.logDedupe = make(map[string]time.Time)
+	}
+	d.logDedupe[key] = now
+	log.Infoln(vaneLogLine(record))
 }
 
 type vaneDiagnosticRecord struct {
@@ -839,6 +912,7 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		!strings.HasPrefix(record.kind, "gray-") && !strings.HasPrefix(record.kind, "b2-") {
 		event = d.appendEventLocked(record, now)
 	}
+	d.emitLocked(record, now)
 	if d.store != nil && !d.retiring {
 		d.queuePersistenceLocked(now, record.force)
 	}

@@ -94,6 +94,18 @@ type vanePersistedNode struct {
 	// not selection state, so they may cross a reload.
 	CumulSent    uint64 `json:"cumulSent,omitempty"`
 	CumulRetrans uint64 `json:"cumulRetrans,omitempty"`
+	// C batch: node profile counters. Durable because a restart must not throw
+	// away weeks of evidence, but each group carries its own ObservedAt so the
+	// restore can drop stale counters (see vaneProfileAgeReset).
+	SuccessCount    uint64    `json:"successCount,omitempty"`
+	FailureCount    uint64    `json:"failureCount,omitempty"`
+	CountersAt      time.Time `json:"countersAt,omitempty"`
+	MaxDownloadRate float64   `json:"maxDownloadRate,omitempty"`
+	MaxRateAt       time.Time `json:"maxRateAt,omitempty"`
+	TotalDuration   int64     `json:"totalDurationMs,omitempty"`
+	DurationCount   uint64    `json:"durationCount,omitempty"`
+	DownloadTotal   uint64    `json:"downloadTotal,omitempty"`
+	TotalsAt        time.Time `json:"totalsAt,omitempty"`
 }
 
 // vanePersistedB2Target carries one target+member pair's B2 telemetry across
@@ -498,13 +510,56 @@ func (s *vaneLearningState) restore(payload []byte) error {
 func restoreVaneNode(node vanePersistedNode, now time.Time) (*vaneNodeState, bool, bool) {
 	tcp, tcpValid, tcpInvalid := restoreVaneMetrics(node.TCP, now)
 	udp, udpValid, udpInvalid := restoreVaneMetrics(node.UDP, now)
-	if !tcpValid && !udpValid {
-		return nil, false, tcpInvalid || udpInvalid
-	}
-	return &vaneNodeState{
+	state := &vaneNodeState{
 		name: node.Name, identity: node.Identity, tcp: tcp, udp: udp, lastObservedAt: node.LastSeen,
 		cumulSent: node.CumulSent, cumulRetrans: node.CumulRetrans,
-	}, true, tcpInvalid || udpInvalid
+	}
+	profileValid, profileInvalid := restoreVaneProfile(state, node, now)
+	if !tcpValid && !udpValid && !profileValid {
+		return nil, false, tcpInvalid || udpInvalid || profileInvalid
+	}
+	return state, true, tcpInvalid || udpInvalid || profileInvalid
+}
+
+// restoreVaneProfile restores the C batch counters. Out-of-domain values are
+// invalid and zeroed (the store never clamps in place), and a group untouched
+// for vaneProfileAgeReset is dropped so an old peak cannot pin a node forever.
+func restoreVaneProfile(state *vaneNodeState, node vanePersistedNode, now time.Time) (bool, bool) {
+	invalid := false
+	fresh := func(at time.Time) bool {
+		return !at.IsZero() && now.Sub(at) < vaneProfileAgeReset
+	}
+	if fresh(node.CountersAt) {
+		state.successCount, state.failureCount, state.countersAt = node.SuccessCount, node.FailureCount, node.CountersAt
+	}
+	if fresh(node.MaxRateAt) {
+		switch {
+		case math.IsNaN(node.MaxDownloadRate) || math.IsInf(node.MaxDownloadRate, 0) || node.MaxDownloadRate < 0:
+			invalid = true
+		case node.MaxDownloadRate > 0:
+			state.maxDownloadRate, state.maxRateAt = node.MaxDownloadRate, node.MaxRateAt
+		}
+	}
+	if fresh(node.TotalsAt) {
+		switch {
+		case node.TotalDuration < 0:
+			invalid = true
+		default:
+			if node.TotalDuration > 0 && node.DurationCount > 0 {
+				state.totalDuration = time.Duration(node.TotalDuration) * time.Millisecond
+				state.durationCount = node.DurationCount
+			}
+			if node.DownloadTotal > 0 {
+				state.downloadTotal = node.DownloadTotal
+			}
+			if state.downloadTotal > 0 || state.durationCount > 0 {
+				state.totalsAt = node.TotalsAt
+			}
+		}
+	}
+	valid := state.successCount+state.failureCount > 0 || state.maxDownloadRate > 0 ||
+		state.durationCount > 0 || state.downloadTotal > 0
+	return valid, invalid
 }
 
 func restoreVaneMetrics(metrics vanePersistedMetrics, now time.Time) (vaneMetrics, bool, bool) {
@@ -711,13 +766,22 @@ func (s *vaneLearningState) snapshotLocked(now time.Time) vaneLearningSnapshot {
 	for _, candidate := range candidates {
 		state := candidate.state
 		nodes = append(nodes, vanePersistedNode{
-			Name:         state.name,
-			Identity:     state.identity,
-			LastSeen:     state.lastObservedAt,
-			TCP:          persistVaneMetrics(state.tcp, now),
-			UDP:          persistVaneMetrics(state.udp, now),
-			CumulSent:    state.cumulSent,
-			CumulRetrans: state.cumulRetrans,
+			Name:            state.name,
+			Identity:        state.identity,
+			LastSeen:        state.lastObservedAt,
+			TCP:             persistVaneMetrics(state.tcp, now),
+			UDP:             persistVaneMetrics(state.udp, now),
+			CumulSent:       state.cumulSent,
+			CumulRetrans:    state.cumulRetrans,
+			SuccessCount:    state.successCount,
+			FailureCount:    state.failureCount,
+			CountersAt:      state.countersAt,
+			MaxDownloadRate: state.maxDownloadRate,
+			MaxRateAt:       state.maxRateAt,
+			TotalDuration:   int64(state.totalDuration / time.Millisecond),
+			DurationCount:   state.durationCount,
+			DownloadTotal:   state.downloadTotal,
+			TotalsAt:        state.totalsAt,
 		})
 	}
 	targetPairs := make([]struct {

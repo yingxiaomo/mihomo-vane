@@ -81,10 +81,9 @@ func TestVaneJitterTracker(t *testing.T) {
 }
 
 func TestVaneJitterScoring(t *testing.T) {
-	t.Run("JITTER-05 five weights sum to one", func(t *testing.T) {
+	t.Run("JITTER-05 ten weights sum to one", func(t *testing.T) {
 		for _, scene := range []vaneScene{vaneSceneDefault, vaneSceneInteractive, vaneSceneMedia, vaneSceneBulk} {
-			c := vaneScoring(scene)
-			require.InDelta(t, 1, c.failureWeight+c.connectWeight+c.responseWeight+c.throughputWeight+c.jitterWeight, 1e-12, scene.String())
+			require.InDelta(t, 1, vaneSceneScoringSum(vaneScoring(scene)), 1e-12, scene.String())
 		}
 	})
 
