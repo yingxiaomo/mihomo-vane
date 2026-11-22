@@ -1,18 +1,12 @@
 package outboundgroup
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/log"
 )
 
@@ -21,7 +15,6 @@ const (
 	vaneDiagnosticsOldestSchema     = 1
 	vaneDiagnosticsRecentEventLimit = 64
 	vaneDiagnosticsRegistryLimit    = 256
-	vaneDiagnosticsPersistInterval  = 30 * time.Second
 
 	// vaneBaselineTokenIDBase offsets baseline reconnect token IDs far away
 	// from the race task ID space (nextTaskID counts up from 1), so a stale
@@ -206,7 +199,6 @@ type VaneDiagnosticsSnapshot struct {
 	Since                    time.Time                 `json:"since"`
 	UpdatedAt                time.Time                 `json:"updatedAt"`
 	PlayerTelemetryAvailable bool                      `json:"playerTelemetryAvailable"`
-	Persistence              VaneDiagnosticPersistence `json:"persistence"`
 	LearningPersistence      VaneLearningPersistence   `json:"learningPersistence"`
 	Counters                 VaneDiagnosticCounters    `json:"counters"`
 	Suppressions             map[string]uint64         `json:"suppressions"`
@@ -222,21 +214,6 @@ type VaneDiagnosticsSnapshot struct {
 // Vane groups.
 type VaneDiagnosticsProvider interface {
 	VaneDiagnostics() VaneDiagnosticsSnapshot
-}
-
-type vaneDiagnosticsStore interface {
-	Load(key string) ([]byte, error)
-	Save(key string, payload []byte) error
-}
-
-type vaneCacheDiagnosticsStore struct{}
-
-func (vaneCacheDiagnosticsStore) Load(key string) ([]byte, error) {
-	return cachefile.Cache().GetVaneDiagnostics(key)
-}
-
-func (vaneCacheDiagnosticsStore) Save(key string, payload []byte) error {
-	return cachefile.Cache().SetVaneDiagnostics(key, payload)
 }
 
 type vaneHandoffToken struct {
@@ -257,34 +234,20 @@ type vaneHandoffToken struct {
 }
 
 type vaneDiagnostics struct {
-	mu              sync.Mutex
-	clock           vaneClock
-	store           vaneDiagnosticsStore
-	storageKey      string
-	revision        uint64
-	lastScheduled   time.Time
-	persistInterval time.Duration
-	persistTimer    *time.Timer
-	snapshotData    VaneDiagnosticsSnapshot
-	retired         bool
-	detached        bool
-	retiring        bool
-	redirect        *vaneDiagnostics
-	lastAccess      atomic.Uint64
-	persistRetryAt  time.Time
+	mu           sync.Mutex
+	clock        vaneClock
+	snapshotData VaneDiagnosticsSnapshot
+	retired      bool
+	detached     bool
+	retiring     bool
+	redirect     *vaneDiagnostics
+	lastAccess   atomic.Uint64
 	// nextBaselineTokenID allocates IDs for baseline reconnect tokens. It
 	// lives far away from the race task ID space (nextTaskID counts up from
 	// 1) so a stale race settlement can never present an ID that matches a
 	// live baseline lease. Sequence-based IDs used to serve this purpose and
 	// collided in the narrow window where the event ring was still short.
 	nextBaselineTokenID uint64
-
-	persistMu         sync.Mutex
-	persistRunning    bool
-	pendingRevision   uint64
-	pendingPayload    []byte
-	processedRevision uint64
-	persistWG         sync.WaitGroup
 
 	// sink captures the [vane] line in tests; nil means the mihomo log.
 	sink      func(vaneDiagnosticRecord)
@@ -398,9 +361,10 @@ type vaneDiagnosticsRegistryState struct {
 
 var vaneDiagnosticsRegistry = vaneDiagnosticsRegistryState{entries: make(map[string]*vaneDiagnostics)}
 
-func vaneDiagnosticsStorageKey(group string) string {
-	sum := sha256.Sum256([]byte(group))
-	return "vane-diag-v1:" + base64.RawURLEncoding.EncodeToString(sum[:])
+// vaneDiagnosticsRegistryKey keeps one counter set alive across a config
+// reload, so a reload does not zero the totals.
+func vaneDiagnosticsRegistryKey(group string) string {
+	return group
 }
 
 func (r *vaneDiagnosticsRegistryState) touch(diagnostics *vaneDiagnostics) {
@@ -426,56 +390,11 @@ func (r *vaneDiagnosticsRegistryState) addLocked(key string, diagnostics *vaneDi
 		}
 		if victim != nil {
 			victim.mu.Lock()
-			victim.retiring = true
-			if victim.persistTimer != nil {
-				victim.persistTimer.Stop()
-				victim.persistTimer = nil
-			}
-			targetRevision := victim.revision
-			if victim.store != nil {
-				victim.schedulePersistLocked(victim.clock.Now().UTC())
-			}
+			victim.retired = true
+			victim.detached = true
 			victim.mu.Unlock()
-
-			for {
-				victim.persistWG.Wait()
-				victim.persistMu.Lock()
-				processedRevision := victim.processedRevision
-				victim.persistMu.Unlock()
-
-				victim.mu.Lock()
-				if victim.store != nil && processedRevision < targetRevision {
-					victim.retiring = false
-					if victim.persistTimer == nil {
-						delay := victim.persistRetryAt.Sub(victim.clock.Now().UTC())
-						if delay <= 0 {
-							delay = victim.persistInterval
-							if delay <= 0 {
-								delay = vaneDiagnosticsPersistInterval
-							}
-						}
-						victim.persistTimer = time.AfterFunc(delay, victim.flushDelayed)
-					}
-					victim.mu.Unlock()
-					return false
-				}
-				if victim.store != nil && processedRevision < victim.revision {
-					targetRevision = victim.revision
-					victim.schedulePersistLocked(victim.clock.Now().UTC())
-					victim.mu.Unlock()
-					continue
-				}
-				victim.retired = true
-				victim.detached = true
-				victim.retiring = false
-				victim.store = nil
-				victim.snapshotData.Persistence.Available = false
-				victim.snapshotData.Persistence.LastError = "diagnostics registry entry evicted"
-				victim.mu.Unlock()
-				delete(r.entries, victimKey)
-				r.current.Delete(victimKey)
-				break
-			}
+			delete(r.entries, victimKey)
+			r.current.Delete(victimKey)
 		}
 	}
 	r.entries[key] = diagnostics
@@ -506,7 +425,7 @@ func (d *vaneDiagnostics) active() *vaneDiagnostics {
 			return d
 		}
 		detached := d.detached
-		storageKey := d.storageKey
+		storageKey := vaneDiagnosticsRegistryKey(d.snapshotData.Group)
 		d.mu.Unlock()
 
 		value, ok := vaneDiagnosticsRegistry.current.Load(storageKey)
@@ -527,46 +446,25 @@ func (d *vaneDiagnostics) active() *vaneDiagnostics {
 }
 
 func sharedVaneDiagnostics(group string, clock vaneClock) *vaneDiagnostics {
-	key := vaneDiagnosticsStorageKey(group)
+	key := vaneDiagnosticsRegistryKey(group)
 	vaneDiagnosticsRegistry.Lock()
 	defer vaneDiagnosticsRegistry.Unlock()
 	if diagnostics := vaneDiagnosticsRegistry.entries[key]; diagnostics != nil {
 		vaneDiagnosticsRegistry.touch(diagnostics)
 		return diagnostics
 	}
-	diagnostics := newVaneDiagnostics(group, clock, vaneCacheDiagnosticsStore{})
-	if !vaneDiagnosticsRegistry.addLocked(key, diagnostics) {
-		diagnostics.disablePersistence("diagnostics registry capacity unavailable")
-	}
+	diagnostics := newVaneDiagnostics(group, clock)
+	vaneDiagnosticsRegistry.addLocked(key, diagnostics)
 	return diagnostics
 }
 
-func (d *vaneDiagnostics) disablePersistence(reason string) {
-	if d == nil {
-		return
-	}
-	d.mu.Lock()
-	if d.persistTimer != nil {
-		d.persistTimer.Stop()
-		d.persistTimer = nil
-	}
-	d.store = nil
-	d.detached = true
-	d.snapshotData.Persistence.Available = false
-	d.snapshotData.Persistence.LastError = reason
-	d.mu.Unlock()
-}
-
-func newVaneDiagnostics(group string, clock vaneClock, store vaneDiagnosticsStore) *vaneDiagnostics {
+func newVaneDiagnostics(group string, clock vaneClock) *vaneDiagnostics {
 	if clock == nil {
 		clock = vaneSystemClock{}
 	}
 	now := clock.Now().UTC()
-	diagnostics := &vaneDiagnostics{
-		clock:           clock,
-		store:           store,
-		storageKey:      vaneDiagnosticsStorageKey(group),
-		persistInterval: vaneDiagnosticsPersistInterval,
+	return &vaneDiagnostics{
+		clock: clock,
 		snapshotData: VaneDiagnosticsSnapshot{
 			SchemaVersion:     VaneDiagnosticsSchemaVersion,
 			Group:             group,
@@ -580,58 +478,7 @@ func newVaneDiagnostics(group string, clock vaneClock, store vaneDiagnosticsStor
 				Exclusions: newVaneGrayExclusions(),
 			},
 		},
-		lastScheduled: now,
 	}
-	if store == nil {
-		diagnostics.snapshotData.Persistence.LastError = "persistence disabled"
-		return diagnostics
-	}
-	payload, loadErr := store.Load(diagnostics.storageKey)
-	if loadErr != nil {
-		diagnostics.snapshotData.Persistence.LastError = loadErr.Error()
-		log.Warnln("Vane: diagnostics persistence unavailable for group %s: %s", group, loadErr.Error())
-		return diagnostics
-	}
-	diagnostics.snapshotData.Persistence.Available = true
-	if len(payload) == 0 {
-		return diagnostics
-	}
-	var restored VaneDiagnosticsSnapshot
-	if err := json.Unmarshal(payload, &restored); err != nil || restored.SchemaVersion < vaneDiagnosticsOldestSchema || restored.SchemaVersion > VaneDiagnosticsSchemaVersion || restored.Group != group {
-		if err != nil {
-			log.Warnln("Vane: ignore invalid diagnostics for group %s: %s", group, err.Error())
-		} else {
-			log.Warnln("Vane: ignore incompatible diagnostics for group %s", group)
-		}
-		return diagnostics
-	}
-	if restored.Suppressions == nil {
-		restored.Suppressions = make(map[string]uint64)
-	}
-	if restored.Rejections == nil {
-		restored.Rejections = make(map[string]uint64)
-	}
-	if restored.ChurnSuppressions == nil {
-		restored.ChurnSuppressions = make(map[string]uint64)
-	}
-	restored.GrayFailure.Exclusions = normalizeVaneGrayExclusions(restored.GrayFailure.Exclusions)
-	// Rolling gray-failure buckets are generation-local. Persist only the
-	// cumulative counters and exclusion totals.
-	restored.GrayFailure.Series = nil
-	restored.GrayFailure.Enabled = false
-	if len(restored.RecentEvents) > vaneDiagnosticsRecentEventLimit {
-		restored.RecentEvents = append([]VaneDiagnosticEvent(nil), restored.RecentEvents[len(restored.RecentEvents)-vaneDiagnosticsRecentEventLimit:]...)
-	}
-	restored.SchemaVersion = VaneDiagnosticsSchemaVersion
-	restored.Config = VaneDiagnosticConfig{}
-	restored.Runtime = VaneDiagnosticRuntime{}
-	restored.LearningPersistence = VaneLearningPersistence{}
-	restored.PlayerTelemetryAvailable = false
-	restored.Persistence.Available = true
-	restored.Persistence.LastError = ""
-	diagnostics.snapshotData = restored
-	diagnostics.lastScheduled = now
-	return diagnostics
 }
 
 func (d *vaneDiagnostics) record(record vaneDiagnosticRecord) {
@@ -781,7 +628,6 @@ func (d *vaneDiagnostics) countProbeInvalidReasonLocked(reason string) {
 func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnosticEvent {
 	now := d.clock.Now().UTC()
 	d.snapshotData.UpdatedAt = now
-	d.revision++
 
 	switch record.kind {
 	case "media-flow-started":
@@ -913,9 +759,6 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		event = d.appendEventLocked(record, now)
 	}
 	d.emitLocked(record, now)
-	if d.store != nil && !d.retiring {
-		d.queuePersistenceLocked(now, record.force)
-	}
 	return event
 }
 
@@ -960,225 +803,6 @@ func (d *vaneDiagnostics) appendEventLocked(record vaneDiagnosticRecord, now tim
 		d.snapshotData.RecentEvents = d.snapshotData.RecentEvents[:vaneDiagnosticsRecentEventLimit]
 	}
 	return event
-}
-
-func (d *vaneDiagnostics) schedulePersistLocked(now time.Time) {
-	if d.persistTimer != nil {
-		d.persistTimer.Stop()
-		d.persistTimer = nil
-	}
-	d.persistRetryAt = time.Time{}
-	payload, err := json.Marshal(d.snapshotData)
-	if err != nil {
-		log.Warnln("Vane: marshal diagnostics for group %s failed: %s", d.snapshotData.Group, err.Error())
-		return
-	}
-	revision := d.revision
-	d.lastScheduled = now
-	d.persistMu.Lock()
-	if revision > d.pendingRevision {
-		d.pendingRevision = revision
-		d.pendingPayload = payload
-	}
-	if !d.persistRunning {
-		d.persistRunning = true
-		d.persistWG.Add(1)
-		go d.persistLoop()
-	}
-	d.persistMu.Unlock()
-}
-
-func (d *vaneDiagnostics) queuePersistenceLocked(now time.Time, force bool) {
-	interval := d.persistInterval
-	if interval <= 0 {
-		interval = vaneDiagnosticsPersistInterval
-	}
-	if d.persistRetryAt.After(now) {
-		if d.persistTimer == nil {
-			d.persistTimer = time.AfterFunc(d.persistRetryAt.Sub(now), d.flushDelayed)
-		}
-		return
-	}
-	elapsed := now.Sub(d.lastScheduled)
-	if elapsed < 0 {
-		elapsed = 0
-	}
-	if force || elapsed >= interval {
-		d.schedulePersistLocked(now)
-		return
-	}
-	if d.persistTimer == nil {
-		d.persistTimer = time.AfterFunc(interval-elapsed, d.flushDelayed)
-	}
-}
-
-func (d *vaneDiagnostics) flushDelayed() {
-	if d == nil {
-		return
-	}
-	d.mu.Lock()
-	d.persistTimer = nil
-	if d.store != nil && !d.retired && !d.retiring {
-		d.schedulePersistLocked(d.clock.Now().UTC())
-	}
-	d.mu.Unlock()
-}
-
-func (d *vaneDiagnostics) persistLoop() {
-	defer d.persistWG.Done()
-	for {
-		d.persistMu.Lock()
-		if d.pendingRevision == 0 {
-			d.persistRunning = false
-			d.persistMu.Unlock()
-			return
-		}
-		revision := d.pendingRevision
-		payload := d.pendingPayload
-		d.pendingRevision = 0
-		d.pendingPayload = nil
-		if revision <= d.processedRevision {
-			d.persistMu.Unlock()
-			continue
-		}
-		d.persistMu.Unlock()
-		err := d.store.Save(d.storageKey, payload)
-		if err == nil {
-			d.persistMu.Lock()
-			if revision > d.processedRevision {
-				d.processedRevision = revision
-			}
-			d.persistMu.Unlock()
-		}
-
-		now := d.clock.Now().UTC()
-		d.mu.Lock()
-		if err != nil {
-			d.persistMu.Lock()
-			if revision > d.pendingRevision {
-				d.pendingRevision = revision
-				d.pendingPayload = payload
-			}
-			d.persistRunning = false
-			d.persistMu.Unlock()
-			d.snapshotData.Persistence.Available = false
-			d.snapshotData.Persistence.LastError = err.Error()
-			log.Warnln("Vane: persist diagnostics for group %s failed: %s", d.snapshotData.Group, err.Error())
-			interval := d.persistInterval
-			if interval <= 0 {
-				interval = vaneDiagnosticsPersistInterval
-			}
-			d.persistRetryAt = now.Add(interval)
-			if d.persistTimer == nil && !d.retired && !d.retiring {
-				d.persistTimer = time.AfterFunc(interval, d.flushDelayed)
-			}
-		} else {
-			d.persistRetryAt = time.Time{}
-			d.snapshotData.Persistence.Available = true
-			d.snapshotData.Persistence.LastSuccessAt = now
-			d.snapshotData.Persistence.LastError = ""
-		}
-		d.mu.Unlock()
-		if err != nil {
-			return
-		}
-	}
-}
-
-func (d *vaneDiagnostics) waitPersistence() {
-	if d == nil {
-		return
-	}
-	d.persistWG.Wait()
-}
-
-// flushForShutdown forces one persist and waits until the store has caught up
-// with the current revision — the same wait the registry eviction uses. The
-// ctx bounds the wait for the shutdown caller.
-func (d *vaneDiagnostics) flushForShutdown(ctx context.Context) error {
-	if d == nil {
-		return nil
-	}
-	for {
-		d.mu.Lock()
-		if d.store == nil || d.retired || d.retiring {
-			d.mu.Unlock()
-			return nil
-		}
-		targetRevision := d.revision
-		d.schedulePersistLocked(d.clock.Now().UTC())
-		d.mu.Unlock()
-		for {
-			d.waitPersistence()
-			d.persistMu.Lock()
-			processedRevision := d.processedRevision
-			d.persistMu.Unlock()
-			if processedRevision >= targetRevision {
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			d.mu.Lock()
-			revoked := d.store == nil || d.retired || d.retiring
-			retryAt := d.persistRetryAt
-			if !revoked && !retryAt.After(d.clock.Now()) {
-				// No scheduled retry (the last persist loop exited without
-				// one): schedule the next attempt directly.
-				d.schedulePersistLocked(d.clock.Now().UTC())
-			}
-			d.mu.Unlock()
-			if revoked {
-				return nil
-			}
-			// P2 (audit 2026-11-22): a persistRetryAt from a failed save means
-			// the store is failing fast — wait out the backoff instead of
-			// hot-looping marshal+Save for the whole shutdown window.
-			if !retryAt.After(d.clock.Now()) {
-				continue
-			}
-			remaining := retryAt.Sub(d.clock.Now().UTC())
-			if remaining > 0 {
-				timer := time.NewTimer(remaining)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return ctx.Err()
-				case <-timer.C:
-				}
-			}
-		}
-	}
-}
-
-// FlushVaneDiagnosticsContext drains the latest durable revision for every
-// registered diagnostics group — the counterpart of
-// FlushVaneLearningStatesContext. Shutdown calls it so the last persist
-// interval's counters survive a restart.
-func FlushVaneDiagnosticsContext(ctx context.Context) error {
-	vaneDiagnosticsRegistry.Lock()
-	diagnostics := make([]*vaneDiagnostics, 0, len(vaneDiagnosticsRegistry.entries))
-	for _, d := range vaneDiagnosticsRegistry.entries {
-		diagnostics = append(diagnostics, d)
-	}
-	vaneDiagnosticsRegistry.Unlock()
-
-	results := make(chan error, len(diagnostics))
-	for _, d := range diagnostics {
-		go func(d *vaneDiagnostics) { results <- d.flushForShutdown(ctx) }(d)
-	}
-	var result error
-	for range diagnostics {
-		select {
-		case err := <-results:
-			result = errors.Join(result, err)
-		case <-ctx.Done():
-			return errors.Join(result, ctx.Err())
-		}
-	}
-	return result
 }
 
 func (d *vaneDiagnostics) snapshot() VaneDiagnosticsSnapshot {

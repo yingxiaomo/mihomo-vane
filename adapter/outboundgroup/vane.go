@@ -418,7 +418,7 @@ func newVaneWithClock(
 		racing:             vaneRacingConfig{mode: vaneRacingOn},
 		racingRuntime:      newVaneRacingRuntime(),
 		explorationSince:   clock.Now().UTC(),
-		diagnostics:        newVaneDiagnostics(option.Name, clock, nil),
+		diagnostics:        newVaneDiagnostics(option.Name, clock),
 		anchors:            make(map[vaneAnchorKey]vaneAnchor),
 		cooldowns:          make(map[vaneCooldownKey]time.Time),
 		mediaHints:         make(map[vaneMediaTargetKey]vaneMediaHint),

@@ -866,26 +866,21 @@ func TestVaneDiagnosticsSnapshotIsReadOnly(t *testing.T) {
 		"reads must not consume the handoff token or change the preferred member")
 }
 
-// RACE-DIAG-003: racing counters survive a reload and the event ring stays bounded.
-func TestVaneRacingCountersPersistAndRingStaysBounded(t *testing.T) {
+// RACE-DIAG-003: racing counters accumulate and the event ring stays bounded.
+func TestVaneRacingCountersAndRingStaysBounded(t *testing.T) {
 	clock := newVaneConnTestClock()
-	store := newVaneDiagnosticsTestStore()
-	diagnostics := newVaneDiagnostics("vane-race", clock, store)
-	diagnostics.persistInterval = 10 * time.Millisecond
+	diagnostics := newVaneDiagnostics("vane-race", clock)
 	diagnostics.record(vaneDiagnosticRecord{kind: "race-budget-denied", target: "rr.googlevideo.com", bucket: "googlevideo.com", port: 443})
 	for index := 0; index < vaneDiagnosticsRecentEventLimit+40; index++ {
 		diagnostics.record(vaneDiagnosticRecord{kind: "race-no-winner", reason: fmt.Sprintf("reason-%02d", index), target: "rr.googlevideo.com", bucket: "googlevideo.com", port: 443})
 	}
 	diagnostics.record(vaneDiagnosticRecord{kind: "race-no-winner", reason: "stale-generation", target: "rr.googlevideo.com", bucket: "googlevideo.com", port: 443})
-	require.Eventually(t, func() bool { return store.writeCount() > 0 }, time.Second, time.Millisecond)
-	diagnostics.waitPersistence()
 
-	restored := newVaneDiagnostics("vane-race", clock, store).snapshot()
-	require.Equal(t, uint64(1), restored.Counters.RaceBudgetDenied)
-	require.Equal(t, uint64(vaneDiagnosticsRecentEventLimit+41), restored.Counters.RaceNoWinner)
-	require.Equal(t, uint64(1), restored.Counters.RaceStaleGeneration)
-	require.LessOrEqual(t, len(restored.RecentEvents), vaneDiagnosticsRecentEventLimit)
-	require.Equal(t, "stale-generation", restored.RecentEvents[len(restored.RecentEvents)-1].Reason,
+	snapshot := diagnostics.snapshot()
+	require.Equal(t, uint64(1), snapshot.Counters.RaceBudgetDenied)
+	require.Equal(t, uint64(vaneDiagnosticsRecentEventLimit+41), snapshot.Counters.RaceNoWinner)
+	require.LessOrEqual(t, len(snapshot.RecentEvents), vaneDiagnosticsRecentEventLimit)
+	require.Equal(t, "stale-generation", snapshot.RecentEvents[len(snapshot.RecentEvents)-1].Reason,
 		"the newest event must survive ring rotation")
 }
 

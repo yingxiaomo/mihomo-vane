@@ -31,7 +31,7 @@ func vaneGrayTestMetadata(network C.NetWork) *C.Metadata {
 
 func newVaneGrayTestObserver() (*vaneGrayObserver, *vaneConnTestClock, *vaneDiagnostics) {
 	clock := newVaneConnTestClock()
-	diagnostics := newVaneDiagnostics("gray-test", clock, nil)
+	diagnostics := newVaneDiagnostics("gray-test", clock)
 	return newVaneGrayObserver(true, clock, diagnostics), clock, diagnostics
 }
 
@@ -792,34 +792,6 @@ func vanePolicySnapshotForGrayTest(group *Vane) vaneGrayPolicySnapshot {
 	}
 	group.churnMu.Unlock()
 	return result
-}
-
-func TestVaneGrayDiagnosticsPersistenceAndV1Compatibility(t *testing.T) {
-	clock := newVaneConnTestClock()
-	store := newVaneDiagnosticsTestStore()
-	diagnostics := newVaneDiagnostics("gray-persist", clock, store)
-	diagnostics.record(vaneDiagnosticRecord{kind: "gray-attempt-succeeded"})
-	diagnostics.record(vaneDiagnosticRecord{kind: "gray-attempt-excluded", reason: "neutral-outcome", force: true})
-	diagnostics.waitPersistence()
-
-	restored := newVaneDiagnostics("gray-persist", clock, store).snapshot()
-	require.Equal(t, uint64(1), restored.GrayFailure.Counters.AttemptEligible)
-	require.Equal(t, uint64(1), restored.GrayFailure.Counters.AttemptSucceeded)
-	require.Equal(t, uint64(1), restored.GrayFailure.Exclusions.Attempt["neutral-outcome"])
-	require.Empty(t, restored.GrayFailure.Series)
-	require.Equal(t, VaneDiagnosticsSchemaVersion, restored.SchemaVersion)
-
-	oldStore := newVaneDiagnosticsTestStore()
-	oldPayload := []byte(`{"schemaVersion":1,"group":"gray-old","since":"2026-11-15T00:00:00Z","updatedAt":"2026-11-15T00:00:00Z","counters":{"mediaFlows":7},"suppressions":{"legacy":2},"recentEvents":[{"sequence":3,"time":"2026-11-15T00:00:00Z","kind":"legacy-event"}]}`)
-	require.NoError(t, oldStore.Save(vaneDiagnosticsStorageKey("gray-old"), oldPayload))
-	old := newVaneDiagnostics("gray-old", clock, oldStore).snapshot()
-	require.Equal(t, VaneDiagnosticsSchemaVersion, old.SchemaVersion)
-	require.Equal(t, uint64(7), old.Counters.MediaFlows)
-	require.Equal(t, uint64(2), old.Suppressions["legacy"])
-	require.Equal(t, "legacy-event", old.RecentEvents[0].Kind)
-	require.NotNil(t, old.GrayFailure.Exclusions.Attempt)
-	require.NotNil(t, old.GrayFailure.Exclusions.Close)
-	require.Zero(t, old.GrayFailure.Counters.AttemptEligible)
 }
 
 func TestVaneDiagnosticsReadDoesNotPruneExpiredChurnState(t *testing.T) {

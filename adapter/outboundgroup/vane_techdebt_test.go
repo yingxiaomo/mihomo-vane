@@ -9,11 +9,9 @@ package outboundgroup
 // (SAMPLE).
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"net/url"
-	"sync"
+	"errors"
 	"testing"
 	"time"
 
@@ -468,44 +466,6 @@ func clockZero() time.Time { return time.Unix(0, 0) }
 
 var _ = url.Parse
 
-// §G: the shutdown flush forces a persist and waits for the store to catch up.
-func TestVaneFlushDiagnosticsContextPersists(t *testing.T) {
-	store := newVaneDiagnosticsTestStore()
-	clock := newVaneConnTestClock()
-	diagnostics := newVaneDiagnostics("flush-test", clock, store)
-	key := vaneDiagnosticsStorageKey("flush-test")
-	vaneDiagnosticsRegistry.Lock()
-	previous := vaneDiagnosticsRegistry.entries[key]
-	vaneDiagnosticsRegistry.entries[key] = diagnostics
-	vaneDiagnosticsRegistry.Unlock()
-	t.Cleanup(func() {
-		vaneDiagnosticsRegistry.Lock()
-		if previous != nil {
-			vaneDiagnosticsRegistry.entries[key] = previous
-		} else {
-			delete(vaneDiagnosticsRegistry.entries, key)
-		}
-		vaneDiagnosticsRegistry.Unlock()
-	})
-
-	// FLUSH-01: a recorded counter survives the flush into the store.
-	diagnostics.record(vaneDiagnosticRecord{kind: "throughput-sample", bps: 8_000_000})
-	require.NoError(t, FlushVaneDiagnosticsContext(context.Background()))
-	require.Positive(t, store.writeCount(), "the flush must persist the recorded counters")
-
-	// FLUSH-02: an empty registry is a no-op, not an error.
-	vaneDiagnosticsRegistry.Lock()
-	restored := vaneDiagnosticsRegistry.entries
-	vaneDiagnosticsRegistry.entries = make(map[string]*vaneDiagnostics)
-	vaneDiagnosticsRegistry.Unlock()
-	t.Cleanup(func() {
-		vaneDiagnosticsRegistry.Lock()
-		vaneDiagnosticsRegistry.entries = restored
-		vaneDiagnosticsRegistry.Unlock()
-	})
-	require.NoError(t, FlushVaneDiagnosticsContext(context.Background()))
-}
-
 // §H: a full learning registry evicts its least-recently-accessed entry,
 // flush-first, instead of silently dropping the new group's persistence.
 func TestVaneLearningRegistryEvictsOldestWhenFull(t *testing.T) {
@@ -854,57 +814,6 @@ func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
 	require.False(t, survivorNow.evicting, "the eviction gave up and cleared the flag")
 	again := acquireVaneLearningState("survivor", clock, time.Hour, 64)
 	require.Same(t, survivor, again, "the survivor is handed out again after the flag clears")
-}
-
-// P2 (audit 2026-11-22): flushForShutdown honors the persistRetryAt backoff —
-// a fast-failing store gets one attempt, not a busy loop.
-type vaneDiagnosticsCountingFailStore struct {
-	mu       sync.Mutex
-	attempts int
-}
-
-func (s *vaneDiagnosticsCountingFailStore) Load(string) ([]byte, error) { return nil, nil }
-
-func (s *vaneDiagnosticsCountingFailStore) Save(string, []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.attempts++
-	return errors.New("disk full")
-}
-
-func TestVaneFlushDiagnosticsContextBacksOff(t *testing.T) {
-	store := &vaneDiagnosticsCountingFailStore{}
-	clock := newVaneConnTestClock()
-	diagnostics := newVaneDiagnostics("backoff-test", clock, store)
-	key := vaneDiagnosticsStorageKey("backoff-test")
-	vaneDiagnosticsRegistry.Lock()
-	previous := vaneDiagnosticsRegistry.entries[key]
-	vaneDiagnosticsRegistry.entries[key] = diagnostics
-	vaneDiagnosticsRegistry.Unlock()
-	t.Cleanup(func() {
-		vaneDiagnosticsRegistry.Lock()
-		if previous != nil {
-			vaneDiagnosticsRegistry.entries[key] = previous
-		} else {
-			delete(vaneDiagnosticsRegistry.entries, key)
-		}
-		vaneDiagnosticsRegistry.Unlock()
-	})
-
-	diagnostics.record(vaneDiagnosticRecord{kind: "throughput-sample", bps: 8_000_000})
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	err := FlushVaneDiagnosticsContext(ctx)
-	elapsed := time.Since(start)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Less(t, elapsed, 2*time.Second, "the flush must end with the ctx, not run past it")
-	// The failure is bounded: the waitPersistence/retry loop must have made
-	// only a handful of Save attempts in the 300ms window, not thousands.
-	store.mu.Lock()
-	attempts := store.attempts
-	store.mu.Unlock()
-	require.LessOrEqual(t, attempts, 5, "the backoff must prevent hot-looping the failing store")
 }
 
 // COOLDOWN-STARVE-01: the reconnect cooldown armed by an earlier commit blocks a

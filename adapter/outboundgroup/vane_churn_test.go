@@ -208,26 +208,6 @@ func TestVaneChurnShadowProductionDialPathExcludesInternalFlow(t *testing.T) {
 	require.Equal(t, uint64(vaneChurnLimit), snapshot.ChurnSuppressions["internal-flow"])
 }
 
-func TestVaneChurnShadowPersistsDiagnostics(t *testing.T) {
-	clock := newVaneConnTestClock()
-	store := newVaneDiagnosticsTestStore()
-	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true))
-	group.diagnostics = newVaneDiagnostics(group.Name(), clock, store)
-	metadata := &C.Metadata{Host: "api.example.com", DstPort: 443, NetWork: C.TCP}
-	observation := vaneConnectionCloseObservation{WrotePayload: true, Age: time.Second}
-	group.observeChurnClose("alpha", &C.Metadata{Host: "doh.pub", DstPort: 443, NetWork: C.TCP}, observation)
-	for i := 0; i < vaneChurnLimit; i++ {
-		group.observeChurnClose("alpha", metadata, observation)
-	}
-
-	group.diagnostics.waitPersistence()
-	restored := newVaneDiagnostics(group.Name(), clock, store).snapshot()
-	require.Equal(t, uint64(vaneChurnLimit), restored.Counters.ChurnCandidates)
-	require.Equal(t, uint64(1), restored.Counters.ChurnSuspected)
-	require.Equal(t, uint64(1), restored.ChurnSuppressions["dns-bootstrap"])
-	require.Equal(t, "churn-suspected", restored.RecentEvents[len(restored.RecentEvents)-1].Kind)
-}
-
 func TestVaneObservedConnCloseObservationIsExactlyOnce(t *testing.T) {
 	clock := newVaneConnTestClock()
 	underlying := &vaneConnTestConn{reads: []vaneConnTestRead{{payload: []byte("reply")}}}

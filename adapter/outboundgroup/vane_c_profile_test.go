@@ -223,3 +223,22 @@ func TestVanePersistProfileRoundTrip(t *testing.T) {
 	require.Equal(t, 600*time.Second, restored.totalDuration)
 	require.Equal(t, uint64(500<<20), restored.downloadTotal)
 }
+
+// SCORE-COST-01: the three new cost curves keep their anchor semantics.
+func TestVaneProfileCostCurves(t *testing.T) {
+	require.Zero(t, vaneLossCost(0))
+	require.Zero(t, vaneLossCost(0.01))
+	require.Equal(t, 1.0, vaneLossCost(0.05))
+	require.Equal(t, 1.0, vaneLossCost(0.5))
+	require.InDelta(t, 0.5, vaneLossCost(0.03), 1e-9)
+
+	require.Equal(t, 1.0, vaneDurationCost(1, 10, 300))
+	require.Zero(t, vaneDurationCost(600, 10, 300))
+	require.InDelta(t, 0.5, vaneDurationCost(155, 10, 300), 1e-9)
+
+	require.Equal(t, 1.0, vaneDownloadTotalCost(5))
+	require.Zero(t, vaneDownloadTotalCost(9))
+	require.InDelta(t, 0.5, vaneDownloadTotalCost(7), 1e-9)
+}
+
+

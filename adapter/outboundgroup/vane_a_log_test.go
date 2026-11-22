@@ -29,7 +29,7 @@ func collectVaneLogs(t *testing.T, sub <-chan log.Event, wait time.Duration) []l
 // order, so `grep '[vane]'` answers "why did it not switch".
 func TestVaneLogTag(t *testing.T) {
 	clock := newVaneConnTestClock()
-	diagnostics := newVaneDiagnostics("log-test", clock, nil)
+	diagnostics := newVaneDiagnostics("log-test", clock)
 	sub := log.Subscribe()
 	defer log.UnSubscribe(sub)
 
@@ -55,7 +55,7 @@ func TestVaneLogTag(t *testing.T) {
 // LOG-VANE-TAG-02: a committed handoff logs from and to.
 func TestVaneLogTagHandoff(t *testing.T) {
 	clock := newVaneConnTestClock()
-	diagnostics := newVaneDiagnostics("log-test", clock, nil)
+	diagnostics := newVaneDiagnostics("log-test", clock)
 	sub := log.Subscribe()
 	defer log.UnSubscribe(sub)
 
@@ -73,7 +73,7 @@ func TestVaneLogTagHandoff(t *testing.T) {
 // how "why not switched" is diagnosed.
 func TestVaneLogDedup(t *testing.T) {
 	clock := newVaneConnTestClock()
-	diagnostics := newVaneDiagnostics("log-test", clock, nil)
+	diagnostics := newVaneDiagnostics("log-test", clock)
 	sub := log.Subscribe()
 	defer log.UnSubscribe(sub)
 
@@ -105,7 +105,7 @@ func TestVaneLogDedup(t *testing.T) {
 // event itself only goes to the log.
 func TestVaneLogCountersStay(t *testing.T) {
 	clock := newVaneConnTestClock()
-	diagnostics := newVaneDiagnostics("log-test", clock, nil)
+	diagnostics := newVaneDiagnostics("log-test", clock)
 	diagnostics.record(vaneDiagnosticRecord{kind: "handoff-committed"})
 	diagnostics.record(vaneDiagnosticRecord{kind: "handoff-improved"})
 	diagnostics.record(vaneDiagnosticRecord{kind: "pick-probe-success", totalBytes: 1024})
