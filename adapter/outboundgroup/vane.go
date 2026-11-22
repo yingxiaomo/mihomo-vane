@@ -97,6 +97,11 @@ type vaneNodeState struct {
 // counters are dropped so an old peak cannot pin a node forever.
 const vaneProfileAgeReset = 7 * 24 * time.Hour
 
+// vaneCumulDecayTauSeconds is the time constant of the cumulative-loss decay.
+// Seven days keeps the effective window the same order as vaneProfileAgeReset,
+// which drops the pair outright once it expires.
+const vaneCumulDecayTauSeconds = 7 * 24 * 3600
+
 func (s *vaneNodeState) recordSample(now time.Time, success bool) {
 	if success {
 		s.successCount++
@@ -117,7 +122,9 @@ func (s *vaneNodeState) recordMaxRate(now time.Time, bitsPerSecond float64) {
 }
 
 func (s *vaneNodeState) profileFresh(now time.Time, at time.Time) bool {
-	return !at.IsZero() && now.Sub(at) < vaneProfileAgeReset
+	// A timestamp from the future is not evidence of freshness: a clock jump
+	// must not pin a counter that would otherwise have expired.
+	return !at.IsZero() && !at.After(now) && now.Sub(at) < vaneProfileAgeReset
 }
 
 // cumulLossRate is the node's lifetime TCP retransmission ratio. ok is false
@@ -1157,7 +1164,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		if state == nil {
 			key := vaneLearningNodeKey(proxy.Name(), identity)
 			state = a.learning.nodes[key]
-			if state != nil && now.Sub(state.lastObservedAt) >= a.stateTTL {
+			if state != nil && (state.lastObservedAt.After(now) || now.Sub(state.lastObservedAt) >= a.stateTTL) {
 				if commit {
 					a.deleteLearningNodeLocked(key, state)
 				}
@@ -1606,6 +1613,22 @@ func (a *Vane) recordCumulativeLossIdentity(candidate, identity string, nodeEpoc
 	a.mu.Lock()
 	a.learning.mu.Lock()
 	if state := a.ensureNodeIdentityEpochLocked(candidate, identity, nodeEpoch, now); state != nil {
+		if !state.cumulAt.IsZero() {
+			elapsed := now.Sub(state.cumulAt)
+			switch {
+			case elapsed >= vaneProfileAgeReset:
+				// Silent for a full window: the old counters are void, exactly
+				// like the restore path.
+				state.cumulSent, state.cumulRetrans = 0, 0
+			case elapsed > 0:
+				// Round, never truncate: booking happens once per closed socket,
+				// so one-sided truncation erodes the counters by percent per day.
+				// A clock rollback (elapsed < 0) falls through untouched.
+				decay := math.Exp(-elapsed.Seconds() / vaneCumulDecayTauSeconds)
+				state.cumulSent = uint64(math.Round(float64(state.cumulSent) * decay))
+				state.cumulRetrans = uint64(math.Round(float64(state.cumulRetrans) * decay))
+			}
+		}
 		state.cumulSent += observation.SegsOut
 		state.cumulRetrans += observation.RetransSegs
 		state.cumulAt = now
@@ -1827,7 +1850,7 @@ func (a *Vane) pruneLocked(now time.Time, active []C.Proxy) {
 		if _, ok := activeKeys[key]; ok {
 			continue
 		}
-		if now.Sub(state.lastObservedAt) >= a.stateTTL {
+		if state.lastObservedAt.After(now) || now.Sub(state.lastObservedAt) >= a.stateTTL {
 			a.deleteLearningNodeLocked(key, state)
 		}
 	}

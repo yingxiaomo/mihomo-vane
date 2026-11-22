@@ -177,7 +177,7 @@ func TestVaneCumulativeLossRestoreRespectsAge(t *testing.T) {
 }
 
 // CUMUL-DECAY-04: booking new counters refreshes the timestamp, so an active
-// node never decays out from under the gate.
+// node's old loss history keeps decaying instead of expiring in one step.
 func TestVaneCumulativeLossTimestampRefreshes(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)

@@ -521,7 +521,8 @@ func restoreVaneNode(node vanePersistedNode, now time.Time) (*vaneNodeState, boo
 	}
 	// E: the cumulative loss pair is only restored while fresh; stale counters
 	// are dropped entirely so a past lossy phase cannot label the node forever.
-	if !node.CumulObservedAt.IsZero() && now.Sub(node.CumulObservedAt) < vaneProfileAgeReset {
+	if !node.CumulObservedAt.IsZero() && !node.CumulObservedAt.After(now) &&
+		now.Sub(node.CumulObservedAt) < vaneProfileAgeReset {
 		state.cumulSent, state.cumulRetrans = node.CumulSent, node.CumulRetrans
 		state.cumulAt = node.CumulObservedAt
 	}
@@ -538,7 +539,7 @@ func restoreVaneNode(node vanePersistedNode, now time.Time) (*vaneNodeState, boo
 func restoreVaneProfile(state *vaneNodeState, node vanePersistedNode, now time.Time) (bool, bool) {
 	invalid := false
 	fresh := func(at time.Time) bool {
-		return !at.IsZero() && now.Sub(at) < vaneProfileAgeReset
+		return !at.IsZero() && !at.After(now) && now.Sub(at) < vaneProfileAgeReset
 	}
 	if fresh(node.CountersAt) {
 		state.successCount, state.failureCount, state.countersAt = node.SuccessCount, node.FailureCount, node.CountersAt
@@ -554,7 +555,8 @@ func restoreVaneProfile(state *vaneNodeState, node vanePersistedNode, now time.T
 	if fresh(node.LatencyAt) && node.LatencySamples > 0 && node.LatencyMs > 0 &&
 		!math.IsNaN(node.LatencyMs) && !math.IsInf(node.LatencyMs, 0) {
 		state.latencyMs, state.latencySamples, state.latencyAt = node.LatencyMs, node.LatencySamples, node.LatencyAt
-	} else if node.LatencyMs < 0 || math.IsNaN(node.LatencyMs) || math.IsInf(node.LatencyMs, 0) {
+	} else if node.LatencyMs < 0 || math.IsNaN(node.LatencyMs) || math.IsInf(node.LatencyMs, 0) ||
+		(node.LatencyMs == 0 && node.LatencySamples > 0) {
 		invalid = true
 	}
 	if fresh(node.TotalsAt) {

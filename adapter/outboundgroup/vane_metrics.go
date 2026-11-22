@@ -420,8 +420,12 @@ func vaneSpec(kind vaneMetricKind) vaneMetricSpec {
 	case vaneMetricJitter:
 		return vaneMetricSpec{5 * time.Minute, 2 * time.Hour, 6, 0.55}
 	case vaneMetricLoss:
+		// halfLife/confidenceK unused: this dimension uses the 7-day profile
+		// window and computes confidence inline (cumulSent/1000).
 		return vaneMetricSpec{10 * time.Minute, 6 * time.Hour, 1000, 0.50}
 	case vaneMetricLatency:
+		// halfLife/confidenceK unused: this dimension uses the 7-day profile
+		// window and computes confidence inline (latencySamples/10).
 		return vaneMetricSpec{10 * time.Minute, 6 * time.Hour, 10, 0.50}
 	case vaneMetricSuccess:
 		return vaneMetricSpec{2 * time.Minute, 30 * time.Minute, 10, 0.50}
