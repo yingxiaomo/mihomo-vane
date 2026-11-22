@@ -212,6 +212,9 @@ type vaneThroughputObservation struct {
 	LossSupported    bool
 	Latency          time.Duration
 	LatencySupported bool
+	// synthetic marks a window the watchdog invented for a stalled flow, not one
+	// the connection measured.
+	synthetic bool
 }
 
 // vaneConnectionCloseObservation describes only locally observable
@@ -612,7 +615,7 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 		if delivered || directPolicy || shadowObserve {
 			observation.Delivered = delivered
 			if action := c.onWindow(observation); action != nil {
-				if delivered {
+				if vaneActionIsImmediate(observation) {
 					c.requestAbort(action)
 				} else {
 					c.mu.Lock()

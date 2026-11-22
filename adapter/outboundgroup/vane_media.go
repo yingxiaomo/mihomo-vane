@@ -394,10 +394,15 @@ func (f *vaneMediaFlow) observeSyntheticStall(now time.Time) {
 	synthetic := vaneThroughputObservation{
 		BitsPerSecond: 1,
 		untrusted:     true,
+		synthetic:     true,
 		TotalBytes:    last.TotalBytes,
 		Age:           last.Age + silence,
 	}
-	f.observe(synthetic)
+	// The watchdog used to drop the action observe() returned, so a stalled
+	// flow's immediate plan (knownGood baseline) never ran at all.
+	if action := f.observe(synthetic); action != nil {
+		f.submitPolicyAction(action, vaneActionIsImmediate(synthetic))
+	}
 }
 
 func (f *vaneMediaFlow) failHandoff(reason string) {
@@ -445,6 +450,13 @@ func (f *vaneMediaFlow) setPolicySubmitter(submitter func(vanePolicyAction, bool
 	f.mu.Lock()
 	f.policySubmitter = submitter
 	f.mu.Unlock()
+}
+
+// vaneActionIsImmediate: a synthetic (watchdog) window means the flow stopped
+// reading, so parking its action would wait for a read that never comes — the
+// "found a better node and never switched" stall.
+func vaneActionIsImmediate(sample vaneThroughputObservation) bool {
+	return sample.Delivered || sample.synthetic
 }
 
 func (f *vaneMediaFlow) submitPolicyAction(action vanePolicyAction, delivered bool) {
@@ -760,7 +772,7 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 			bps: result.lowerBoundBPS, previousBPS: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
 			age: sample.Age, lowWindows: lowWindows,
 		})
-		f.submitPolicyAction(f.policyActionForPlan(plan, sample, lowWindows, true), sample.Delivered)
+		f.submitPolicyAction(f.policyActionForPlan(plan, sample, lowWindows, true), vaneActionIsImmediate(sample))
 	}, func() {
 		f.clearRaceToken(token)
 	})
