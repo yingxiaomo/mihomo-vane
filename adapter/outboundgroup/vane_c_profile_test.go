@@ -240,5 +240,3 @@ func TestVaneProfileCostCurves(t *testing.T) {
 	require.Zero(t, vaneDownloadTotalCost(9))
 	require.InDelta(t, 0.5, vaneDownloadTotalCost(7), 1e-9)
 }
-
-

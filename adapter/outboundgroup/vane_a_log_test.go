@@ -1,6 +1,7 @@
 package outboundgroup
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,14 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func collectVaneLogs(t *testing.T, sub <-chan log.Event, wait time.Duration) []log.Event {
+// uniqueVaneLogTarget gives each case its own target, so a [vane] line from a
+// concurrent test can never be counted as ours: the log is process-global.
+func uniqueVaneLogTarget(t *testing.T, name string) string {
+	t.Helper()
+	return fmt.Sprintf("%s-%d.googlevideo.com", name, time.Now().UnixNano())
+}
+
+func collectVaneLogs(t *testing.T, sub <-chan log.Event, target string, wait time.Duration) []log.Event {
 	t.Helper()
 	var events []log.Event
 	deadline := time.After(wait)
 	for {
 		select {
 		case event := <-sub:
-			if strings.Contains(event.Payload, "[vane]") {
+			if strings.Contains(event.Payload, "[vane]") && strings.Contains(event.Payload, "target="+target) {
 				events = append(events, event)
 			}
 		case <-deadline:
@@ -32,19 +40,20 @@ func TestVaneLogTag(t *testing.T) {
 	diagnostics := newVaneDiagnostics("log-test", clock)
 	sub := log.Subscribe()
 	defer log.UnSubscribe(sub)
+	target := uniqueVaneLogTarget(t, "rr")
 
 	diagnostics.record(vaneDiagnosticRecord{
-		kind: "reconnect-suppressed", target: "rr.googlevideo.com", port: 443,
+		kind: "reconnect-suppressed", target: target, port: 443,
 		from: "alpha", reason: "no-evidence-candidate", bps: 4_000_000,
 		lowWindows: 3, lowSignal: "latency", latencyMillis: 800,
 	})
 
-	events := collectVaneLogs(t, sub, 200*time.Millisecond)
+	events := collectVaneLogs(t, sub, target, 300*time.Millisecond)
 	require.Len(t, events, 1)
 	require.Equal(t, log.INFO, events[0].LogLevel)
 	line := events[0].Payload
 	for _, want := range []string{
-		"[vane]", "kind=reconnect-suppressed", "target=rr.googlevideo.com", "port=443",
+		"[vane]", "kind=reconnect-suppressed", "target=" + target, "port=443",
 		"from=alpha", "bps=4000000", "reason=no-evidence-candidate",
 		"signal=latency", "latencyMs=800", "lowWindows=3",
 	} {
@@ -58,11 +67,12 @@ func TestVaneLogTagHandoff(t *testing.T) {
 	diagnostics := newVaneDiagnostics("log-test", clock)
 	sub := log.Subscribe()
 	defer log.UnSubscribe(sub)
+	target := uniqueVaneLogTarget(t, "rr-handoff")
 
 	diagnostics.record(vaneDiagnosticRecord{
-		kind: "handoff-measured", target: "rr.googlevideo.com", from: "alpha", to: "beta", bps: 15_000_000,
+		kind: "handoff-measured", target: target, from: "alpha", to: "beta", bps: 15_000_000,
 	})
-	events := collectVaneLogs(t, sub, 200*time.Millisecond)
+	events := collectVaneLogs(t, sub, target, 300*time.Millisecond)
 	require.Len(t, events, 1)
 	require.Contains(t, events[0].Payload, "from=alpha")
 	require.Contains(t, events[0].Payload, "to=beta")
@@ -76,8 +86,9 @@ func TestVaneLogDedup(t *testing.T) {
 	diagnostics := newVaneDiagnostics("log-test", clock)
 	sub := log.Subscribe()
 	defer log.UnSubscribe(sub)
+	target := uniqueVaneLogTarget(t, "rr-dedup")
 
-	base := vaneDiagnosticRecord{kind: "reconnect-suppressed", target: "rr.googlevideo.com", bps: 1}
+	base := vaneDiagnosticRecord{kind: "reconnect-suppressed", target: target, bps: 1}
 	first := base
 	first.reason = "no-challenger"
 	second := base
@@ -88,7 +99,7 @@ func TestVaneLogDedup(t *testing.T) {
 	clock.Advance(time.Second)
 	diagnostics.record(second)
 
-	events := collectVaneLogs(t, sub, 200*time.Millisecond)
+	events := collectVaneLogs(t, sub, target, 300*time.Millisecond)
 	require.Len(t, events, 2)
 	require.Contains(t, events[0].Payload, "reason=no-challenger")
 	require.Contains(t, events[1].Payload, "reason=no-evidence-candidate")
@@ -96,7 +107,7 @@ func TestVaneLogDedup(t *testing.T) {
 	// Past the window the same triple logs again.
 	clock.Advance(vaneLogDedupWindow + time.Second)
 	diagnostics.record(first)
-	events = collectVaneLogs(t, sub, 200*time.Millisecond)
+	events = collectVaneLogs(t, sub, target, 300*time.Millisecond)
 	require.Len(t, events, 1)
 	require.Contains(t, events[0].Payload, "reason=no-challenger")
 }

@@ -9,9 +9,9 @@ package outboundgroup
 // (SAMPLE).
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
-	"errors"
 	"testing"
 	"time"
 

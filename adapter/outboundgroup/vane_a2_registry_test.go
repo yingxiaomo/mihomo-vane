@@ -94,4 +94,3 @@ func TestVaneDiagnosticsActiveRedirectsAfterReload(t *testing.T) {
 	require.Empty(t, nilDiagnostics.snapshot().Group)
 	require.Nil(t, nilDiagnostics.active())
 }
-
