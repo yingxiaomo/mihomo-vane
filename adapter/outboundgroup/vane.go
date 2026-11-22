@@ -127,7 +127,7 @@ func (s *vaneNodeState) profileFresh(now time.Time, at time.Time) bool {
 	return !at.IsZero() && !at.After(now) && now.Sub(at) < vaneProfileAgeReset
 }
 
-// cumulLossRate is the node's lifetime TCP retransmission ratio. ok is false
+// cumulLossRate is the node's decayed TCP retransmission ratio. ok is false
 // when nothing was ever sent: no evidence, never "zero loss".
 func (s *vaneNodeState) cumulLossRate(now time.Time) (float64, bool) {
 	if s == nil || s.cumulSent == 0 || !s.profileFresh(now, s.cumulAt) {

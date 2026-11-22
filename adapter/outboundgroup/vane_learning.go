@@ -523,7 +523,11 @@ func restoreVaneNode(node vanePersistedNode, now time.Time) (*vaneNodeState, boo
 	// are dropped entirely so a past lossy phase cannot label the node forever.
 	if !node.CumulObservedAt.IsZero() && !node.CumulObservedAt.After(now) &&
 		now.Sub(node.CumulObservedAt) < vaneProfileAgeReset {
-		state.cumulSent, state.cumulRetrans = node.CumulSent, node.CumulRetrans
+		// Apply the same decay the booking path applies, so a restart does not
+		// skip the interval between the last booking and now.
+		decay := math.Exp(-now.Sub(node.CumulObservedAt).Seconds() / vaneCumulDecayTauSeconds)
+		state.cumulSent = uint64(math.Round(float64(node.CumulSent) * decay))
+		state.cumulRetrans = uint64(math.Round(float64(node.CumulRetrans) * decay))
 		state.cumulAt = node.CumulObservedAt
 	}
 	profileValid, profileInvalid := restoreVaneProfile(state, node, now)

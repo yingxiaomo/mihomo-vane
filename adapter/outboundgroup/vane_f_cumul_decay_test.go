@@ -1,7 +1,6 @@
 package outboundgroup
 
 import (
-	"math"
 	"testing"
 	"time"
 
@@ -26,6 +25,7 @@ func bookCumul(t *testing.T, group *Vane, sent, retrans uint64) {
 	t.Helper()
 	group.mu.Lock()
 	state := group.nodes["alpha"]
+	require.NotNil(t, state, "the fixture must have booked a node for alpha")
 	identity, epoch := state.identity, state.epoch
 	group.mu.Unlock()
 	group.recordCumulativeLossIdentity("alpha", identity, epoch, vaneConnectionCloseObservation{
@@ -172,6 +172,21 @@ func TestVaneRestoreFutureCumulativeLoss(t *testing.T) {
 	require.Zero(t, node.cumulRetrans)
 }
 
+// CUMUL-EXP-08: a restore applies the same decay, so a restart does not skip
+// the interval between the last booking and now.
+func TestVaneCumulDecayOnRestore(t *testing.T) {
+	now := time.Now()
+	node, valid, _ := restoreVaneNode(vanePersistedNode{
+		Name: "beta", Identity: "test:beta", LastSeen: now,
+		SuccessCount: 2, CountersAt: now,
+		CumulSent: 10_000, CumulRetrans: 900,
+		CumulObservedAt: now.Add(-3 * 24 * time.Hour),
+	}, now)
+	require.True(t, valid)
+	require.Equal(t, uint64(6514), node.cumulSent)
+	require.Equal(t, uint64(586), node.cumulRetrans)
+}
+
 // FRESH-FUTURE-05: a node stamped in the future is not adopted by selection.
 func TestVaneSelectDropsFutureNode(t *testing.T) {
 	clock := newVaneConnTestClock()
@@ -230,5 +245,4 @@ func TestVaneRestoreZeroLatencyWithSamplesIsInvalid(t *testing.T) {
 	}, now)
 	require.True(t, invalid)
 	require.False(t, state.latencyEstimate(now).valid)
-	require.Less(t, math.Abs(0), 1e-9)
 }
