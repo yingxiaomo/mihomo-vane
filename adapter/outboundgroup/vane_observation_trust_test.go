@@ -1,9 +1,11 @@
 package outboundgroup
 
 import (
+	"bytes"
 	"context"
 	"net/url"
-	"runtime"
+	"runtime/pprof"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -184,16 +186,27 @@ func TestVaneStallWatchdogRespectsGrace(t *testing.T) {
 
 // WATCHDOG lifecycle: exercise the real 5s ticker, unregister and cancellation.
 func TestVaneStallWatchdogRealTickerLifecycle(t *testing.T) {
-	watchers := func() int {
-		p := make([]byte, 2*1024*1024)
-		n := runtime.Stack(p, true)
-		return strings.Count(string(p[:n]), "(*Vane).mediaWatchdogLoop(")
-	}
 	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
 		t.Run(mode.String(), func(t *testing.T) {
-			before := watchers()
-			group, clock, flow := newVaneObservationRig(t, mode)
-			require.Eventually(t, func() bool { return watchers() == before+1 }, time.Second, time.Millisecond)
+			label := t.Name()
+			var group *Vane
+			var clock *vaneConnTestClock
+			var flow *vaneMediaFlow
+			// Labels follow the spawned goroutine; unrelated watchdog exits cannot change this verdict.
+			pprof.Do(t.Context(), pprof.Labels("vane-watchdog-test", label), func(context.Context) {
+				group, clock, flow = newVaneObservationRig(t, mode)
+			})
+			watching := func() bool {
+				var profile bytes.Buffer
+				require.NoError(t, pprof.Lookup("goroutine").WriteTo(&profile, 1))
+				for _, stack := range strings.Split(profile.String(), "\n\n") {
+					if strings.Contains(stack, strconv.Quote(label)) && strings.Contains(stack, "mediaWatchdogLoop") {
+						return true
+					}
+				}
+				return false
+			}
+			require.Eventually(t, watching, time.Second, time.Millisecond)
 			require.Nil(t, flow.observe(vaneObservationLowSample()))
 			clock.Advance(vaneMediaStallSilence)
 			require.Eventually(t, func() bool { flow.mu.Lock(); defer flow.mu.Unlock(); return flow.lowWindows == 2 }, vaneMediaWatchdogTick+2*time.Second, 10*time.Millisecond, "real ticker must synthesize a window")
@@ -204,7 +217,7 @@ func TestVaneStallWatchdogRealTickerLifecycle(t *testing.T) {
 			require.Empty(t, group.mediaActiveFlows)
 			group.mediaFlowsMu.Unlock()
 			require.NoError(t, group.Close())
-			require.Eventually(t, func() bool { return watchers() <= before }, time.Second, time.Millisecond, "Close cancels the actual watchdog goroutine")
+			require.Eventually(t, func() bool { return !watching() }, time.Second, time.Millisecond, "Close cancels this group's actual watchdog goroutine")
 		})
 	}
 }
