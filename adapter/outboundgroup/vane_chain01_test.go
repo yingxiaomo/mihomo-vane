@@ -107,12 +107,11 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			group.mu.Unlock()
 			require.False(t, hinted)
 			require.False(t, cooled)
-			if mode == vaneRacingShadow {
-				require.Eventually(t, func() bool { return probeCalls.Load() > 0 }, 2*time.Second, time.Millisecond,
-					"shadow must schedule the recovery race")
-			} else {
-				require.Zero(t, probeCalls.Load())
-			}
+			// Both modes now supply the missing evidence: shadow through the
+			// recovery race, off through the evidence probe (P0). Neither
+			// switches here — the probe is still blocked.
+			require.Eventually(t, func() bool { return probeCalls.Load() > 0 }, 2*time.Second, time.Millisecond,
+				"the suppressed flow must trigger a probe for evidence")
 		})
 	}
 }

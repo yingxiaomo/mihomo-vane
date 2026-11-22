@@ -180,6 +180,9 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	require.Nil(t, flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 10_000_000, TotalBytes: 8 * 1024 * 1024, Age: 21 * time.Second, Delivered: true,
 	}))
+	// P1 grace: lows within 30s of the recovery are graced; advance past it so
+	// the second round actually re-arms (RACE-06's premise).
+	clock.Advance(vaneMediaFastGrace + time.Second)
 	for i := 0; i < 3; i++ {
 		require.Nil(t, flow.observe(low))
 	}

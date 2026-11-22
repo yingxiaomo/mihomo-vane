@@ -472,6 +472,9 @@ func TestVaneMediaReconnectSafetyGates(t *testing.T) {
 		require.Nil(t, flow.observe(low))
 		require.Nil(t, flow.observe(low))
 		require.Nil(t, flow.observe(high))
+		// P1 grace: lows within 30s of the fast sample are graced (not
+		// counted); past the grace the streak accumulates again.
+		clock.Advance(vaneMediaFastGrace + time.Second)
 		require.Nil(t, flow.observe(low))
 		require.Nil(t, flow.observe(low))
 		flow.mu.Lock()

@@ -189,6 +189,11 @@ type Vane struct {
 	// the counter churns per connection while a.mu guards selection state.
 	mediaFlowsMu     sync.Mutex
 	mediaActiveFlows map[string]int
+	// §2.4: the live media flows (for the stall watchdog) and the once-guard
+	// for its single ticker goroutine. Guarded by mediaFlowsMu; the goroutine
+	// stops with racingRuntime.ctx on Close.
+	mediaFlowSet      map[*vaneMediaFlow]struct{}
+	mediaWatchdogOnce sync.Once
 }
 
 func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (*Vane, error) {
@@ -316,6 +321,7 @@ func newVaneWithClock(
 		nodeIdentities:     make(map[string]string),
 		churn:              make(map[vaneChurnKey]*vaneChurnState),
 		mediaActiveFlows:   make(map[string]int),
+		mediaFlowSet:       make(map[*vaneMediaFlow]struct{}),
 	}
 	group.gray = newVaneGrayObserver(false, clock, group.diagnostics)
 	learning := newVaneLearningState(option.Name, clock, nil, stateTTL, maxStates)

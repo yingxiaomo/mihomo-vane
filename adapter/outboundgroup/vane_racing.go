@@ -133,8 +133,10 @@ type vaneRacingRuntime struct {
 	activeTasks   map[uint64]context.CancelFunc
 	capabilities  map[vaneMemberLease]vaneCapabilityRecord
 	noWinnerUntil map[vaneTargetKey]time.Time
-	budget        vaneRacingBudget
-	closed        bool
+	// P0: per-target throttle stamps for the off-mode evidence probe.
+	evidenceProbeUntil map[vaneTargetKey]time.Time
+	budget             vaneRacingBudget
+	closed             bool
 }
 
 func newVaneRacingConfig(option VaneOption) (vaneRacingConfig, error) {
@@ -173,6 +175,8 @@ func newVaneRacingRuntime() vaneRacingRuntime {
 		activeTasks:   make(map[uint64]context.CancelFunc),
 		capabilities:  make(map[vaneMemberLease]vaneCapabilityRecord),
 		noWinnerUntil: make(map[vaneTargetKey]time.Time),
+		// P0: per-target throttle for the off-mode evidence probe.
+		evidenceProbeUntil: make(map[vaneTargetKey]time.Time),
 	}
 }
 
@@ -628,11 +632,18 @@ func (a *Vane) validateRaceWinner(request vaneRaceRequest, member vaneMemberLeas
 }
 
 func (a *Vane) reserveRaceBudget(count int, now time.Time) []int64 {
+	a.racingRuntime.mu.Lock()
+	defer a.racingRuntime.mu.Unlock()
+	return a.reserveRaceBudgetLocked(count, now)
+}
+
+// reserveRaceBudgetLocked is reserveRaceBudget for callers already holding
+// racingRuntime.mu (the off-mode evidence probe stamps its throttle and
+// reserves in one critical section).
+func (a *Vane) reserveRaceBudgetLocked(count int, now time.Time) []int64 {
 	if count <= 0 {
 		return nil
 	}
-	a.racingRuntime.mu.Lock()
-	defer a.racingRuntime.mu.Unlock()
 	budget := &a.racingRuntime.budget
 	if budget.startedAt.IsZero() || (!budget.startedAt.Add(time.Hour).After(now) && budget.reserved == 0) {
 		*budget = vaneRacingBudget{startedAt: now}
