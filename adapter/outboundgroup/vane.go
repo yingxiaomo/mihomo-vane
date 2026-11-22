@@ -102,6 +102,14 @@ const vaneProfileAgeReset = 7 * 24 * time.Hour
 // which drops the pair outright once it expires.
 const vaneCumulDecayTauSeconds = 7 * 24 * 3600
 
+// vaneFutureStampTolerance absorbs small clock skew. A stamp further in the
+// future than this is treated as corrupt and the record is dropped; one inside
+// the window is corrected by the next observe, which stamps now. It is
+// deliberately not applied by profileFresh or the restore paths: there a
+// future stamp only makes a dimension read as missing until the clock
+// recovers, which loses no data.
+const vaneFutureStampTolerance = 5 * time.Minute
+
 func (s *vaneNodeState) recordSample(now time.Time, success bool) {
 	if success {
 		s.successCount++
@@ -1164,7 +1172,8 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		if state == nil {
 			key := vaneLearningNodeKey(proxy.Name(), identity)
 			state = a.learning.nodes[key]
-			if state != nil && (state.lastObservedAt.After(now) || now.Sub(state.lastObservedAt) >= a.stateTTL) {
+			if state != nil && (state.lastObservedAt.After(now.Add(vaneFutureStampTolerance)) ||
+				now.Sub(state.lastObservedAt) >= a.stateTTL) {
 				if commit {
 					a.deleteLearningNodeLocked(key, state)
 				}
@@ -1850,7 +1859,8 @@ func (a *Vane) pruneLocked(now time.Time, active []C.Proxy) {
 		if _, ok := activeKeys[key]; ok {
 			continue
 		}
-		if state.lastObservedAt.After(now) || now.Sub(state.lastObservedAt) >= a.stateTTL {
+		if state.lastObservedAt.After(now.Add(vaneFutureStampTolerance)) ||
+			now.Sub(state.lastObservedAt) >= a.stateTTL {
 			a.deleteLearningNodeLocked(key, state)
 		}
 	}

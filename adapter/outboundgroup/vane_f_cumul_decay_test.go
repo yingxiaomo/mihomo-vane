@@ -235,6 +235,51 @@ func TestVanePruneFutureLastSeen(t *testing.T) {
 	require.False(t, exists)
 }
 
+// FRESH-FUTURE-06: a stamp inside the skew tolerance is not stale.
+func TestVanePruneKeepsFutureWithinTolerance(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	defer group.Close()
+
+	group.mu.Lock()
+	group.learningGeneration = group.learning.generation
+	group.learning.nodes["ghost"] = &vaneNodeState{
+		name: "ghost", identity: "ghost:1", lastObservedAt: clock.Now().Add(time.Minute),
+	}
+	group.pruneLocked(clock.Now(), nil)
+	_, exists := group.learning.nodes["ghost"]
+	group.mu.Unlock()
+	require.True(t, exists, "a minute of skew must not wipe the record")
+}
+
+// FRESH-FUTURE-07: selection keeps a record stamped inside the tolerance, so a
+// small clock jump does not reset a live node's learned counters.
+func TestVaneSelectKeepsFutureWithinTolerance(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	defer group.Close()
+
+	key := vaneLearningNodeKey("alpha", "test:alpha")
+	group.mu.Lock()
+	group.learningGeneration = group.learning.generation
+	group.learning.nodes[key] = &vaneNodeState{
+		name: "alpha", identity: "test:alpha", lastObservedAt: clock.Now().Add(time.Minute),
+		cumulSent: 999_999,
+	}
+	group.mu.Unlock()
+
+	metadata := &C.Metadata{Host: "skew.example", DstPort: 443, NetWork: C.TCP}
+	group.pick(metadata, vaneTransportTCP, true, true)
+
+	group.mu.Lock()
+	state := group.nodes["alpha"]
+	group.mu.Unlock()
+	require.NotNil(t, state)
+	require.Equal(t, uint64(999_999), state.cumulSent, "skew inside tolerance must not reset the node")
+}
+
 // H2: a zero RTT with samples is corrupt, not a valid 0ms reading.
 func TestVaneRestoreZeroLatencyWithSamplesIsInvalid(t *testing.T) {
 	now := time.Now()
