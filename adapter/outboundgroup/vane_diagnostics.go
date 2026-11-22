@@ -293,6 +293,15 @@ func vaneLogLine(record vaneDiagnosticRecord) string {
 	if record.lowWindows > 0 {
 		fields = append(fields, "lowWindows="+strconv.Itoa(record.lowWindows))
 	}
+	if record.scoreMicros > 0 {
+		fields = append(fields, "score="+strconv.FormatFloat(float64(record.scoreMicros)/1_000_000, 'f', 4, 64))
+	}
+	if record.bestMicros > 0 {
+		fields = append(fields, "best="+strconv.FormatFloat(float64(record.bestMicros)/1_000_000, 'f', 4, 64))
+	}
+	if record.scoreParts != "" {
+		fields = append(fields, "parts="+record.scoreParts)
+	}
 	return strings.Join(fields, " ")
 }
 
@@ -349,7 +358,12 @@ type vaneDiagnosticRecord struct {
 	lowSignal     string
 	latencyMillis int64
 	lossRate      float64
-	force         bool
+	// pick-scored: winner score, the raw best score, and the dimension
+	// contributions that added up to it.
+	scoreMicros int64
+	bestMicros  int64
+	scoreParts  string
+	force       bool
 }
 
 type vaneDiagnosticsRegistryState struct {

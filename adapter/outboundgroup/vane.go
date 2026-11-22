@@ -273,6 +273,7 @@ type vaneRankedProxy struct {
 	vaneCandidateScore
 	cooldownUntil          time.Time
 	evidenceCoverageMicros int64
+	parts                  vaneScoreParts
 }
 
 type vanePickDecision struct {
@@ -1193,12 +1194,14 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				until = mediaUntil
 			}
 		}
+		parts := scoreVaneMetricsParts(scene, snapshot)
 		ranked = append(ranked, vaneRankedProxy{
 			proxy: proxy,
 			vaneCandidateScore: vaneCandidateScore{
 				name:        proxy.Name(),
-				scoreMicros: scoreVaneMetrics(scene, snapshot),
+				scoreMicros: parts.total,
 			},
+			parts:                  parts,
 			cooldownUntil:          until,
 			evidenceCoverageMicros: vaneEvidenceCoverageMicros(snapshot, transport, scene),
 		})
@@ -1391,6 +1394,9 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			a.pruneLocked(now, proxies)
 			a.learning.markDirtyLocked(now)
 		}
+		if commit {
+			a.recordPickScored(scene, transport, target, port, chosen, ranked, anchor)
+		}
 		a.diagnostics.record(vaneDiagnosticRecord{
 			kind: "pick-probe-selected", reason: reason,
 			target: coldPick.scope, bucket: coldPick.scope, to: chosen.name,
@@ -1411,6 +1417,9 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		}
 		return decision
 	}
+	if commit {
+		a.recordPickScored(scene, transport, target, port, chosen, ranked, anchor)
+	}
 	decision := vanePickDecision{proxy: chosen.proxy}
 	decision.reportedAliveAtSelection = hasAlive
 	if selectedState != nil {
@@ -1421,6 +1430,22 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		decision.exploration = a.diagnostics.recordExplorationSelection(*explorationSelection)
 	}
 	return decision
+}
+
+// recordPickScored explains one committed pick: the winner, its weighted
+// dimension contributions, and the raw best score when the anchor rule or a
+// probe overrode it. Media picks always log; other scenes only when the pick
+// moves away from the scene anchor, so plain browsing stays quiet.
+func (a *Vane) recordPickScored(scene vaneScene, transport vaneTransport, target string, port uint16, chosen vaneRankedProxy, ranked []vaneRankedProxy, anchor vaneAnchor) {
+	if len(ranked) == 0 || (scene != vaneSceneMedia && chosen.name == anchor.name) {
+		return
+	}
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind: "pick-scored", target: target, port: port,
+		transport: transport.String(), scene: scene.String(),
+		to: chosen.name, scoreMicros: chosen.scoreMicros,
+		bestMicros: ranked[0].scoreMicros, scoreParts: chosen.parts.explain(),
+	})
 }
 
 func (a *Vane) cooldownUntilLocked(key vaneCooldownKey, now time.Time, cleanup bool) time.Time {

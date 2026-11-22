@@ -771,6 +771,27 @@ func vaneScoring(scene vaneScene) vaneSceneScoring {
 }
 
 func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
+	return scoreVaneMetricsParts(scene, snapshot).total
+}
+
+// vaneScoreParts keeps each dimension's weighted contribution so a pick can be
+// explained in the log; total is the only thing ranking compares.
+type vaneScoreParts struct {
+	total                                                         int64
+	throughput, latency, loss, failure, response, jitter, connect float64
+	success, maxRate, duration, downloadTotal                     float64
+}
+
+// explain renders the contributions in the scoring order, values in [0,1].
+func (p vaneScoreParts) explain() string {
+	return fmt.Sprintf(
+		"tp=%.2f rtt=%.2f loss=%.2f fail=%.2f resp=%.2f jit=%.2f conn=%.2f succ=%.2f peak=%.2f dur=%.2f vol=%.2f",
+		p.throughput, p.latency, p.loss, p.failure, p.response, p.jitter,
+		p.connect, p.success, p.maxRate, p.duration, p.downloadTotal,
+	)
+}
+
+func scoreVaneMetricsParts(scene vaneScene, snapshot vaneMetricsSnapshot) vaneScoreParts {
 	config := vaneScoring(scene)
 	failure := vaneMetricCost(snapshot.failure, vaneMetricFailure, func(value float64) float64 {
 		return vaneClamp(value, 0, 1)
@@ -803,18 +824,24 @@ func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
 	})
 	downloadTotal := vaneMetricCost(snapshot.downloadTotal, vaneMetricDownloadTotal, vaneDownloadTotalCost)
 
-	score := config.failureWeight*failure +
-		config.connectWeight*connect +
-		config.responseWeight*response +
-		config.throughputWeight*throughput +
-		config.jitterWeight*jitter +
-		config.lossWeight*loss +
-		config.latencyWeight*latency +
-		config.successWeight*success +
-		config.maxRateWeight*maxRate +
-		config.durationWeight*duration +
-		config.downloadTotalWeight*downloadTotal
-	return int64(math.Round(vaneClamp(score, 0, 1) * 1_000_000))
+	parts := vaneScoreParts{
+		throughput:    config.throughputWeight * throughput,
+		latency:       config.latencyWeight * latency,
+		loss:          config.lossWeight * loss,
+		failure:       config.failureWeight * failure,
+		response:      config.responseWeight * response,
+		jitter:        config.jitterWeight * jitter,
+		connect:       config.connectWeight * connect,
+		success:       config.successWeight * success,
+		maxRate:       config.maxRateWeight * maxRate,
+		duration:      config.durationWeight * duration,
+		downloadTotal: config.downloadTotalWeight * downloadTotal,
+	}
+	score := parts.failure + parts.connect + parts.response + parts.throughput +
+		parts.jitter + parts.loss + parts.latency + parts.success + parts.maxRate +
+		parts.duration + parts.downloadTotal
+	parts.total = int64(math.Round(vaneClamp(score, 0, 1) * 1_000_000))
+	return parts
 }
 func vaneMetricCost(estimate vaneMetricEstimate, kind vaneMetricKind, observed func(float64) float64) float64 {
 	missing := vaneSpec(kind).missingCost
