@@ -222,8 +222,9 @@ func TestVaneMetricsDecayAndValidity(t *testing.T) {
 func TestVaneMetricsMissingCosts(t *testing.T) {
 	t.Run("MISS-01 all missing is conservative rather than perfect", func(t *testing.T) {
 		score := scoreVaneMetrics(vaneSceneDefault, vaneMetricsSnapshot{})
-		// Ten dimensions now: the five profile dimensions sit at their 0.5 neutral.
-		require.Equal(t, int64(502_083), score)
+		// Eleven dimensions: latency and the five profile dimensions sit at their
+		// 0.5 neutral, so the whole table still reads "unknown = mediocre".
+		require.Equal(t, int64(519_000), score)
 		require.Greater(t, score, int64(0))
 	})
 
@@ -232,7 +233,7 @@ func TestVaneMetricsMissingCosts(t *testing.T) {
 			connect: vaneMetricEstimate{value: math.Log(1), confidence: 1, valid: true},
 		}
 		score := scoreVaneMetrics(vaneSceneDefault, snapshot)
-		require.Equal(t, int64(433_333), score)
+		require.Equal(t, int64(497_000), score)
 		require.Greater(t, score, int64(0))
 	})
 }
@@ -254,9 +255,15 @@ func TestVaneMetricsSceneScores(t *testing.T) {
 		"bulk-node":        profile(500, 1000, 80_000_000),
 	}
 
-	t.Run("SCORE-01 interactive prioritizes setup and response", func(t *testing.T) {
+	// SCORE-01: the guide's weight table puts throughput first and latency second
+	// in every scene, so a 12 Mbps node outranks a 250 kbps one even for
+	// interactive traffic. Connect+response still sum to 0.20 here, which keeps
+	// two equally fast nodes ordered by setup time; the ranking below documents
+	// that throughput now dominates.
+	t.Run("SCORE-01 interactive keeps throughput first", func(t *testing.T) {
 		ranked := rankVaneCandidates(vaneSceneInteractive, nodes)
-		require.Equal(t, "interactive-node", ranked[0].name)
+		require.Equal(t, "media-node", ranked[0].name)
+		require.Equal(t, "interactive-node", ranked[len(ranked)-1].name)
 	})
 	t.Run("SCORE-02 media rewards adequate throughput without bulk latency", func(t *testing.T) {
 		ranked := rankVaneCandidates(vaneSceneMedia, nodes)

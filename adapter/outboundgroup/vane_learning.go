@@ -106,6 +106,12 @@ type vanePersistedNode struct {
 	DurationCount   uint64    `json:"durationCount,omitempty"`
 	DownloadTotal   uint64    `json:"downloadTotal,omitempty"`
 	TotalsAt        time.Time `json:"totalsAt,omitempty"`
+	// D batch: node-level RTT EMA.
+	LatencyMs      float64   `json:"latencyMs,omitempty"`
+	LatencySamples uint64    `json:"latencySamples,omitempty"`
+	LatencyAt      time.Time `json:"latencyAt,omitempty"`
+	// E batch: without this the cumulative loss pair never ages out.
+	CumulObservedAt time.Time `json:"cumulObservedAt,omitempty"`
 }
 
 // vanePersistedB2Target carries one target+member pair's B2 telemetry across
@@ -512,7 +518,12 @@ func restoreVaneNode(node vanePersistedNode, now time.Time) (*vaneNodeState, boo
 	udp, udpValid, udpInvalid := restoreVaneMetrics(node.UDP, now)
 	state := &vaneNodeState{
 		name: node.Name, identity: node.Identity, tcp: tcp, udp: udp, lastObservedAt: node.LastSeen,
-		cumulSent: node.CumulSent, cumulRetrans: node.CumulRetrans,
+	}
+	// E: the cumulative loss pair is only restored while fresh; stale counters
+	// are dropped entirely so a past lossy phase cannot label the node forever.
+	if !node.CumulObservedAt.IsZero() && now.Sub(node.CumulObservedAt) < vaneProfileAgeReset {
+		state.cumulSent, state.cumulRetrans = node.CumulSent, node.CumulRetrans
+		state.cumulAt = node.CumulObservedAt
 	}
 	profileValid, profileInvalid := restoreVaneProfile(state, node, now)
 	if !tcpValid && !udpValid && !profileValid {
@@ -540,6 +551,12 @@ func restoreVaneProfile(state *vaneNodeState, node vanePersistedNode, now time.T
 			state.maxDownloadRate, state.maxRateAt = node.MaxDownloadRate, node.MaxRateAt
 		}
 	}
+	if fresh(node.LatencyAt) && node.LatencySamples > 0 && node.LatencyMs > 0 &&
+		!math.IsNaN(node.LatencyMs) && !math.IsInf(node.LatencyMs, 0) {
+		state.latencyMs, state.latencySamples, state.latencyAt = node.LatencyMs, node.LatencySamples, node.LatencyAt
+	} else if node.LatencyMs < 0 || math.IsNaN(node.LatencyMs) || math.IsInf(node.LatencyMs, 0) {
+		invalid = true
+	}
 	if fresh(node.TotalsAt) {
 		switch {
 		case node.TotalDuration < 0:
@@ -558,7 +575,7 @@ func restoreVaneProfile(state *vaneNodeState, node vanePersistedNode, now time.T
 		}
 	}
 	valid := state.successCount+state.failureCount > 0 || state.maxDownloadRate > 0 ||
-		state.durationCount > 0 || state.downloadTotal > 0
+		state.durationCount > 0 || state.downloadTotal > 0 || state.latencySamples > 0
 	return valid, invalid
 }
 
@@ -782,6 +799,10 @@ func (s *vaneLearningState) snapshotLocked(now time.Time) vaneLearningSnapshot {
 			DurationCount:   state.durationCount,
 			DownloadTotal:   state.downloadTotal,
 			TotalsAt:        state.totalsAt,
+			LatencyMs:       state.latencyMs,
+			LatencySamples:  state.latencySamples,
+			LatencyAt:       state.latencyAt,
+			CumulObservedAt: state.cumulAt,
 		})
 	}
 	targetPairs := make([]struct {

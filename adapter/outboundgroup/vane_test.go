@@ -573,8 +573,12 @@ func TestVaneSoftAnchorStrictMarginPerTransportAndScene(t *testing.T) {
 				}
 				metadata := &C.Metadata{Host: sceneTest.host, NetWork: transportTest.network, DstPort: 443}
 				weight := vaneScoring(sceneTest.scene).failureWeight
-				anchorFailure := 0.6
-				exactFailure := anchorFailure - 0.05/weight
+				// 0.9 leaves room for the value step 0.05/weight that every scene
+				// weight now needs; the score step itself is always exactly 5%.
+				anchorFailure := 0.9
+				margin := 0.05
+				exactFailure := anchorFailure - margin/weight
+				wantMargin := int64(math.Round(1_000_000 * margin))
 				setVaneFailureForTest(group, "anchor", transportTest.transport, now, anchorFailure)
 				setVaneFailureForTest(group, "challenger", transportTest.transport, now, exactFailure)
 				key := vaneAnchorKey{transport: transportTest.transport, scene: sceneTest.scene}
@@ -582,12 +586,12 @@ func TestVaneSoftAnchorStrictMarginPerTransportAndScene(t *testing.T) {
 
 				anchorScore := scoreVaneMetrics(sceneTest.scene, group.nodes["anchor"].snapshot(transportTest.transport, now))
 				challengerScore := scoreVaneMetrics(sceneTest.scene, group.nodes["challenger"].snapshot(transportTest.transport, now))
-				require.Equal(t, int64(50_000), anchorScore-challengerScore)
+				require.Equal(t, wantMargin, anchorScore-challengerScore)
 				require.Equal(t, "anchor", group.pick(metadata, transportTest.transport, false, true).Name(), "an exact margin must not switch")
 
 				setVaneFailureForTest(group, "challenger", transportTest.transport, now, exactFailure-0.00001)
 				challengerScore = scoreVaneMetrics(sceneTest.scene, group.nodes["challenger"].snapshot(transportTest.transport, now))
-				require.Greater(t, anchorScore-challengerScore, int64(50_000))
+				require.Greater(t, anchorScore-challengerScore, wantMargin)
 				require.Equal(t, "challenger", group.pick(metadata, transportTest.transport, false, true).Name(), "a strictly larger margin must switch")
 			})
 		}

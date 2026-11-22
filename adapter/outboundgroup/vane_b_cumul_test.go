@@ -25,14 +25,15 @@ func TestVaneNodeCumulativeLossRate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			state := &vaneNodeState{cumulSent: tc.sent, cumulRetrans: tc.retrans}
-			rate, ok := state.cumulLossRate()
+			now := time.Now()
+			state := &vaneNodeState{cumulSent: tc.sent, cumulRetrans: tc.retrans, cumulAt: now}
+			rate, ok := state.cumulLossRate(now)
 			require.Equal(t, tc.wantValid, ok)
 			require.InDelta(t, tc.wantRate, rate, 1e-9)
 		})
 	}
 	var nilState *vaneNodeState
-	_, ok := nilState.cumulLossRate()
+	_, ok := nilState.cumulLossRate(time.Now())
 	require.False(t, ok, "a missing node is not a zero-loss node")
 }
 
@@ -43,12 +44,13 @@ func TestVaneCumulativeLossSurvivesPersist(t *testing.T) {
 	metrics.observeThroughput(now, 8_000_000)
 
 	persisted := vanePersistedNode{
-		Name:         "beta",
-		Identity:     "test:beta",
-		LastSeen:     now,
-		TCP:          persistVaneMetrics(metrics, now),
-		CumulSent:    10_000,
-		CumulRetrans: 800,
+		Name:            "beta",
+		Identity:        "test:beta",
+		LastSeen:        now,
+		TCP:             persistVaneMetrics(metrics, now),
+		CumulSent:       10_000,
+		CumulRetrans:    800,
+		CumulObservedAt: now,
 	}
 	encoded, err := json.Marshal(persisted)
 	require.NoError(t, err)
@@ -62,7 +64,7 @@ func TestVaneCumulativeLossSurvivesPersist(t *testing.T) {
 	require.True(t, valid)
 	require.False(t, invalid)
 	require.NotNil(t, state)
-	rate, ok := state.cumulLossRate()
+	rate, ok := state.cumulLossRate(now)
 	require.True(t, ok, "the cumulative counters must cross the reload")
 	require.InDelta(t, 0.08, rate, 1e-9)
 }

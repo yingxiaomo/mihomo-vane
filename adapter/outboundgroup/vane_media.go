@@ -511,6 +511,12 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		lowSignal = "latency"
 	}
 	now := f.group.clock.Now()
+	// D: the node's RTT EMA is fed by real kernel readings only. It is
+	// independent of the low-window decision, so it feeds before the grace
+	// bookkeeping below.
+	if sample.LatencySupported && sample.Latency > 0 {
+		f.group.recordLatencyIdentity(f.candidate, f.identity, f.nodeEpoch, sample.Latency)
+	}
 	graced := false
 	if low {
 		// P1 grace: the measured rate is the delivery rate, so a brief client
@@ -1185,7 +1191,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 		if freshThroughput {
 			throughputBPS = recent.bitsPerSecond
 			knownGood = throughputBPS >= a.media.lowThroughputBPS && throughputBPS >= a.media.demandBPS && throughputBPS >= currentBPS*a.media.challengerRatio
-			if rate, ok := a.nodes[proxy.Name()].cumulLossRate(); ok && rate > vaneDefaultMediaHighLossRate {
+			if rate, ok := a.nodes[proxy.Name()].cumulLossRate(now); ok && rate > vaneDefaultMediaHighLossRate {
 				// B.3: a node that keeps retransmitting on a long horizon is
 				// not a knownGood candidate however fast one probe looked.
 				// Its capability probe still counts, just below this tier.

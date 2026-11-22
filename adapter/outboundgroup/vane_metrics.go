@@ -391,6 +391,7 @@ const (
 	// ratio (B.3); the rest are raw counters that say "this node has been
 	// proven" rather than "this node is fast right now".
 	vaneMetricLoss
+	vaneMetricLatency
 	vaneMetricSuccess
 	vaneMetricMaxRate
 	vaneMetricDuration
@@ -420,6 +421,8 @@ func vaneSpec(kind vaneMetricKind) vaneMetricSpec {
 		return vaneMetricSpec{5 * time.Minute, 2 * time.Hour, 6, 0.55}
 	case vaneMetricLoss:
 		return vaneMetricSpec{10 * time.Minute, 6 * time.Hour, 1000, 0.50}
+	case vaneMetricLatency:
+		return vaneMetricSpec{10 * time.Minute, 6 * time.Hour, 10, 0.50}
 	case vaneMetricSuccess:
 		return vaneMetricSpec{2 * time.Minute, 30 * time.Minute, 10, 0.50}
 	case vaneMetricMaxRate:
@@ -637,6 +640,7 @@ type vaneMetricsSnapshot struct {
 	// per-transport EMA, so vaneMetrics.snapshot leaves them invalid and
 	// vaneNodeState.snapshot fills them.
 	loss          vaneMetricEstimate
+	latency       vaneMetricEstimate
 	success       vaneMetricEstimate
 	maxRate       vaneMetricEstimate
 	duration      vaneMetricEstimate
@@ -660,6 +664,7 @@ type vaneSceneScoring struct {
 	throughputWeight    float64
 	jitterWeight        float64
 	lossWeight          float64
+	latencyWeight       float64
 	successWeight       float64
 	maxRateWeight       float64
 	durationWeight      float64
@@ -672,6 +677,8 @@ type vaneSceneScoring struct {
 	jitterBadMillis     float64
 	throughputLowBPS    float64
 	throughputHighBPS   float64
+	latencyGoodMillis   float64
+	latencyBadMillis    float64
 	durationGoodSeconds float64
 	durationBadSeconds  float64
 }
@@ -680,7 +687,7 @@ type vaneSceneScoring struct {
 // relative sizes, so adding dimensions never inflates a score.
 func (c vaneSceneScoring) normalized() vaneSceneScoring {
 	total := c.failureWeight + c.connectWeight + c.responseWeight + c.throughputWeight + c.jitterWeight +
-		c.lossWeight + c.successWeight + c.maxRateWeight + c.durationWeight + c.downloadTotalWeight
+		c.lossWeight + c.latencyWeight + c.successWeight + c.maxRateWeight + c.durationWeight + c.downloadTotalWeight
 	if total <= 0 {
 		return c
 	}
@@ -690,6 +697,7 @@ func (c vaneSceneScoring) normalized() vaneSceneScoring {
 	c.throughputWeight /= total
 	c.jitterWeight /= total
 	c.lossWeight /= total
+	c.latencyWeight /= total
 	c.successWeight /= total
 	c.maxRateWeight /= total
 	c.durationWeight /= total
@@ -700,44 +708,59 @@ func (c vaneSceneScoring) normalized() vaneSceneScoring {
 // vaneSceneScoringSum is the assertion surface for SCORE-WEIGHT-01.
 func vaneSceneScoringSum(scoring vaneSceneScoring) float64 {
 	return scoring.failureWeight + scoring.connectWeight + scoring.responseWeight + scoring.throughputWeight +
-		scoring.jitterWeight + scoring.lossWeight + scoring.successWeight + scoring.maxRateWeight +
-		scoring.durationWeight + scoring.downloadTotalWeight
+		scoring.jitterWeight + scoring.lossWeight + scoring.latencyWeight + scoring.successWeight +
+		scoring.maxRateWeight + scoring.durationWeight + scoring.downloadTotalWeight
+}
+
+// vaneSceneWeights is the raw weight table: throughput > latency > loss >
+// everything else in every scene (owner's order). normalized() divides by the
+// sum, so these need not add up to 1.0.
+type vaneSceneWeights struct {
+	throughput, latency, loss, failure, response, jitter, connect float64
+	success, maxRate, duration, downloadTotal                     float64
 }
 
 func vaneScoring(scene vaneScene) vaneSceneScoring {
 	const mbps = 1_000_000
-	var scoring vaneSceneScoring
+	var weights vaneSceneWeights
+	scoring := vaneSceneScoring{}
 	switch scene {
 	case vaneSceneInteractive:
-		scoring = vaneSceneScoring{failureWeight: 0.30, connectWeight: 0.20, responseWeight: 0.30, throughputWeight: 0.05, jitterWeight: 0.15}
+		weights = vaneSceneWeights{0.25, 0.20, 0.15, 0.10, 0.12, 0.05, 0.08, 0.02, 0.01, 0.01, 0.01}
 		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
 		scoring.responseGoodMillis, scoring.responseBadMillis = 100, 1500
 		scoring.throughputLowBPS, scoring.throughputHighBPS = 0.25*mbps, 5*mbps
 	case vaneSceneMedia:
-		scoring = vaneSceneScoring{failureWeight: 0.25, connectWeight: 0.10, responseWeight: 0.15, throughputWeight: 0.35, jitterWeight: 0.15}
+		weights = vaneSceneWeights{0.30, 0.20, 0.15, 0.12, 0.08, 0.06, 0.04, 0.02, 0.02, 0.01, 0.01}
 		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
 		scoring.responseGoodMillis, scoring.responseBadMillis = 200, 3000
 		scoring.throughputLowBPS, scoring.throughputHighBPS = 3*mbps, 12*mbps
 	case vaneSceneBulk:
-		scoring = vaneSceneScoring{failureWeight: 0.25, connectWeight: 0.05, responseWeight: 0.05, throughputWeight: 0.60, jitterWeight: 0.05}
+		weights = vaneSceneWeights{0.50, 0.15, 0.12, 0.08, 0.04, 0.04, 0.02, 0.02, 0.02, 0.01, 0.01}
 		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
 		scoring.responseGoodMillis, scoring.responseBadMillis = 300, 5000
 		scoring.throughputLowBPS, scoring.throughputHighBPS = 2*mbps, 80*mbps
 	default:
-		scoring = vaneSceneScoring{failureWeight: 0.30, connectWeight: 0.15, responseWeight: 0.15, throughputWeight: 0.25, jitterWeight: 0.15}
+		weights = vaneSceneWeights{0.28, 0.20, 0.15, 0.12, 0.08, 0.06, 0.04, 0.03, 0.02, 0.01, 0.01}
 		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
 		scoring.responseGoodMillis, scoring.responseBadMillis = 150, 3000
 		scoring.throughputLowBPS, scoring.throughputHighBPS = 1*mbps, 20*mbps
 	}
+	scoring.throughputWeight = weights.throughput
+	scoring.latencyWeight = weights.latency
+	scoring.lossWeight = weights.loss
+	scoring.failureWeight = weights.failure
+	scoring.responseWeight = weights.response
+	scoring.jitterWeight = weights.jitter
+	scoring.connectWeight = weights.connect
+	scoring.successWeight = weights.success
+	scoring.maxRateWeight = weights.maxRate
+	scoring.durationWeight = weights.duration
+	scoring.downloadTotalWeight = weights.downloadTotal
 	scoring.jitterGoodMillis, scoring.jitterBadMillis = 3, 100
-	// Profile dimensions share the smallest weights the guide allows: success
-	// deliberately duplicates failure (its value is sample-count confidence),
-	// duration and downloadTotal are weak signals and stay minimal.
-	scoring.lossWeight = 0.05
-	scoring.successWeight = 0.05
-	scoring.maxRateWeight = 0.05
-	scoring.durationWeight = 0.03
-	scoring.downloadTotalWeight = 0.02
+	// 50ms is a healthy CDN path; 500ms is the media chain's high-latency line,
+	// so scoring and runtime switching agree.
+	scoring.latencyGoodMillis, scoring.latencyBadMillis = 50, 500
 	scoring.durationGoodSeconds = 10
 	scoring.durationBadSeconds = 300
 	return scoring.normalized()
@@ -762,6 +785,9 @@ func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
 	})
 
 	loss := vaneMetricCost(snapshot.loss, vaneMetricLoss, vaneLossCost)
+	latency := vaneMetricCost(snapshot.latency, vaneMetricLatency, func(value float64) float64 {
+		return vaneLatencyCost(value, config.latencyGoodMillis, config.latencyBadMillis)
+	})
 	success := vaneMetricCost(snapshot.success, vaneMetricSuccess, func(value float64) float64 {
 		return 1 - vaneClamp(value, 0, 1)
 	})
@@ -779,6 +805,7 @@ func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
 		config.throughputWeight*throughput +
 		config.jitterWeight*jitter +
 		config.lossWeight*loss +
+		config.latencyWeight*latency +
 		config.successWeight*success +
 		config.maxRateWeight*maxRate +
 		config.durationWeight*duration +

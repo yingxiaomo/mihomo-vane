@@ -72,6 +72,9 @@ type vaneNodeState struct {
 	// lossy". Durable: a restart must not erase a node's reputation.
 	cumulSent    uint64
 	cumulRetrans uint64
+	// cumulAt ages the pair out after vaneProfileAgeReset: a node that was
+	// lossy weeks ago must not carry the label forever.
+	cumulAt time.Time
 	// C batch node profile counters. They are durable with a 7 day age reset:
 	// a lifetime peak must not become a permanent label.
 	successCount    uint64
@@ -83,6 +86,11 @@ type vaneNodeState struct {
 	durationCount   uint64
 	downloadTotal   uint64
 	totalsAt        time.Time
+	// D batch: node-level RTT EMA fed by media windows only (non-media scenes
+	// have no observe(), so their latency estimate stays invalid -> neutral).
+	latencyMs      float64
+	latencySamples uint64
+	latencyAt      time.Time
 }
 
 // vaneProfileAgeReset is how long a profile counter stays meaningful. Older
@@ -114,8 +122,8 @@ func (s *vaneNodeState) profileFresh(now time.Time, at time.Time) bool {
 
 // cumulLossRate is the node's lifetime TCP retransmission ratio. ok is false
 // when nothing was ever sent: no evidence, never "zero loss".
-func (s *vaneNodeState) cumulLossRate() (float64, bool) {
-	if s == nil || s.cumulSent == 0 {
+func (s *vaneNodeState) cumulLossRate(now time.Time) (float64, bool) {
+	if s == nil || s.cumulSent == 0 || !s.profileFresh(now, s.cumulAt) {
 		return 0, false
 	}
 	return math.Min(float64(s.cumulRetrans)/float64(s.cumulSent), 1), true
@@ -146,7 +154,8 @@ func (s vaneNodeState) snapshot(transport vaneTransport, now time.Time) vaneMetr
 	if transport == vaneTransportUDP {
 		snapshot = s.udp.snapshot(now)
 	}
-	snapshot.loss = s.lossEstimate()
+	snapshot.loss = s.lossEstimate(now)
+	snapshot.latency = s.latencyEstimate(now)
 	snapshot.success = s.successEstimate(now)
 	snapshot.maxRate = s.maxRateEstimate(now)
 	snapshot.duration = s.durationEstimate(now)
@@ -154,8 +163,8 @@ func (s vaneNodeState) snapshot(transport vaneTransport, now time.Time) vaneMetr
 	return snapshot
 }
 
-func (s vaneNodeState) lossEstimate() vaneMetricEstimate {
-	rate, ok := s.cumulLossRate()
+func (s vaneNodeState) lossEstimate(now time.Time) vaneMetricEstimate {
+	rate, ok := s.cumulLossRate(now)
 	if !ok {
 		return vaneMetricEstimate{}
 	}
@@ -163,6 +172,21 @@ func (s vaneNodeState) lossEstimate() vaneMetricEstimate {
 		value:      rate,
 		evidence:   float64(s.cumulSent),
 		confidence: vaneClamp(float64(s.cumulSent)/1000, 0, 1),
+		valid:      true,
+	}
+}
+
+// latencyEstimate is the node's media-window RTT (log milliseconds). Only
+// media flows feed it, so a node that was never a media target stays invalid
+// and scores the neutral missing cost instead of "zero latency".
+func (s vaneNodeState) latencyEstimate(now time.Time) vaneMetricEstimate {
+	if !s.profileFresh(now, s.latencyAt) || s.latencySamples == 0 || s.latencyMs <= 0 {
+		return vaneMetricEstimate{}
+	}
+	return vaneMetricEstimate{
+		value:      math.Log(s.latencyMs),
+		evidence:   float64(s.latencySamples),
+		confidence: vaneClamp(float64(s.latencySamples)/10, 0, 1),
 		valid:      true,
 	}
 }
@@ -1584,6 +1608,40 @@ func (a *Vane) recordCumulativeLossIdentity(candidate, identity string, nodeEpoc
 	if state := a.ensureNodeIdentityEpochLocked(candidate, identity, nodeEpoch, now); state != nil {
 		state.cumulSent += observation.SegsOut
 		state.cumulRetrans += observation.RetransSegs
+		state.cumulAt = now
+		a.learning.markDirtyLocked(now)
+	}
+	a.learning.mu.Unlock()
+	a.mu.Unlock()
+}
+
+// recordLatencyIdentity folds one media window's RTT into the node's EMA
+// (alpha 0.2, ~5 samples to converge). Unsupported reads never call it: no
+// signal is not zero latency.
+func (a *Vane) recordLatencyIdentity(candidate, identity string, nodeEpoch uint64, latency time.Duration) {
+	now := a.clock.Now()
+	millis := float64(latency.Milliseconds())
+	if millis <= 0 {
+		return
+	}
+	a.mu.Lock()
+	a.learning.mu.Lock()
+	// A media flow is bound by name only; resolve the live identity/epoch here so
+	// the sample lands on the current node record instead of a name-keyed ghost
+	// that no selection ever reads.
+	if identity == "" {
+		if current := a.nodes[candidate]; current != nil {
+			identity, nodeEpoch = current.identity, current.epoch
+		}
+	}
+	if state := a.ensureNodeIdentityEpochLocked(candidate, identity, nodeEpoch, now); state != nil {
+		if state.latencySamples == 0 {
+			state.latencyMs = millis
+		} else {
+			state.latencyMs = 0.2*millis + 0.8*state.latencyMs
+		}
+		state.latencySamples++
+		state.latencyAt = now
 		a.learning.markDirtyLocked(now)
 	}
 	a.learning.mu.Unlock()

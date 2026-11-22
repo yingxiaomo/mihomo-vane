@@ -211,6 +211,8 @@ func TestVanePersistProfileRoundTrip(t *testing.T) {
 	state.recordMaxRate(now, 50_000_000)
 	state.totalDuration, state.durationCount, state.totalsAt = 600*time.Second, 10, now
 	state.downloadTotal = 500 << 20
+	state.latencyMs, state.latencySamples, state.latencyAt = 44, 2, now
+	state.cumulSent, state.cumulRetrans, state.cumulAt = 10_000, 100, now
 
 	learning := &vaneLearningState{nodes: map[string]*vaneNodeState{"alpha": state}}
 	snapshot := learning.snapshotLocked(now)
@@ -222,6 +224,13 @@ func TestVanePersistProfileRoundTrip(t *testing.T) {
 	require.Equal(t, 50_000_000.0, restored.maxDownloadRate)
 	require.Equal(t, 600*time.Second, restored.totalDuration)
 	require.Equal(t, uint64(500<<20), restored.downloadTotal)
+	require.Equal(t, 44.0, restored.latencyMs)
+	require.Equal(t, uint64(2), restored.latencySamples)
+	require.Equal(t, uint64(10_000), restored.cumulSent)
+	require.Equal(t, uint64(100), restored.cumulRetrans)
+	rate, ok := restored.cumulLossRate(now)
+	require.True(t, ok, "the cumulative pair crosses a reload while fresh")
+	require.InDelta(t, 0.01, rate, 1e-9)
 }
 
 // SCORE-COST-01: the three new cost curves keep their anchor semantics.

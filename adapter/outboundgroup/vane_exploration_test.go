@@ -356,13 +356,13 @@ func TestVaneEvidenceCoverageMatchesTransportObservability(t *testing.T) {
 		throughput: vaneMetricEstimate{valid: true, confidence: 1},
 	}
 	require.Zero(t, vaneEvidenceCoverageMicros(throughputOnly, vaneTransportUDP, vaneSceneMedia), "UDP cannot observe throughput")
-	require.Equal(t, int64(350_000), vaneEvidenceCoverageMicros(throughputOnly, vaneTransportTCP, vaneSceneMedia))
+	require.Equal(t, int64(500_000), vaneEvidenceCoverageMicros(throughputOnly, vaneTransportTCP, vaneSceneMedia))
 
 	udpObservable := vaneMetricsSnapshot{
 		failure: vaneMetricEstimate{valid: true, confidence: 1},
 		connect: vaneMetricEstimate{valid: true, confidence: 1},
 	}
-	require.Equal(t, int64(857_143), vaneEvidenceCoverageMicros(udpObservable, vaneTransportUDP, vaneSceneBulk))
+	require.Equal(t, int64(714_286), vaneEvidenceCoverageMicros(udpObservable, vaneTransportUDP, vaneSceneBulk))
 	udpObservable.jitter = vaneMetricEstimate{valid: true, confidence: 1}
 	require.Equal(t, int64(1_000_000), vaneEvidenceCoverageMicros(udpObservable, vaneTransportUDP, vaneSceneBulk))
 }
