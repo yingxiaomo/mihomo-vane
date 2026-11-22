@@ -42,8 +42,7 @@ const (
 type vaneRacingMode uint8
 
 const (
-	vaneRacingOff vaneRacingMode = iota
-	vaneRacingShadow
+	vaneRacingShadow vaneRacingMode = iota
 	vaneRacingOn
 )
 
@@ -54,7 +53,7 @@ func (m vaneRacingMode) String() string {
 	case vaneRacingOn:
 		return "on"
 	default:
-		return "off"
+		return "unknown"
 	}
 }
 
@@ -133,23 +132,14 @@ type vaneRacingRuntime struct {
 	activeTasks   map[uint64]context.CancelFunc
 	capabilities  map[vaneMemberLease]vaneCapabilityRecord
 	noWinnerUntil map[vaneTargetKey]time.Time
-	// P0: per-target throttle stamps for the off-mode evidence probe.
-	evidenceProbeUntil map[vaneTargetKey]time.Time
-	budget             vaneRacingBudget
-	closed             bool
+	budget        vaneRacingBudget
+	closed        bool
 }
 
 func newVaneRacingConfig(option VaneOption) (vaneRacingConfig, error) {
-	config := vaneRacingConfig{mode: vaneRacingOff, budgetBytesHour: vaneDefaultRacingBudgetMBHour * 1024 * 1024}
-	switch strings.ToLower(strings.TrimSpace(option.Racing)) {
-	case "", "off":
-		config.mode = vaneRacingOff
-	case "shadow":
+	config := vaneRacingConfig{mode: vaneRacingOn, budgetBytesHour: vaneDefaultRacingBudgetMBHour * 1024 * 1024}
+	if option.Vane != nil && !*option.Vane {
 		config.mode = vaneRacingShadow
-	case "on":
-		config.mode = vaneRacingOn
-	default:
-		return vaneRacingConfig{}, fmt.Errorf("racing must be off, shadow, or on")
 	}
 	rawURL := strings.TrimSpace(option.RacingURL)
 	if rawURL == "" {
@@ -175,8 +165,6 @@ func newVaneRacingRuntime() vaneRacingRuntime {
 		activeTasks:   make(map[uint64]context.CancelFunc),
 		capabilities:  make(map[vaneMemberLease]vaneCapabilityRecord),
 		noWinnerUntil: make(map[vaneTargetKey]time.Time),
-		// P0: per-target throttle for the off-mode evidence probe.
-		evidenceProbeUntil: make(map[vaneTargetKey]time.Time),
 	}
 }
 
@@ -224,8 +212,8 @@ func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRace
 	// An empty targetScope means the flow is not gate-eligible. The scope comes
 	// from media-reconnect-domains, or — when that gate is empty — from the
 	// scene rule that classified the flow as media (SCENE-GATE-001).
-	if a.racing.mode == vaneRacingOff || callback == nil || request.targetKey.targetScope == "" {
-		return false, "racing-off"
+	if callback == nil || request.targetKey.targetScope == "" {
+		return false, "invalid-race-request"
 	}
 	now := a.clock.Now()
 	a.racingRuntime.mu.Lock()
@@ -638,8 +626,7 @@ func (a *Vane) reserveRaceBudget(count int, now time.Time) []int64 {
 }
 
 // reserveRaceBudgetLocked is reserveRaceBudget for callers already holding
-// racingRuntime.mu (the off-mode evidence probe stamps its throttle and
-// reserves in one critical section).
+// racingRuntime.mu.
 func (a *Vane) reserveRaceBudgetLocked(count int, now time.Time) []int64 {
 	if count <= 0 {
 		return nil

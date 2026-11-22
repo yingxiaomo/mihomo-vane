@@ -205,6 +205,7 @@ type vaneThroughputObservation struct {
 	TotalBytes    int64
 	Age           time.Duration
 	Delivered     bool
+	untrusted     bool
 }
 
 // vaneConnectionCloseObservation describes only locally observable
@@ -598,12 +599,7 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 		if delivered || directPolicy || shadowObserve {
 			observation.Delivered = delivered
 			if action := c.onWindow(observation); action != nil {
-				if shadowObserve && !delivered && !directPolicy {
-					// Shadow observes only: the race was already scheduled
-					// inside the policy, and would-handoff is recorded by
-					// the race callback. Discarding the baseline action
-					// keeps shadow from changing any traffic.
-				} else if delivered {
+				if delivered {
 					c.requestAbort(action)
 				} else {
 					c.mu.Lock()
@@ -625,9 +621,8 @@ func (c *vaneObservedConn) enableDirectPolicy() {
 
 // enableShadowObserve lets the window policy run on undelivered windows
 // while racing is in shadow mode, purely to observe. The policy runs so low
-// windows accumulate and races get scheduled, but the action it returns is
-// discarded at the gate, never queued and never executed. Without it, shadow
-// can only observe delivered windows, and a flow that mostly reads directly
+// windows accumulate and races get scheduled; the dry-run policy returns nil.
+// Without it, shadow can only observe delivered windows; mostly-direct reads
 // never reaches the policy at all — the shadow deadlock (SHADOW-OBSERVE-001).
 func (c *vaneObservedConn) enableShadowObserve() {
 	c.mu.Lock()

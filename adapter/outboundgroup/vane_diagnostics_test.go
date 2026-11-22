@@ -138,8 +138,10 @@ func TestVaneDiagnosticsPersistReconnectLifecycleAndOutcome(t *testing.T) {
 	}
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 
-	flow := newVaneMediaFlow(group, "alpha", metadata)
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
+	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	low := vaneThroughputObservation{
 		BitsPerSecond: 1_000_000,
 		TotalBytes:    4 * 1024 * 1024,
@@ -157,8 +159,10 @@ func TestVaneDiagnosticsPersistReconnectLifecycleAndOutcome(t *testing.T) {
 
 	handoff := newVaneMediaFlow(group, "beta", metadata, token)
 	require.NotNil(t, handoff)
+	handoff.identity, handoff.nodeEpoch = token.toLease.identity, token.toLease.epoch
 	competing := newVaneMediaFlow(group, "beta", metadata)
 	require.NotNil(t, competing)
+	competing.identity, competing.nodeEpoch = token.toLease.identity, token.toLease.epoch
 	high := vaneThroughputObservation{
 		BitsPerSecond: 8_000_000,
 		TotalBytes:    8 * 1024 * 1024,
@@ -176,13 +180,13 @@ func TestVaneDiagnosticsPersistReconnectLifecycleAndOutcome(t *testing.T) {
 	require.Equal(t, uint64(5), snapshot.Counters.ThroughputSamples)
 	require.Equal(t, uint64(3), snapshot.Counters.LowThroughputSamples)
 	require.Equal(t, uint64(1), snapshot.Counters.ReconnectPrepared)
-	require.Equal(t, uint64(1), snapshot.Counters.ReconnectCommitted)
-	require.Equal(t, uint64(2), snapshot.Counters.HandoffSelections)
+	require.Equal(t, uint64(1), snapshot.Counters.HandoffCommitted)
+	require.Equal(t, uint64(2), snapshot.Counters.ReconnectSelected)
 	require.Equal(t, uint64(1), snapshot.Counters.HandoffMeasured)
 	require.NotEmpty(t, snapshot.RecentEvents)
 
 	last := snapshot.RecentEvents[len(snapshot.RecentEvents)-1]
-	require.Equal(t, "handoff-measured", last.Kind)
+	require.Equal(t, "handoff-improved", last.Kind)
 	require.Equal(t, "alpha", last.From)
 	require.Equal(t, "beta", last.To)
 	require.NotZero(t, last.HandoffID)

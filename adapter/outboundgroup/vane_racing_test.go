@@ -44,34 +44,35 @@ func (p *vaneNetworkTestProxy) DialContext(ctx context.Context, metadata *C.Meta
 
 func configureVaneRacingForTest(t *testing.T, group *Vane, mode vaneRacingMode) {
 	t.Helper()
-	config, err := newVaneRacingConfig(VaneOption{Racing: mode.String()})
+	enabled := mode == vaneRacingOn
+	config, err := newVaneRacingConfig(VaneOption{Vane: &enabled})
 	require.NoError(t, err)
 	group.racing = config
 }
 
-// RACE-CONFIG-001: defaults and option parsing stay behind the explicit racing opt-in.
+// RACE-CONFIG-001: omitted means enabled; false is diagnostic-only.
 func TestVaneRacingConfig(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	group, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{}, fallback, nil)
 	require.NoError(t, err)
-	require.Equal(t, vaneRacingOff, group.racing.mode)
+	require.Equal(t, vaneRacingOn, group.racing.mode)
+	require.Equal(t, "unknown", vaneRacingMode(255).String())
 	require.Equal(t, vaneDefaultRacingURL, group.racing.url.String())
 	require.Equal(t, int64(64*1024*1024), group.racing.budgetBytesHour)
 
-	for _, mode := range []string{"off", "shadow", "on", "SHADOW"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
 			configured, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{
-				Racing: mode, RacingURL: "https://example.com/download",
+				Vane: &enabled, RacingURL: "https://example.com/download",
 			}, fallback, nil)
 			require.NoError(t, err)
 			require.Equal(t, int64(64*1024*1024), configured.racing.budgetBytesHour)
 		})
 	}
 	for _, option := range []VaneOption{
-		{Racing: "invalid"},
-		{Racing: "on", RacingURL: "http://example.com/file"},
-		{Racing: "shadow", RacingURL: "https://user:pass@example.com/file"},
-		{Racing: "on", RacingURL: "https:///missing-host"},
+		{RacingURL: "http://example.com/file"},
+		{RacingURL: "https://user:pass@example.com/file"},
+		{RacingURL: "https:///missing-host"},
 	} {
 		_, err := NewVane(GroupCommonOption{Name: "vane"}, option, fallback, nil)
 		require.Error(t, err)
@@ -84,7 +85,7 @@ func TestVaneRacingConfig(t *testing.T) {
 	}
 	parsed, err := ParseProxyGroup(map[string]any{
 		"name": "vane-racing", "type": "vane", "proxies": []string{"alpha"}, "empty-fallback": "fallback",
-		"racing": "shadow", "racing-url": "https://example.com/probe",
+		"vane": false, "racing-url": "https://example.com/probe",
 	}, proxyMap, map[string]P.ProxyProvider{}, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, vaneRacingShadow, parsed.(*Vane).racing.mode)
@@ -786,13 +787,20 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
 	metadata := &C.Metadata{Host: "rr.guard.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 
-	t.Run("racing off rejects", func(t *testing.T) {
-		configureVaneRacingForTest(t, group, vaneRacingOff)
-		request := newVaneRaceRequestForTest(t, group, metadata)
-		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
-		require.False(t, scheduled)
-		require.Equal(t, "racing-off", reason)
-	})
+	for _, invalid := range []string{"nil-callback", "empty-scope"} {
+		t.Run(invalid, func(t *testing.T) {
+			request := newVaneRaceRequestForTest(t, group, metadata)
+			callback := func(vaneRaceResult) {}
+			if invalid == "nil-callback" {
+				callback = nil
+			} else {
+				request.targetKey.targetScope = ""
+			}
+			scheduled, reason := group.scheduleMediaRace(request, callback)
+			require.False(t, scheduled)
+			require.Equal(t, "invalid-race-request", reason)
+		})
+	}
 
 	t.Run("closed group rejects", func(t *testing.T) {
 		configureVaneRacingForTest(t, group, vaneRacingShadow)

@@ -101,15 +101,17 @@ func TestVaneMediaReconnectClosesOnceAndHandsOffTarget(t *testing.T) {
 
 	key := vaneMediaTargetKey{target: "googlevideo.com", port: 443}
 	group.mu.Lock()
-	hint := group.mediaHints[key]
+	stateKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	require.True(t, ok)
+	lease := group.targetHandoffs[stateKey]
 	_, slow := group.mediaSlowCooldowns[vaneMediaCandidateKey{vaneMediaTargetKey: key, candidate: "alpha", identity: alpha.identity}]
 	group.mu.Unlock()
-	require.Equal(t, "beta", hint.candidate)
+	require.Equal(t, "beta", lease.to.name)
 	require.True(t, slow)
 
 	require.Equal(t, "beta", group.pick(metadata, vaneTransportTCP, false, true).Name(), "the reconnect must follow the media-domain handoff")
 	group.mu.Lock()
-	_, hintStillPresent := group.mediaHints[key]
+	_, hintStillPresent := group.targetHandoffs[stateKey]
 	group.mu.Unlock()
 	require.True(t, hintStillPresent, "the short sticky hint cannot be stolen by one concurrent connection")
 
@@ -619,7 +621,10 @@ func TestVaneMediaBufferCreditEventuallyDefersToEscapeLimit(t *testing.T) {
 	group.media.maxLowWindows = 6
 	group.media.demandBPS = 2_000_000
 	group.media.bufferGuard = 5 * time.Second
-	flow := newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "rr6.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	metadata := &C.Metadata{Host: "rr6.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	require.NotNil(t, flow)
 	for window := 1; window < 6; window++ {
 		sample := vaneThroughputObservation{BitsPerSecond: 2_000_000, TotalBytes: int64(window) * 1_250_000, Age: time.Duration(window*5) * time.Second}

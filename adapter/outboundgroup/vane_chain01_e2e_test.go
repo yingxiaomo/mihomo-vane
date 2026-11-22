@@ -24,8 +24,7 @@ import (
 //     because every challenger lacks fresh evidence — the flow is NOT closed;
 //  3. shadow/on racing schedules a probe, and the probe's 40 Mbps bound fills
 //     the capability cache (the recovery loop);
-//  4. the next slow window admits the challenger on capability evidence and
-//     commits; the old flow is closed exactly once, the reconnect claims the
+//  4. the race winner commits from its async callback; the old flow is closed exactly once, the reconnect claims the
 //     handoff lease;
 //  5. the new flow's real throughput settles the handoff: improved with demand
 //     2M, no-gain (and no preference) with demand 10M.
@@ -60,14 +59,20 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
 	chain01ProductionValues(t, group, demand)
-	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	// The race probe only targets beta (alpha is the current node and is
 	// excluded from the race), so dispatch by proxy name: beta gets the
 	// 40 Mbps bound that unlocks the gate, anything else is invalid. The
 	// cold-pick probe is suppressed for this test (see below), so the race
 	// probe is the only consumer of this injection.
-	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+	release := make(chan struct{})
+	group.racing.probe = func(ctx context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return vaneProbeResult{reason: "canceled"}
+		}
 		if proxy.Name() != betaName {
 			return vaneProbeResult{reason: "nil-connection"}
 		}
@@ -115,13 +120,14 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	}, "the first trigger must be suppressed by the evidence gate")
 	snapshot := group.VaneDiagnostics()
 	require.GreaterOrEqual(t, snapshot.Counters.ReconnectSuppressed, uint64(1))
-	require.Zero(t, snapshot.Counters.ReconnectCommitted)
+	require.Zero(t, snapshot.Counters.HandoffCommitted)
 	slowConn.mu.Lock()
 	closedSoFar := slowConn.closeCalls
 	slowConn.mu.Unlock()
 	require.Zero(t, closedSoFar, "no evidence means no close: the slow flow must survive")
 
-	// The recovery loop: shadow scheduled the race and the probe refilled the
+	close(release)
+	// The recovery loop: Vane scheduled the race and the probe refilled the
 	// capability cache with a 40 Mbps bound for beta.
 	require.Eventually(t, func() bool {
 		group.racingRuntime.mu.Lock()
@@ -137,8 +143,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 		return false
 	}, 5*time.Second, time.Millisecond, "the race's 40 Mbps bound must land in the capability cache for beta")
 
-	// Stage 3-4: with beta's capability evidence in place the next slow
-	// window commits and policy-closes the old flow exactly once.
+	// Stage 3-4: the race callback commits and policy-closes the flow once.
 	driveSlowUntil(func() bool {
 		slowConn.mu.Lock()
 		defer slowConn.mu.Unlock()
@@ -176,7 +181,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	}
 
 	snapshot = group.VaneDiagnostics()
-	require.Positive(t, snapshot.Counters.ReconnectCommitted)
+	require.Positive(t, snapshot.Counters.HandoffCommitted)
 	require.Positive(t, snapshot.Counters.HandoffMeasured)
 	require.Positive(t, snapshot.Counters.HandoffImproved,
 		"~5.6 Mbps real throughput must settle as an improvement over 0.5 Mbps")
@@ -216,7 +221,7 @@ func TestVaneChain01E2EDemandGatesTheClose(t *testing.T) {
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
 	chain01ProductionValues(t, group, demand)
-	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		// A 6 Mbps probe clears the 5 Mbps slow line but not the 10M
 		// demand-inclusive close bar: the gate must hold.
@@ -261,7 +266,7 @@ func TestVaneChain01E2EDemandGatesTheClose(t *testing.T) {
 	snapshot := group.VaneDiagnostics()
 	require.GreaterOrEqual(t, snapshot.Suppressions["no-evidence-candidate"], uint64(1),
 		"a 6 Mbps probe cannot justify cutting a 4K flow when demand is 10M")
-	require.Zero(t, snapshot.Counters.ReconnectCommitted)
+	require.Zero(t, snapshot.Counters.HandoffCommitted)
 	slowConn.mu.Lock()
 	closeCalls := slowConn.closeCalls
 	slowConn.mu.Unlock()

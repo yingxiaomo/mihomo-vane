@@ -1,7 +1,6 @@
 package outboundgroup
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -39,13 +38,6 @@ const (
 	// reconnect cooldown while it never produces enough bytes to settle.
 	vaneMediaValveEmptyWindows = 2
 	vaneMediaValveThrottle     = 10 * time.Minute
-	// P0 (off-mode evidence probe): when the evidence gate blocks a close in
-	// off mode there is no race to fill the capability cache, so the block
-	// never lifts. One probe of the top-ranked challenger per target per
-	// throttle window breaks that deadlock. 10 minutes aligns with the
-	// capability TTL and keeps the cost at 4MiB/round = 24MB/h worst case of
-	// the shared racing budget (races keep the rest).
-	vaneMediaEvidenceProbeThrottle = 10 * time.Minute
 	// P1 (background mis-close): the observed rate is the delivery rate
 	// (min(node, client)), so a client that throttles briefly (background
 	// tab) looks like a slow node. A low window within this window of the
@@ -57,7 +49,7 @@ const (
 	// silent (open connection, zero reads) produces no windows at all, so the
 	// trigger can never fire. After this much silence the watchdog feeds a
 	// synthetic near-zero window through the normal observe path so the
-	// grace, trigger, evidence probe and prepare chain all apply. The tick
+	// grace, trigger, race and prepare chain all apply. The tick
 	// granularity bounds how late the first synthetic window can arrive.
 	vaneMediaStallSilence = 10 * time.Second
 	vaneMediaWatchdogTick = 5 * time.Second
@@ -221,18 +213,16 @@ type vaneMediaFlow struct {
 	// §2.4: the last real sample and when it arrived. A flow that has a
 	// sample but then goes silent is a stall candidate; a flow that never
 	// sampled is just starting and is left alone.
-	lastSampleAt time.Time
-	lastSample   vaneThroughputObservation
-	hasSample    bool
-	// P0: the off-mode evidence probe runs at most once per flow at a time.
-	evidenceProbeInflight bool
-	aborted               bool
-	closed                bool
-	handoff               *vaneHandoffToken
-	raceSeq               uint64
-	raceToken             uint64
-	policySubmitter       func(vanePolicyAction, bool)
-	flowCountOnce         sync.Once
+	lastSampleAt    time.Time
+	lastSample      vaneThroughputObservation
+	hasSample       bool
+	aborted         bool
+	closed          bool
+	handoff         *vaneHandoffToken
+	raceSeq         uint64
+	raceToken       uint64
+	policySubmitter func(vanePolicyAction, bool)
+	flowCountOnce   sync.Once
 	// §E: only the flow that claimed the handoff token (the connection the
 	// switch was made for) arms the re-evaluation valve. valveCurrentBPS
 	// keeps the pre-switch speed from the token for the re-run prepare.
@@ -360,7 +350,7 @@ func (a *Vane) mediaWatchdogLoop() {
 // runMediaWatchdogTick feeds synthetic near-zero windows to flows that were
 // delivering samples and then went silent while still open. The synthetic
 // window goes through the normal observe() path, so the grace, low-window
-// trigger, evidence probe and prepare chain all apply unchanged — the
+// trigger, race and prepare chain all apply unchanged — the
 // watchdog only makes "fully stalled" visible to a trigger that is otherwise
 // sample-driven.
 func (a *Vane) runMediaWatchdogTick(now time.Time) {
@@ -397,6 +387,7 @@ func (f *vaneMediaFlow) observeSyntheticStall(now time.Time) {
 	// the age advances by the silence so the age/min-bytes gates see truth.
 	synthetic := vaneThroughputObservation{
 		BitsPerSecond: 1,
+		untrusted:     true,
 		TotalBytes:    last.TotalBytes,
 		Age:           last.Age + silence,
 	}
@@ -452,6 +443,13 @@ func (f *vaneMediaFlow) setPolicySubmitter(submitter func(vanePolicyAction, bool
 
 func (f *vaneMediaFlow) submitPolicyAction(action vanePolicyAction, delivered bool) {
 	if f == nil || action == nil {
+		return
+	}
+	if f.group.racing.mode == vaneRacingShadow {
+		f.group.diagnostics.record(vaneDiagnosticRecord{
+			kind: "handoff-would-commit", reason: "dry-run", target: f.target,
+			bucket: f.targetKey.target, port: f.port, from: f.candidate, force: true,
+		})
 		return
 	}
 	f.mu.Lock()
@@ -538,44 +536,48 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 			force:      true,
 		})
 	}
-	f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond)
-	if low {
-		f.group.invalidateTargetPreference(f.targetStateKey, member)
-	} else {
-		f.group.refreshTargetPreference(f.targetStateKey, member, sample.BitsPerSecond)
-	}
-	if handoff != nil {
-		f.group.diagnostics.record(vaneDiagnosticRecord{
-			kind:       "handoff-reconnect-positive",
-			handoffID:  handoff.id,
-			leaseID:    handoff.leaseID,
-			target:     handoff.target,
-			bucket:     handoff.bucket,
-			port:       handoff.port,
-			from:       handoff.from,
-			to:         handoff.to,
-			bps:        sample.BitsPerSecond,
-			totalBytes: sample.TotalBytes,
-			age:        sample.Age,
-			force:      true,
-		})
-		f.group.diagnostics.record(vaneDiagnosticRecord{
-			kind:        "handoff-measured",
-			handoffID:   handoff.id,
-			leaseID:     handoff.leaseID,
-			target:      handoff.target,
-			bucket:      handoff.bucket,
-			port:        handoff.port,
-			from:        handoff.from,
-			to:          handoff.to,
-			bps:         sample.BitsPerSecond,
-			previousBPS: handoff.previousBPS,
-			totalBytes:  sample.TotalBytes,
-			age:         sample.Age,
-			lowWindows:  lowWindows,
-			force:       true,
-		})
-		f.group.settleTargetHandoff(handoff, member, sample)
+	untrusted := sample.untrusted || graced
+	// Client throttling and synthetic windows trigger policy, never node-health writes.
+	if !untrusted {
+		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond)
+		if low {
+			f.group.invalidateTargetPreference(f.targetStateKey, member)
+		} else {
+			f.group.refreshTargetPreference(f.targetStateKey, member, sample.BitsPerSecond)
+		}
+		if handoff != nil {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind:       "handoff-reconnect-positive",
+				handoffID:  handoff.id,
+				leaseID:    handoff.leaseID,
+				target:     handoff.target,
+				bucket:     handoff.bucket,
+				port:       handoff.port,
+				from:       handoff.from,
+				to:         handoff.to,
+				bps:        sample.BitsPerSecond,
+				totalBytes: sample.TotalBytes,
+				age:        sample.Age,
+				force:      true,
+			})
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind:        "handoff-measured",
+				handoffID:   handoff.id,
+				leaseID:     handoff.leaseID,
+				target:      handoff.target,
+				bucket:      handoff.bucket,
+				port:        handoff.port,
+				from:        handoff.from,
+				to:          handoff.to,
+				bps:         sample.BitsPerSecond,
+				previousBPS: handoff.previousBPS,
+				totalBytes:  sample.TotalBytes,
+				age:         sample.Age,
+				lowWindows:  lowWindows,
+				force:       true,
+			})
+			f.group.settleTargetHandoff(handoff, member, sample)
+		}
 	}
 	if lowWindows < config.lowWindows || sample.Age < config.minAge || sample.TotalBytes < config.minBytes {
 		return nil
@@ -602,41 +604,26 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 
 	plan, reason := f.group.prepareMediaReconnectForNodeDetailed(f.targetKey, f.target, f.port, f.candidate, f.identity, f.nodeEpoch, sample.BitsPerSecond)
 	mode := f.group.racing.mode
-	if reason != "" && !(mode != vaneRacingOff && (reason == "no-challenger" || reason == "no-evidence-candidate")) {
+	if reason != "" && reason != "no-challenger" && reason != "no-evidence-candidate" {
 		f.recordReconnectSuppressed(reason, sample, lowWindows)
-		// P0: off mode has no race to fill the capability cache, so a close
-		// blocked on missing evidence stays blocked forever. Probe the
-		// top-ranked challenger so the next low window can decide. The gate
-		// itself is unchanged — this only supplies the evidence it asks for.
-		if mode == vaneRacingOff && (reason == "no-evidence-candidate" || reason == "no-challenger") {
-			f.scheduleEvidenceProbe(sample, lowWindows)
-		}
 		return nil
 	}
 
-	if mode == vaneRacingOff {
-		if reason != "" {
-			f.recordReconnectSuppressed(reason, sample, lowWindows)
-			return nil
-		}
-		f.completeMediaPlan(&plan, sample, lowWindows)
-		return f.policyActionForPlan(plan, sample, lowWindows, false)
-	}
-
 	if mode == vaneRacingShadow {
-		if reason == "" && !plan.knownGood {
-			f.scheduleRace(sample, lowWindows)
-		} else if reason == "no-challenger" || reason == "no-evidence-candidate" {
-			f.scheduleRace(sample, lowWindows)
-		}
-		// Shadow preserves the frozen baseline action and every baseline media
-		// state mutation. Racing contributes only capability and diagnostics.
-		if reason != "" {
+		if reason == "" {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind: "handoff-would-commit", reason: "baseline", target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
+				bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes, age: sample.Age,
+				lowWindows: lowWindows, force: true,
+			})
+		} else {
 			f.recordReconnectSuppressed(reason, sample, lowWindows)
-			return nil
 		}
-		f.completeMediaPlan(&plan, sample, lowWindows)
-		return f.policyActionForPlan(plan, sample, lowWindows, false)
+		if reason != "" || !plan.knownGood {
+			f.scheduleRace(sample, lowWindows)
+		}
+		return nil
 	}
 
 	if reason == "" && plan.knownGood {
@@ -648,107 +635,6 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	}
 	f.scheduleRace(sample, lowWindows)
 	return nil
-}
-
-// scheduleEvidenceProbe breaks the off-mode evidence deadlock: it reserves one
-// probe's worth of budget, applies the per-target throttle, and hands the
-// actual probe to a goroutine. The probe writes only the capability cache —
-// never a close, target evidence, preference or handoff lease — so CHAIN-01's
-// "no switch without evidence" rule is untouched; it just gets the evidence it
-// asks for.
-func (f *vaneMediaFlow) scheduleEvidenceProbe(sample vaneThroughputObservation, lowWindows int) {
-	if f == nil {
-		return
-	}
-	f.mu.Lock()
-	if f.aborted || f.closed || f.evidenceProbeInflight {
-		f.mu.Unlock()
-		return
-	}
-	f.evidenceProbeInflight = true
-	f.mu.Unlock()
-
-	now := f.group.clock.Now()
-	f.group.racingRuntime.mu.Lock()
-	if f.group.racingRuntime.closed || f.group.racingRuntime.evidenceProbeUntil[f.targetStateKey].After(now) {
-		f.group.racingRuntime.mu.Unlock()
-		f.clearEvidenceProbeInflight()
-		return
-	}
-	// Reserve before stamping: a budget denial must leave the throttle open so
-	// the next low window can retry once budget recovers.
-	limits := f.group.reserveRaceBudgetLocked(1, now)
-	if len(limits) == 0 {
-		f.group.racingRuntime.mu.Unlock()
-		f.clearEvidenceProbeInflight()
-		f.group.diagnostics.record(vaneDiagnosticRecord{
-			kind:   "evidence-probe-budget-denied",
-			target: f.target, bucket: f.targetKey.target, port: f.port,
-			from: f.candidate, force: true,
-		})
-		return
-	}
-	f.group.racingRuntime.evidenceProbeUntil[f.targetStateKey] = now.Add(vaneMediaEvidenceProbeThrottle)
-	f.group.racingRuntime.mu.Unlock()
-
-	request := f.raceRequest(sample, lowWindows)
-	f.group.diagnostics.record(vaneDiagnosticRecord{
-		kind:   "evidence-probe-scheduled",
-		target: f.target, bucket: f.targetKey.target, port: f.port,
-		from: f.candidate, bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
-		age: sample.Age, lowWindows: lowWindows, force: true,
-	})
-	go f.runEvidenceProbe(request, limits[0])
-}
-
-func (f *vaneMediaFlow) clearEvidenceProbeInflight() {
-	f.mu.Lock()
-	f.evidenceProbeInflight = false
-	f.mu.Unlock()
-}
-
-// runEvidenceProbe probes the top-ranked challenger (one probe, one candidate)
-// and folds the result into the capability cache under the same
-// validateRaceWinner gate the race engine uses. The flow may have recovered or
-// closed meanwhile; the cache write is harmless either way, and nothing here
-// touches flow or policy state.
-func (f *vaneMediaFlow) runEvidenceProbe(request vaneRaceRequest, limit int64) {
-	defer f.clearEvidenceProbeInflight()
-	group := f.group
-	candidates, reason := group.snapshotRaceCandidates(request)
-	if reason != "" || len(candidates) == 0 {
-		group.settleRaceBudget(limit, 0)
-		return
-	}
-	candidate := candidates[0]
-	probeFunc := group.racing.probe
-	if probeFunc == nil {
-		probeFunc = probeVaneCapability
-	}
-	probeCtx, cancel := context.WithCancel(group.racingRuntime.ctx)
-	defer cancel()
-	result := probeFunc(probeCtx, candidate.proxy, group.racing.url, limit)
-	group.settleRaceBudget(limit, result.bytes)
-	kind := "evidence-probe-invalid"
-	if result.valid {
-		kind = "evidence-probe-success"
-	}
-	group.diagnostics.record(vaneDiagnosticRecord{
-		kind: kind, reason: result.reason,
-		target: request.target, bucket: request.targetKey.targetScope, port: request.port,
-		from: request.current.name, to: candidate.member.name,
-		bps: result.lowerBoundBPS, totalBytes: result.bytes, age: result.duration, force: true,
-	})
-	if !result.valid || !group.validateRaceWinner(request, candidate.member) {
-		return
-	}
-	group.racingRuntime.mu.Lock()
-	group.racingRuntime.capabilities[candidate.member] = vaneCapabilityRecord{
-		member: candidate.member, lowerBoundBPS: result.lowerBoundBPS,
-		bytes: result.bytes, observedAt: group.clock.Now(),
-	}
-	group.pruneCapabilitiesLocked(group.clock.Now())
-	group.racingRuntime.mu.Unlock()
 }
 
 func (f *vaneMediaFlow) recordReconnectSuppressed(reason string, sample vaneThroughputObservation, lowWindows int) {
@@ -928,15 +814,10 @@ func (f *vaneMediaFlow) policyAborted() bool {
 
 // noteEmptyWindow is §E's counter hook: the connection settled a 5-second
 // window that produced no qualified sample. Only the flow the switch was
-// made for counts, and only under shadow/on — off has no probes, so a re-run
-// would reach the same verdict. A qualified sample resets the streak in
+// made for counts. A qualified sample resets the streak in
 // observe(); two consecutive empty windows fire the valve once.
 func (f *vaneMediaFlow) noteEmptyWindow() {
 	if f == nil || !f.switchedTo {
-		return
-	}
-	mode := f.group.racing.mode
-	if mode != vaneRacingShadow && mode != vaneRacingOn {
 		return
 	}
 	f.mu.Lock()
@@ -1030,9 +911,7 @@ func (f *vaneMediaFlow) clearRaceToken(token uint64) {
 func (f *vaneMediaFlow) raceVerdict(token uint64) (closed, recovered, stale bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// A baseline policy close sets aborted, not closed. Shadow still records
-	// would-handoff after that close; only a natural close invalidates the
-	// observation. On-mode commits are already gated by policyActionForPlan.
+	// Only a natural close invalidates observation; commits recheck aborted.
 	return f.closed, f.lowWindows < f.group.media.lowWindows, f.raceToken != token
 }
 
@@ -1272,12 +1151,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 		// has no node state, so its lease epoch is 0; try both the computed
 		// lease and its zero-epoch form, because a probe that never selected
 		// the challenger wrote its record under epoch 0.
-		// §B: target-scoped real traffic outranks both node tiers — the same
-		// priority checkChallengerEvidenceLocked applies at commit. Target
-		// evidence exists in every racing mode: the public recordTargetEvidence
-		// gates off, but baseline settlements write through the Locked variant
-		// (intentional — the off-mode baseline learns from its own settled
-		// handoffs), so this tier works in off too.
+		// §B: target-scoped real traffic outranks both node tiers, as at commit.
 		bestEvidence := 0.0
 		if targetBPS, fresh := a.targetEvidenceLocked(stateKey, member, now); fresh {
 			bestEvidence = targetBPS

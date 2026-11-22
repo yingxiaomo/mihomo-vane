@@ -16,6 +16,11 @@ import (
 )
 
 func checkVaneRemovedMediaKeys(config map[string]any) error {
+	for supplied := range config {
+		if strings.EqualFold(supplied, "racing") {
+			return fmt.Errorf("vane group: replace removed racing key with vane: true or false")
+		}
+	}
 	var found []string
 	for _, key := range vaneRemovedMediaKeys {
 		for supplied := range config {

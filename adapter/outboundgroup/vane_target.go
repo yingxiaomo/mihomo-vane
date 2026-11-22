@@ -376,7 +376,7 @@ func (a *Vane) recordTargetEvidenceLocked(key vaneTargetKey, member vaneMemberLe
 }
 
 func (a *Vane) recordTargetEvidence(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64) {
-	if a.racing.mode == vaneRacingOff || bitsPerSecond <= 0 {
+	if bitsPerSecond <= 0 {
 		return
 	}
 	now := a.clock.Now()

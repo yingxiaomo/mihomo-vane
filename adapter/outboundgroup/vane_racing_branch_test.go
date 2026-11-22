@@ -255,12 +255,13 @@ func TestVaneTargetEvidenceAndFailureGuards(t *testing.T) {
 	require.Empty(t, group.targetEvidence, "non-positive evidence must be dropped")
 	group.mu.Unlock()
 
-	group.racing.mode = vaneRacingOff
+	configureVaneRacingForTest(t, group, vaneRacingShadow)
 	group.recordTargetEvidence(key, lease, 5_000_000)
 	group.mu.Lock()
-	require.Empty(t, group.targetEvidence, "evidence is only collected while racing is active")
-	group.racing.mode = vaneRacingOn
+	require.Len(t, group.targetEvidence, 1, "dry-run still collects trusted evidence")
+	delete(group.targetEvidence, vaneTargetEvidenceKey{target: key, member: lease})
 	group.mu.Unlock()
+	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	group.recordTargetEvidence(key, vaneMemberLease{name: "beta", identity: "test:beta-old"}, 5_000_000)
 	group.mu.Lock()
@@ -346,7 +347,7 @@ func TestVaneTargetSettleRejectsForeignAndExpiredTokens(t *testing.T) {
 // was removed with the racing-budget-mb-hour hardcode.
 func TestVaneRacingConfigRejectsFragment(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
-	_, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{Racing: "on", RacingURL: "https://example.com/file#frag"}, fallback, nil)
+	_, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{RacingURL: "https://example.com/file#frag"}, fallback, nil)
 	require.Error(t, err)
 }
 

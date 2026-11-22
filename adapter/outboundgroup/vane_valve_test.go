@@ -32,7 +32,7 @@ func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *v
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
 	chain01ProductionValues(t, group, demandBPS)
-	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	configureVaneRacingForTest(t, group, vaneRacingOn)
 	metadata := &C.Metadata{Host: "rr-valve.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	suppressColdPickProbeForTest(t, group, metadata)
 	mediaKey := group.mediaTargetKey(metadata.Host, metadata.DstPort)
@@ -121,17 +121,14 @@ func TestVaneValveThrottlesPerTarget(t *testing.T) {
 	require.Equal(t, 2, valveEventCount(t, group), "the valve runs again after the throttle expires")
 }
 
-// VALVE-03: the valve never arms in off mode — there are no probes, so a
-// re-run would reach the same verdict.
-func TestVaneValveDisabledInOffMode(t *testing.T) {
-	group, clock, _, _, _, flow, observed, _, _, _ := newValveRig(t, 2_000_000)
-	configureVaneRacingForTest(t, group, vaneRacingOff)
-
+// VALVE-03: a flow that did not claim a handoff never arms the valve.
+func TestVaneValveDoesNotArmWithoutHandoff(t *testing.T) {
+	_, _, _, _, _, flow, observed, _, _, _ := newValveRig(t, 2_000_000)
+	flow.switchedTo = false
 	flow.noteEmptyWindow()
 	flow.noteEmptyWindow()
 	require.False(t, observed.policyClosed)
-	require.Equal(t, 0, valveEventCount(t, group), "off mode never runs the valve")
-	_ = clock
+	require.Equal(t, 0, valveEventCount(t, flow.group))
 }
 
 // VALVE-04: a qualified sample resets the empty-window streak mid-streak.

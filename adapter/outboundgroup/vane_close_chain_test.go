@@ -754,12 +754,13 @@ func TestVaneSyncChainPrepareCommitCloseSettleImproved(t *testing.T) {
 	require.True(t, closed, "the slow flow must be closed by the synchronous plan")
 	require.Equal(t, 1, alphaConn.closeCalls)
 
-	key := vaneMediaTargetKey{target: "googlevideo.com", port: 443}
+	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	require.True(t, ok)
 	group.mu.Lock()
-	hint, hinted := group.mediaHints[key]
+	lease, leased := group.targetHandoffs[key]
 	group.mu.Unlock()
-	require.True(t, hinted)
-	require.Equal(t, "beta", hint.candidate)
+	require.True(t, leased)
+	require.Equal(t, "beta", lease.to.name)
 
 	newConn, err := group.DialContext(t.Context(), metadata)
 	require.NoError(t, err)

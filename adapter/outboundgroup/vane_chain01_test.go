@@ -61,7 +61,7 @@ func chain01Prepare(t *testing.T, group *Vane, metadata *C.Metadata, current *va
 
 // CHAIN-01-01: cold start with delay-only challengers must not close the flow.
 func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingOff, vaneRacingShadow} {
+	for _, mode := range []vaneRacingMode{vaneRacingOn, vaneRacingShadow} {
 		t.Run(mode.String(), func(t *testing.T) {
 			clock := newVaneConnTestClock()
 			alpha := newVaneTestProxy("alpha", true, true)
@@ -74,7 +74,7 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			var probeCalls atomic.Int64
 			group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 				probeCalls.Add(1)
-				return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 12_060_000, capHit: true}
+				return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 1_000_000, capHit: true}
 			}
 
 			metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
@@ -107,9 +107,7 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			group.mu.Unlock()
 			require.False(t, hinted)
 			require.False(t, cooled)
-			// Both modes now supply the missing evidence: shadow through the
-			// recovery race, off through the evidence probe (P0). Neither
-			// switches here — the probe is still blocked.
+			// Both modes supply missing evidence through the recovery race.
 			require.Eventually(t, func() bool { return probeCalls.Load() > 0 }, 2*time.Second, time.Millisecond,
 				"the suppressed flow must trigger a probe for evidence")
 		})

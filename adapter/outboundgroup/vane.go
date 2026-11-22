@@ -46,7 +46,7 @@ type VaneOption struct {
 	MediaReconnect         bool          `group:"media-reconnect,omitempty"`
 	MediaReconnectDomains  []string      `group:"media-reconnect-domains,omitempty"`
 	MediaDemandBPS         vaneBandwidth `group:"media-demand-bps,omitempty"`
-	Racing                 string        `group:"racing,omitempty"`
+	Vane                   *bool         `group:"vane,omitempty"`
 	RacingURL              string        `group:"racing-url,omitempty"`
 }
 
@@ -299,7 +299,7 @@ func newVaneWithClock(
 		maxStates:          maxStates,
 		clock:              clock,
 		media:              defaultVaneMediaConfig(),
-		racing:             vaneRacingConfig{mode: vaneRacingOff},
+		racing:             vaneRacingConfig{mode: vaneRacingOn},
 		racingRuntime:      newVaneRacingRuntime(),
 		explorationSince:   clock.Now().UTC(),
 		diagnostics:        newVaneDiagnostics(option.Name, clock, nil),
@@ -599,10 +599,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		if a.racing.mode == vaneRacingOn {
 			observed.enableDirectPolicy()
 		}
-		// Shadow: direct reads may run the window policy too, but only to
-		// observe. Their actions are discarded at the gate, so shadow
-		// records would-handoff without changing any traffic
-		// (SHADOW-OBSERVE-001).
+		// Dry-run also observes undelivered windows; observe returns no action.
 		if a.racing.mode == vaneRacingShadow {
 			observed.enableShadowObserve()
 		}
