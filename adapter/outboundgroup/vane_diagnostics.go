@@ -248,6 +248,9 @@ type vaneDiagnostics struct {
 	// live baseline lease. Sequence-based IDs used to serve this purpose and
 	// collided in the narrow window where the event ring was still short.
 	nextBaselineTokenID uint64
+	// nextExplorationID replaces the event-ring sequence as the exploration
+	// token ID source now that the ring is gone.
+	nextExplorationID uint64
 
 	// sink captures the [vane] line in tests; nil means the mihomo log.
 	sink      func(vaneDiagnosticRecord)
@@ -604,16 +607,14 @@ func (d *vaneDiagnostics) recordExplorationSelection(selection vaneExplorationSe
 			to:                     selection.toCandidate,
 			evidenceCoverageMicros: selection.evidenceCoverageMicros,
 			scopeEligibleOrdinal:   selection.scopeEligibleOrdinal,
-			explorationID:          1,
 		}
-		if events := d.snapshotData.RecentEvents; len(events) > 0 {
-			record.explorationID = events[len(events)-1].Sequence + 1
-		}
-		event := d.recordLocked(record)
+		d.nextExplorationID++
+		record.explorationID = d.nextExplorationID
+		d.recordLocked(record)
 		d.mu.Unlock()
 		return &vaneExplorationToken{
 			diagnostics:            d,
-			id:                     event.Sequence,
+			id:                     record.explorationID,
 			transport:              selection.transport,
 			scene:                  selection.scene,
 			target:                 selection.target,
