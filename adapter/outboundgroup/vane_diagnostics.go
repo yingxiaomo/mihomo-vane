@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	VaneDiagnosticsSchemaVersion    = 2
-	vaneDiagnosticsOldestSchema     = 1
-	vaneDiagnosticsRecentEventLimit = 64
+	VaneDiagnosticsSchemaVersion = 3
+	vaneDiagnosticsOldestSchema  = 1
 
 	// vaneBaselineTokenIDBase offsets baseline reconnect token IDs far away
 	// from the race task ID space (nextTaskID counts up from 1), so a stale
@@ -80,33 +79,6 @@ type VaneDiagnosticPersistence struct {
 	Available     bool      `json:"available"`
 	LastSuccessAt time.Time `json:"lastSuccessAt,omitempty"`
 	LastError     string    `json:"lastError,omitempty"`
-}
-
-// VaneDiagnosticEvent is a bounded, credential-free Vane decision event.
-// Throughput values are bits per second, byte counts are bytes, and ages are
-// milliseconds.
-type VaneDiagnosticEvent struct {
-	Sequence               uint64    `json:"sequence"`
-	HandoffID              uint64    `json:"handoffId,omitempty"`
-	LeaseID                string    `json:"leaseId,omitempty"`
-	ExplorationID          uint64    `json:"explorationId,omitempty"`
-	Time                   time.Time `json:"time"`
-	Kind                   string    `json:"kind"`
-	Reason                 string    `json:"reason,omitempty"`
-	Transport              string    `json:"transport,omitempty"`
-	Scene                  string    `json:"scene,omitempty"`
-	Target                 string    `json:"target,omitempty"`
-	Port                   uint16    `json:"port,omitempty"`
-	From                   string    `json:"from,omitempty"`
-	To                     string    `json:"to,omitempty"`
-	BPS                    float64   `json:"bps,omitempty"`
-	PreviousBPS            float64   `json:"previousBps,omitempty"`
-	TotalBytes             int64     `json:"totalBytes,omitempty"`
-	AgeMS                  int64     `json:"ageMs,omitempty"`
-	LowWindows             int       `json:"lowWindows,omitempty"`
-	Occurrences            int       `json:"occurrences,omitempty"`
-	EvidenceCoverageMicros int64     `json:"evidenceCoverageMicros,omitempty"`
-	ScopeEligibleOrdinal   uint64    `json:"scopeEligibleOrdinal,omitempty"`
 }
 
 type VaneDiagnosticConfig struct {
@@ -202,7 +174,6 @@ type VaneDiagnosticsSnapshot struct {
 	Suppressions             map[string]uint64         `json:"suppressions"`
 	Rejections               map[string]uint64         `json:"rejections"`
 	ChurnSuppressions        map[string]uint64         `json:"churnSuppressions"`
-	RecentEvents             []VaneDiagnosticEvent     `json:"recentEvents"`
 	GrayFailure              VaneDiagnosticGrayFailure `json:"grayFailure"`
 	Config                   VaneDiagnosticConfig      `json:"config"`
 	Runtime                  VaneDiagnosticRuntime     `json:"runtime"`
@@ -359,7 +330,6 @@ type vaneDiagnosticRecord struct {
 	scoreMicros int64
 	bestMicros  int64
 	scoreParts  string
-	force       bool
 }
 
 func newVaneDiagnostics(group string, clock vaneClock) *vaneDiagnostics {
@@ -377,7 +347,6 @@ func newVaneDiagnostics(group string, clock vaneClock) *vaneDiagnostics {
 			Suppressions:      make(map[string]uint64),
 			Rejections:        make(map[string]uint64),
 			ChurnSuppressions: make(map[string]uint64),
-			RecentEvents:      make([]VaneDiagnosticEvent, 0, vaneDiagnosticsRecentEventLimit),
 			GrayFailure: VaneDiagnosticGrayFailure{
 				Exclusions: newVaneGrayExclusions(),
 			},
@@ -402,7 +371,6 @@ func (d *vaneDiagnostics) recordReconnectCommit(record vaneDiagnosticRecord) *va
 	if record.kind == "" {
 		record.kind = "reconnect-committed"
 	}
-	record.force = true
 	// A caller-supplied handoffID (a race task ID) wins: it stitches the
 	// race-stage events to every handoff lifecycle event. Otherwise the
 	// commit event takes an ID from the dedicated baseline counter, which
@@ -472,7 +440,7 @@ func (d *vaneDiagnostics) countProbeInvalidReasonLocked(reason string) {
 	d.snapshotData.Counters.ProbeInvalidReasons[reason]++
 }
 
-func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnosticEvent {
+func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) {
 	now := d.clock.Now().UTC()
 	d.snapshotData.UpdatedAt = now
 
@@ -600,13 +568,7 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) VaneDiagnost
 		}
 	}
 
-	var event VaneDiagnosticEvent
-	if record.kind != "throughput-sample" && record.kind != "churn-candidate" && record.kind != "churn-reset" && record.kind != "churn-suppressed" &&
-		!strings.HasPrefix(record.kind, "gray-") && !strings.HasPrefix(record.kind, "b2-") {
-		event = d.appendEventLocked(record, now)
-	}
 	d.emitLocked(record, now)
-	return event
 }
 
 func vaneDiagnosticBytes(value int64) uint64 {
@@ -614,42 +576,6 @@ func vaneDiagnosticBytes(value int64) uint64 {
 		return 0
 	}
 	return uint64(value)
-}
-
-func (d *vaneDiagnostics) appendEventLocked(record vaneDiagnosticRecord, now time.Time) VaneDiagnosticEvent {
-	sequence := uint64(1)
-	if events := d.snapshotData.RecentEvents; len(events) > 0 {
-		sequence = events[len(events)-1].Sequence + 1
-	}
-	event := VaneDiagnosticEvent{
-		Sequence:               sequence,
-		HandoffID:              record.handoffID,
-		LeaseID:                record.leaseID,
-		ExplorationID:          record.explorationID,
-		Time:                   now,
-		Kind:                   record.kind,
-		Reason:                 record.reason,
-		Transport:              record.transport,
-		Scene:                  record.scene,
-		Target:                 record.target,
-		Port:                   record.port,
-		From:                   record.from,
-		To:                     record.to,
-		BPS:                    record.bps,
-		PreviousBPS:            record.previousBPS,
-		TotalBytes:             record.totalBytes,
-		AgeMS:                  record.age.Milliseconds(),
-		LowWindows:             record.lowWindows,
-		Occurrences:            record.occurrences,
-		EvidenceCoverageMicros: record.evidenceCoverageMicros,
-		ScopeEligibleOrdinal:   record.scopeEligibleOrdinal,
-	}
-	d.snapshotData.RecentEvents = append(d.snapshotData.RecentEvents, event)
-	if excess := len(d.snapshotData.RecentEvents) - vaneDiagnosticsRecentEventLimit; excess > 0 {
-		copy(d.snapshotData.RecentEvents, d.snapshotData.RecentEvents[excess:])
-		d.snapshotData.RecentEvents = d.snapshotData.RecentEvents[:vaneDiagnosticsRecentEventLimit]
-	}
-	return event
 }
 
 func (d *vaneDiagnostics) snapshot() VaneDiagnosticsSnapshot {
@@ -685,7 +611,6 @@ func cloneVaneDiagnosticsSnapshot(source VaneDiagnosticsSnapshot) VaneDiagnostic
 			cloned.Counters.ProbeInvalidReasons[reason] = count
 		}
 	}
-	cloned.RecentEvents = append([]VaneDiagnosticEvent(nil), source.RecentEvents...)
 	cloned.GrayFailure.Exclusions.Attempt = make(map[string]uint64, len(source.GrayFailure.Exclusions.Attempt))
 	for reason, count := range source.GrayFailure.Exclusions.Attempt {
 		cloned.GrayFailure.Exclusions.Attempt[reason] = count

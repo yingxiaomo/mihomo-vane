@@ -79,7 +79,6 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 		a.diagnostics.record(vaneDiagnosticRecord{
 			kind:   "pick-probe-budget-denied",
 			target: probe.scope, bucket: probe.scope,
-			force: true,
 		})
 		return nil, true, false
 	}
@@ -134,7 +133,6 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 			a.diagnostics.record(vaneDiagnosticRecord{
 				kind:   "pick-probe-canceled",
 				target: probe.scope, bucket: probe.scope,
-				force: true,
 			})
 			return outcomes, false, true
 		case entry := <-results:
@@ -189,7 +187,7 @@ func (a *Vane) settleColdPickProbeLocked(scope string, probe coldPickProbe, outc
 			kind: kind, reason: outcome.result.reason,
 			target: scope, bucket: scope, to: member.name,
 			bps: outcome.result.lowerBoundBPS, totalBytes: outcome.result.bytes,
-			age: outcome.result.duration, force: true,
+			age: outcome.result.duration,
 		})
 	}
 	if stale {

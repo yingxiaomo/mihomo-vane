@@ -15,16 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func countVaneEvents(group *Vane, kind, reason string) int {
-	count := 0
-	for _, event := range group.VaneDiagnostics().RecentEvents {
-		if event.Kind == kind && (reason == "" || event.Reason == reason) {
-			count++
-		}
-	}
-	return count
-}
-
 func newVaneObservationRig(t *testing.T, mode vaneRacingMode) (*Vane, *vaneConnTestClock, *vaneMediaFlow) {
 	t.Helper()
 	clock := newVaneConnTestClock()

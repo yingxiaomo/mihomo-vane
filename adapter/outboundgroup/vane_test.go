@@ -159,6 +159,7 @@ func newVaneGroupForTest(clock vaneClock, maxStates int, stateTTL time.Duration,
 		maxStates,
 		clock,
 	)
+	installVaneEventRecorder(group)
 	return group, provider
 }
 

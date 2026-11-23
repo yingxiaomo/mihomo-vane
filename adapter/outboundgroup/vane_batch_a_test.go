@@ -61,6 +61,7 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 			}, map[string]P.ProxyProvider{}, nil, nil)
 			require.NoError(t, err)
 			group := parsed.(*Vane)
+			installVaneEventRecorder(group)
 			t.Cleanup(func() { _ = group.Close() })
 			wantMode := vaneRacingOn
 			if setting == "false" {
@@ -204,7 +205,7 @@ func TestVaneOffValveNeverSubmitsKnownGoodAction(t *testing.T) {
 	flow.noteEmptyWindow()
 	flow.noteEmptyWindow()
 	require.Equal(t, 1, countVaneEvents(group, "reconnect-valve", ""))
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind == "reconnect-valve" {
 			require.Empty(t, event.Reason)
 			require.Equal(t, gamma.Name(), event.To)

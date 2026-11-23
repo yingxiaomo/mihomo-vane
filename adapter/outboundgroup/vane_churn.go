@@ -147,7 +147,6 @@ func (a *Vane) observeChurnClose(candidate string, metadata *C.Metadata, observa
 			totalBytes:  observation.TotalReadBytes,
 			age:         observation.Age,
 			occurrences: occurrences,
-			force:       true,
 		})
 	}
 }

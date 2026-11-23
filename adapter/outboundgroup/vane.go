@@ -632,7 +632,6 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 				from:        handoff.from,
 				to:          handoff.to,
 				previousBPS: handoff.previousBPS,
-				force:       true,
 			})
 		}
 		a.recordDialFailureEpoch(ctx, metadata, vaneTransportTCP, proxy, identity, nodeEpoch, err, finished)
@@ -1121,7 +1120,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					to:        selected.Name(),
 					transport: vaneTransportTCP.String(),
 					scene:     vaneSceneMedia.String(),
-					force:     true,
 				}
 				if handoff != nil {
 					record.handoffID = handoff.id
@@ -1147,7 +1145,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				bucket: targetKey.target,
 				port:   port,
 				to:     hinted.Name(),
-				force:  true,
 			}
 			if handoff != nil {
 				record.handoffID = handoff.id
@@ -1318,7 +1315,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		a.diagnostics.record(vaneDiagnosticRecord{
 			kind: "pick-probe-selected", reason: "inflight",
 			target: coldPickScope, bucket: coldPickScope, to: chosen.name,
-			force: true,
 		})
 		decision := vanePickDecision{proxy: chosen.proxy}
 		decision.reportedAliveAtSelection = hasAlive
@@ -1398,7 +1394,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		a.diagnostics.record(vaneDiagnosticRecord{
 			kind: "pick-probe-selected", reason: reason,
 			target: coldPick.scope, bucket: coldPick.scope, to: chosen.name,
-			force: true,
 		})
 		decision := vanePickDecision{proxy: chosen.proxy}
 		decision.reportedAliveAtSelection = hasAlive

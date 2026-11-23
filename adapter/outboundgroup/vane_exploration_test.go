@@ -198,7 +198,7 @@ func TestVaneExplorationOutcomesAreAttributedExactlyOnce(t *testing.T) {
 	require.Zero(t, snapshot.Counters.ExplorationNeutral)
 
 	var selectedID uint64
-	for _, event := range snapshot.RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		switch event.Kind {
 		case "exploration-selected":
 			selectedID = event.ExplorationID

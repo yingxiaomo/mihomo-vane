@@ -187,7 +187,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 		require.Nil(t, flow.observe(low))
 	}
 	starts := 0
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind == "race-started" {
 			starts++
 		}
@@ -196,7 +196,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 
 	close(releaseProbe)
 	require.Eventually(t, func() bool {
-		for _, event := range group.VaneDiagnostics().RecentEvents {
+		for _, event := range vaneRecordedEvents(group) {
 			if event.Kind == "race-stale" {
 				return true
 			}
@@ -483,7 +483,7 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 		return !group.racingRuntime.inFlight
 	}, 2*time.Second, time.Millisecond)
 
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		require.NotEqual(t, "handoff-would-commit", event.Kind,
 			"a naturally closed flow must not record a would-commit")
 	}

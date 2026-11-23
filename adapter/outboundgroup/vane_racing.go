@@ -340,7 +340,7 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 
 	limits := a.reserveRaceBudget(len(probeCandidates), a.clock.Now())
 	if len(limits) == 0 {
-		a.diagnostics.record(vaneDiagnosticRecord{kind: "race-budget-denied", handoffID: taskID, target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name, force: true})
+		a.diagnostics.record(vaneDiagnosticRecord{kind: "race-budget-denied", handoffID: taskID, target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name})
 		a.recordRaceNoWinner(request, "budget-denied", taskID)
 		return
 	}
@@ -371,7 +371,7 @@ func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, task
 	for remaining > 0 {
 		select {
 		case <-ctx.Done():
-			a.diagnostics.record(vaneDiagnosticRecord{kind: "race-canceled", reason: "group-canceled", handoffID: taskID, target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name, force: true})
+			a.diagnostics.record(vaneDiagnosticRecord{kind: "race-canceled", reason: "group-canceled", handoffID: taskID, target: request.target, bucket: request.targetKey.targetScope, port: request.port, from: request.current.name})
 			return
 		case outcome := <-outcomes:
 			remaining--
@@ -706,7 +706,6 @@ func (a *Vane) recordRaceQualified(request vaneRaceRequest, taskID uint64, membe
 		from:      request.current.name,
 		to:        member.name,
 		bps:       bps,
-		force:     true,
 	})
 }
 
@@ -720,7 +719,6 @@ func (a *Vane) recordRaceNoWinner(request vaneRaceRequest, reason string, taskID
 		port:      request.port,
 		from:      request.current.name,
 		bps:       request.currentBPS,
-		force:     true,
 	})
 }
 
@@ -737,7 +735,6 @@ func (a *Vane) recordRaceDiscardedStale(request vaneRaceRequest, to string, task
 		port:      request.port,
 		from:      request.current.name,
 		to:        to,
-		force:     true,
 	})
 }
 

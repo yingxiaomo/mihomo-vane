@@ -61,13 +61,7 @@ func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *v
 // valveEventCount counts reconnect-valve diagnostics records.
 func valveEventCount(t *testing.T, group *Vane) int {
 	t.Helper()
-	count := 0
-	for _, event := range group.VaneDiagnostics().RecentEvents {
-		if event.Kind == "reconnect-valve" {
-			count++
-		}
-	}
-	return count
+	return countVaneEvents(group, "reconnect-valve", "")
 }
 
 // VALVE-01: two empty windows fire the valve; the re-run prepare finds the

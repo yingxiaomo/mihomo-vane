@@ -137,7 +137,7 @@ func TestVaneColdPickBudgetDeniedFallsBack(t *testing.T) {
 	group.mu.Unlock()
 	require.False(t, timestampSet)
 	budgetDeniedSeen := false
-	for _, event := range snapshot.RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind == "pick-probe-budget-denied" {
 			budgetDeniedSeen = true
 		}
@@ -238,7 +238,7 @@ func TestVaneColdPickConcurrentFailsOpen(t *testing.T) {
 	require.Zero(t, snapshot.Counters.PickProbeCount,
 		"the in-flight scope must not start a second probe")
 	inflightSeen := false
-	for _, event := range snapshot.RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind == "pick-probe-selected" && event.Reason == "inflight" {
 			inflightSeen = true
 		}
@@ -473,7 +473,7 @@ func TestVaneColdPickCanceledProbeWritesNothing(t *testing.T) {
 	group.racingRuntime.mu.Unlock()
 	require.True(t, empty, "one-sided results must not be cached")
 	canceledSeen := false
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind == "pick-probe-canceled" {
 			canceledSeen = true
 		}

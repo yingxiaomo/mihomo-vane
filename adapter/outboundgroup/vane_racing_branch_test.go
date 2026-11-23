@@ -459,7 +459,7 @@ func TestVaneRaceRecoveredFlowIsNotClosed(t *testing.T) {
 	require.False(t, flow.policyAborted(), "a recovered flow must not be closed")
 
 	rejected := false
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind == "reconnect-rejected" && event.Reason == "flow-recovered" {
 			rejected = true
 		}
@@ -516,7 +516,7 @@ func TestVaneRaceLifecycleSharesOneIDAcrossHandoff(t *testing.T) {
 	leaseID := fmt.Sprintf("vane-race-%d-%d", generation, raceID)
 
 	kinds := make(map[string]int)
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.HandoffID != raceID {
 			continue
 		}
@@ -534,7 +534,7 @@ func TestVaneRaceLifecycleSharesOneIDAcrossHandoff(t *testing.T) {
 		BitsPerSecond: 40_000_000, TotalBytes: 24 * 1024 * 1024, Age: 3 * time.Second,
 	})
 	improved := false
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind != "handoff-improved" {
 			continue
 		}
@@ -826,7 +826,7 @@ func TestVaneHandoffLifecycleSharesOneDiagnosticID(t *testing.T) {
 	})
 
 	kinds := make(map[string]int)
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.HandoffID == id {
 			kinds[event.Kind]++
 		}
@@ -835,7 +835,7 @@ func TestVaneHandoffLifecycleSharesOneDiagnosticID(t *testing.T) {
 	require.Equal(t, 1, kinds["handoff-improved"])
 
 	group.failTargetHandoff(decision.handoff, "test-failure", false)
-	for _, event := range group.VaneDiagnostics().RecentEvents {
+	for _, event := range vaneRecordedEvents(group) {
 		if event.Kind == "handoff-failed" {
 			require.Equal(t, id, event.HandoffID, "every lifecycle event must carry the same handoff ID")
 		}
@@ -855,7 +855,6 @@ func TestVaneDiagnosticsSnapshotIsReadOnly(t *testing.T) {
 	for attempt := 0; attempt < 5; attempt++ {
 		repeated := group.VaneDiagnostics()
 		require.Equal(t, first.Counters, repeated.Counters)
-		require.Equal(t, len(first.RecentEvents), len(repeated.RecentEvents))
 	}
 	group.mu.Lock()
 	require.Equal(t, handoffs, len(group.targetHandoffs))
@@ -866,22 +865,19 @@ func TestVaneDiagnosticsSnapshotIsReadOnly(t *testing.T) {
 		"reads must not consume the handoff token or change the preferred member")
 }
 
-// RACE-DIAG-003: racing counters accumulate and the event ring stays bounded.
-func TestVaneRacingCountersAndRingStaysBounded(t *testing.T) {
+// RACE-DIAG-003: racing counters accumulate.
+func TestVaneRacingCountersAccumulate(t *testing.T) {
 	clock := newVaneConnTestClock()
 	diagnostics := newVaneDiagnostics("vane-race", clock)
 	diagnostics.record(vaneDiagnosticRecord{kind: "race-budget-denied", target: "rr.googlevideo.com", bucket: "googlevideo.com", port: 443})
-	for index := 0; index < vaneDiagnosticsRecentEventLimit+40; index++ {
+	for index := 0; index < 104; index++ {
 		diagnostics.record(vaneDiagnosticRecord{kind: "race-no-winner", reason: fmt.Sprintf("reason-%02d", index), target: "rr.googlevideo.com", bucket: "googlevideo.com", port: 443})
 	}
 	diagnostics.record(vaneDiagnosticRecord{kind: "race-no-winner", reason: "stale-generation", target: "rr.googlevideo.com", bucket: "googlevideo.com", port: 443})
 
 	snapshot := diagnostics.snapshot()
 	require.Equal(t, uint64(1), snapshot.Counters.RaceBudgetDenied)
-	require.Equal(t, uint64(vaneDiagnosticsRecentEventLimit+41), snapshot.Counters.RaceNoWinner)
-	require.LessOrEqual(t, len(snapshot.RecentEvents), vaneDiagnosticsRecentEventLimit)
-	require.Equal(t, "stale-generation", snapshot.RecentEvents[len(snapshot.RecentEvents)-1].Reason,
-		"the newest event must survive ring rotation")
+	require.Equal(t, uint64(105), snapshot.Counters.RaceNoWinner)
 }
 
 type vaneBlockingDialProxy struct {

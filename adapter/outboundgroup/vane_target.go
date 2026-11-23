@@ -582,7 +582,6 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		totalBytes: plan.totalBytes,
 		age:        plan.age,
 		lowWindows: plan.lowWindows,
-		force:      true,
 	})
 	if token == nil {
 		// RACE-07: the handoff lease is also the reconnect target and the
@@ -708,7 +707,6 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		previousBPS: token.previousBPS,
 		totalBytes:  sample.TotalBytes,
 		age:         sample.Age,
-		force:       true,
 	})
 }
 
@@ -745,7 +743,6 @@ func (a *Vane) failTargetHandoff(token *vaneHandoffToken, reason string, hard bo
 		from:        token.from,
 		to:          token.to,
 		previousBPS: token.previousBPS,
-		force:       true,
 	})
 }
 

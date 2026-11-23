@@ -428,7 +428,6 @@ func (f *vaneMediaFlow) failHandoff(reason string) {
 		from:        handoff.from,
 		to:          handoff.to,
 		previousBPS: handoff.previousBPS,
-		force:       true,
 	})
 }
 
@@ -466,7 +465,7 @@ func (f *vaneMediaFlow) submitPolicyAction(action vanePolicyAction, delivered bo
 	if f.group.racing.mode == vaneRacingShadow {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind: "handoff-would-commit", reason: "dry-run", target: f.target,
-			bucket: f.targetKey.target, port: f.port, from: f.candidate, force: true,
+			bucket: f.targetKey.target, port: f.port, from: f.candidate,
 		})
 		return
 	}
@@ -574,7 +573,6 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 			totalBytes: sample.TotalBytes,
 			age:        sample.Age,
 			lowWindows: lowWindows,
-			force:      true,
 		})
 	}
 	untrusted := sample.untrusted || graced
@@ -599,7 +597,6 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 				bps:        sample.BitsPerSecond,
 				totalBytes: sample.TotalBytes,
 				age:        sample.Age,
-				force:      true,
 			})
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind:        "handoff-measured",
@@ -615,7 +612,6 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 				totalBytes:  sample.TotalBytes,
 				age:         sample.Age,
 				lowWindows:  lowWindows,
-				force:       true,
 			})
 			f.group.settleTargetHandoff(handoff, member, sample)
 		}
@@ -637,7 +633,6 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 			totalBytes: sample.TotalBytes,
 			age:        sample.Age,
 			lowWindows: lowWindows,
-			force:      true,
 		})
 		log.Debugln("Vane: defer media reconnect target=%s:%d node=%s reason=buffer-credit bps=%.0f credit=%.0f guard=%.0f low-windows=%d/%d", f.target, f.port, f.candidate, sample.BitsPerSecond, creditBits, guardBits, lowWindows, config.maxLowWindows)
 		return nil
@@ -662,7 +657,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 				kind: "handoff-would-commit", reason: "baseline", target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
 				bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes, age: sample.Age,
-				lowWindows: lowWindows, force: true,
+				lowWindows: lowWindows,
 			})
 		} else {
 			f.recordReconnectSuppressed(reason, sample, lowWindows)
@@ -688,7 +683,7 @@ func (f *vaneMediaFlow) recordReconnectSuppressed(reason string, sample vaneThro
 	f.group.diagnostics.record(vaneDiagnosticRecord{
 		kind: "reconnect-suppressed", reason: reason, target: f.target, bucket: f.targetKey.target,
 		port: f.port, from: f.candidate, bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
-		age: sample.Age, lowWindows: lowWindows, force: true,
+		age: sample.Age, lowWindows: lowWindows,
 	})
 }
 
@@ -699,7 +694,7 @@ func (f *vaneMediaFlow) completeMediaPlan(plan *vaneMediaPlan, sample vaneThroug
 	f.group.diagnostics.record(vaneDiagnosticRecord{
 		kind: "reconnect-prepared", target: f.target, bucket: f.targetKey.target, port: f.port,
 		from: f.candidate, to: plan.challenger, bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
-		age: sample.Age, lowWindows: lowWindows, force: true,
+		age: sample.Age, lowWindows: lowWindows,
 	})
 }
 
@@ -739,7 +734,7 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "reconnect-rejected", reason: "flow-recovered", handoffID: result.taskID, target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
-				bps: result.lowerBoundBPS, force: true,
+				bps: result.lowerBoundBPS,
 			})
 			return
 		}
@@ -747,7 +742,7 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "race-stale", reason: "stale-generation", handoffID: result.taskID, target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
-				bps: result.lowerBoundBPS, force: true,
+				bps: result.lowerBoundBPS,
 			})
 			return
 		}
@@ -757,7 +752,7 @@ func (f *vaneMediaFlow) scheduleRace(sample vaneThroughputObservation, lowWindow
 				leaseID: vaneRaceLeaseID(result.request.generation, result.taskID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: result.winner.name,
 				bps: result.lowerBoundBPS, previousBPS: sample.BitsPerSecond, totalBytes: sample.TotalBytes,
-				age: sample.Age, lowWindows: lowWindows, force: true,
+				age: sample.Age, lowWindows: lowWindows,
 			})
 			return
 		}
@@ -814,7 +809,7 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 				kind: "reconnect-rejected", reason: "already-committed", handoffID: plan.raceID,
 				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
-				bps: sample.BitsPerSecond, force: true,
+				bps: sample.BitsPerSecond,
 			})
 			return false
 		}
@@ -823,7 +818,7 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 				kind: "reconnect-rejected", reason: "recovered", handoffID: plan.raceID,
 				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
-				bps: sample.BitsPerSecond, force: true,
+				bps: sample.BitsPerSecond,
 			})
 			return false
 		}
@@ -838,7 +833,7 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 				kind: "reconnect-rejected", reason: commitReason, handoffID: plan.raceID,
 				leaseID: vaneRaceLeaseID(plan.generation, plan.raceID), target: f.target,
 				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
-				bps: sample.BitsPerSecond, force: true,
+				bps: sample.BitsPerSecond,
 			})
 			return false
 		}
@@ -913,7 +908,7 @@ func (f *vaneMediaFlow) runReconnectValve() {
 		kind: "reconnect-valve", reason: reason,
 		target: f.target, bucket: f.targetKey.target, port: f.port,
 		from: f.candidate, to: plan.challenger,
-		bps: currentBPS, force: true,
+		bps: currentBPS,
 	})
 	if reason != "" {
 		return
@@ -1428,7 +1423,6 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		totalBytes: plan.totalBytes,
 		age:        plan.age,
 		lowWindows: plan.lowWindows,
-		force:      true,
 	})
 	if handoff != nil {
 		handoff.targetKey = plan.targetStateKey

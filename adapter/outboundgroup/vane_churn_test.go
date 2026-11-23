@@ -64,7 +64,7 @@ func TestVaneChurnShadowDetectsOnlyRepeatedExactPair(t *testing.T) {
 	require.Equal(t, uint64(vaneChurnLimit), snapshot.Counters.ChurnCandidates)
 	require.Equal(t, uint64(1), snapshot.Counters.ChurnSuspected)
 	require.Len(t, group.churn, 1)
-	last := snapshot.RecentEvents[len(snapshot.RecentEvents)-1]
+	last := vaneRecordedEvents(group)[len(vaneRecordedEvents(group))-1]
 	require.Equal(t, "churn-suspected", last.Kind)
 	require.Equal(t, "api.example.com", last.Target)
 	require.Equal(t, uint16(443), last.Port)
