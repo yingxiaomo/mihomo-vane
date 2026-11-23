@@ -49,6 +49,9 @@ func TestVaneColdPickProbeTimeoutBothExcluded(t *testing.T) {
 	require.NotEmpty(t, decision.proxy.Name())
 	require.False(t, coldPickProbeCached(group, "alpha"))
 	require.False(t, coldPickProbeCached(group, "beta"))
+	snapshot := group.VaneDiagnostics()
+	require.Equal(t, uint64(2), snapshot.Counters.PickProbeCount, "timeouts are probes too")
+	require.Positive(t, snapshot.Counters.PickProbeBytes, "a timed-out probe still spent bytes")
 }
 
 // PROBE-TIMEOUT-02: a read-timeout burst (5.66M) must lose to a clean cap-hit (4M).

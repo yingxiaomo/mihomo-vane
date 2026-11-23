@@ -509,6 +509,10 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) {
 		d.snapshotData.Counters.PickProbeCount++
 		d.snapshotData.Counters.PickProbeSuccess++
 		d.snapshotData.Counters.PickProbeBytes += vaneDiagnosticBytes(record.totalBytes)
+	case "pick-probe-timeout":
+		// Excluded from evidence, but still a probe that spent bytes.
+		d.snapshotData.Counters.PickProbeCount++
+		d.snapshotData.Counters.PickProbeBytes += vaneDiagnosticBytes(record.totalBytes)
 	case "pick-probe-invalid":
 		d.snapshotData.Counters.PickProbeCount++
 		d.snapshotData.Counters.PickProbeInvalid++
