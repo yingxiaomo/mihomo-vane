@@ -77,7 +77,7 @@ func vaneLinuxTCPPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 	return nil, nil
 }
 
-func TestVaneControlledConnLinuxSpliceClosesAfterDeliveredChunk(t *testing.T) {
+func TestVaneControlledConnLinuxDeliveredChunkClosesBuffered(t *testing.T) {
 	sourceWriter, sourceReader := vaneLinuxTCPPair(t)
 	destinationWriter, destinationReader := vaneLinuxTCPPair(t)
 	deadline := time.Now().Add(30 * time.Second)
@@ -99,9 +99,10 @@ func TestVaneControlledConnLinuxSpliceClosesAfterDeliveredChunk(t *testing.T) {
 			return true
 		}
 	})
-	unwrapped, counters := SN.UnwrapCountReader(wrapped, nil)
-	_, rawTCP := unwrapped.(*net.TCPConn)
-	require.True(t, rawTCP, "source must unwrap to a raw TCP socket")
+	// The reader is deliberately a bare counting reader now (client backlog
+	// needs read-vs-delivered), so a plaintext TCP source no longer unwraps to
+	// the raw socket and this copy takes the buffered path, not splice.
+	_, counters := SN.UnwrapCountReader(wrapped, nil)
 	require.NotEmpty(t, counters, "vane post-delivery counter must survive unwrapping")
 
 	payload := bytes.Repeat([]byte{0x5a}, 40*1024*1024)
