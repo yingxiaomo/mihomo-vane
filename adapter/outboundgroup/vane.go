@@ -1158,6 +1158,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		}
 	}
 	ranked := make([]vaneRankedProxy, 0, len(compatible))
+	var capped []vaneRankedProxy
 	for _, proxy := range compatible {
 		snapshot := vaneMetricsSnapshot{}
 		identity := vaneProxyPersistentIdentity(proxy)
@@ -1190,7 +1191,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			}
 		}
 		parts := scoreVaneMetricsParts(scene, snapshot)
-		ranked = append(ranked, vaneRankedProxy{
+		candidate := vaneRankedProxy{
 			proxy: proxy,
 			vaneCandidateScore: vaneCandidateScore{
 				name:        proxy.Name(),
@@ -1199,6 +1200,23 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			parts:                  parts,
 			cooldownUntil:          until,
 			evidenceCoverageMicros: vaneEvidenceCoverageMicros(snapshot, transport, scene),
+		}
+		if snapshot.latency.valid && snapshot.latency.value > math.Log(vaneLatencyHardCapMs) {
+			capped = append(capped, candidate)
+			continue
+		}
+		ranked = append(ranked, candidate)
+	}
+
+	// The hard cap never empties the pool: a slow node beats no node at all.
+	if len(ranked) == 0 {
+		ranked = capped
+	}
+	if commit && len(capped) > 0 {
+		a.diagnostics.record(vaneDiagnosticRecord{
+			kind: "latency-cap-excluded", target: target, port: port,
+			transport: transport.String(), scene: scene.String(),
+			occurrences: len(capped),
 		})
 	}
 

@@ -38,6 +38,14 @@ type pickProbeOutcome struct {
 	result vaneProbeResult
 }
 
+// eligible reports whether a probe result may be trusted as cold-pick
+// evidence. A read timeout returns valid with a burst average, which says
+// nothing about sustained throughput, so it loses the cold-pick contract but
+// still counts for a running media race.
+func (o pickProbeOutcome) eligible() bool {
+	return o.result.valid && o.result.reason != "read-timeout"
+}
+
 type coldPickProbe struct {
 	scope      string
 	candidates []pickProbeCandidate
@@ -176,7 +184,10 @@ func (a *Vane) settleColdPickProbeLocked(scope string, probe coldPickProbe, outc
 		kind := "pick-probe-invalid"
 		if outcome.result.valid {
 			kind = "pick-probe-success"
-			if !stale {
+			if outcome.result.reason == "read-timeout" {
+				kind = "pick-probe-timeout"
+			}
+			if outcome.eligible() && !stale {
 				// Only genuinely measured, current-generation results are
 				// eligible for the capability cache; the caller writes them
 				// after releasing a.mu.
@@ -202,7 +213,7 @@ func (a *Vane) settleColdPickProbeLocked(scope string, probe coldPickProbe, outc
 	fastest := 0.0
 	for index := range outcomes {
 		outcome := &outcomes[index]
-		if !outcome.result.valid || !a.memberLeaseCurrentLocked(outcome.member) ||
+		if !outcome.eligible() || !a.memberLeaseCurrentLocked(outcome.member) ||
 			!outcome.proxy.AliveForTestUrl(a.testURL) {
 			continue
 		}
@@ -221,7 +232,7 @@ func (a *Vane) settleColdPickProbeLocked(scope string, probe coldPickProbe, outc
 	if best.proxy.Name() != rankingFirst {
 		for index := range outcomes {
 			outcome := &outcomes[index]
-			if !outcome.result.valid || outcome.proxy.Name() != rankingFirst ||
+			if !outcome.eligible() || outcome.proxy.Name() != rankingFirst ||
 				!a.memberLeaseCurrentLocked(outcome.member) || !outcome.proxy.AliveForTestUrl(a.testURL) {
 				continue
 			}

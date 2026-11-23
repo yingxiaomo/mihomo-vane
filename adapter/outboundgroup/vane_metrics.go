@@ -870,6 +870,11 @@ func vaneDownloadTotalCost(logBytes float64) float64 {
 	return 1 - vaneClamp((logBytes-6)/2, 0, 1)
 }
 
+// vaneLatencyHardCapMs is a hard pick-time filter: a node whose media-window
+// RTT EMA exceeds it is not ranked at all. 350ms is roughly a round trip most
+// of the way around the planet. Nodes without live samples are never capped.
+const vaneLatencyHardCapMs = 350.0
+
 // Latency estimates are already in log(milliseconds).
 func vaneLatencyCost(logMillis, goodMillis, badMillis float64) float64 {
 	return vaneClamp((logMillis-math.Log(goodMillis))/math.Log(badMillis/goodMillis), 0, 1)

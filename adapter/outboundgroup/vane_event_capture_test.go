@@ -51,6 +51,14 @@ func installVaneEventRecorder(group *Vane) {
 	}
 }
 
+// dropVaneRecordedEvents keeps the package-level map from growing across tests.
+func dropVaneRecordedEvents(group *Vane) {
+	vaneRecorded.Lock()
+	delete(vaneRecorded.byGroup, group)
+	delete(vaneRecorded.seq, group)
+	vaneRecorded.Unlock()
+}
+
 func vaneRecordedEvents(group *Vane) []vaneRecordedEvent {
 	vaneRecorded.Lock()
 	defer vaneRecorded.Unlock()
