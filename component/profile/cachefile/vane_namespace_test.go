@@ -30,16 +30,12 @@ func TestVaneNamespacePreservesPreviousBuckets(t *testing.T) {
 	state, err := cache.GetVaneState(key)
 	require.NoError(t, err)
 	require.Nil(t, state)
-	diag, err := cache.GetVaneDiagnostics(key)
-	require.NoError(t, err)
-	require.Nil(t, diag)
 	_, lease, err := cache.GetVaneStateWithToken(key)
 	require.NoError(t, err)
 	require.Len(t, lease, 16)
 	payload := []byte(`{"schemaVersion":1,"updatedAt":"2026-11-15T00:00:00Z"}`)
 	_, err = cache.CompareAndSwapVaneState(key, lease, payload)
 	require.NoError(t, err)
-	require.NoError(t, cache.SetVaneDiagnostics(key, []byte(`{"schemaVersion":2,"updatedAt":"2026-11-15T00:00:00Z"}`)))
 	require.NoError(t, db.Close())
 	db, err = bbolt.Open(path, 0600, nil)
 	require.NoError(t, err)
@@ -51,7 +47,7 @@ func TestVaneNamespacePreservesPreviousBuckets(t *testing.T) {
 			require.Equal(t, sentinel, []byte(b.Get([]byte(key))))
 			require.Equal(t, 1, b.Stats().KeyN)
 		}
-		for _, name := range []string{"vaneState", "vaneStateMeta", "vaneDiagnostics"} {
+		for _, name := range []string{"vaneState", "vaneStateMeta"} {
 			require.NotNil(t, tx.Bucket([]byte(name)))
 		}
 		require.Equal(t, payload, []byte(tx.Bucket([]byte("vaneState")).Get([]byte(key))))

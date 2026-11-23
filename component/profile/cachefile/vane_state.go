@@ -13,6 +13,7 @@ import (
 )
 
 var (
+	ErrCacheUnavailable            = errors.New("cache database unavailable")
 	ErrVaneStateConflict           = errors.New("vane state changed since load")
 	ErrVaneStatePayloadTooLarge    = errors.New("vane state payload too large")
 	ErrVaneStateIncompatibleSchema = errors.New("vane state uses a newer schema")

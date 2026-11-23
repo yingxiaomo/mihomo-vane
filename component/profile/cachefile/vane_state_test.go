@@ -22,14 +22,10 @@ func TestVaneStateStoreIsDedicatedAndDurable(t *testing.T) {
 
 	payload := []byte(`{"schemaVersion":1,"group":"vane","updatedAt":"2026-11-14T00:00:00Z"}`)
 	require.NoError(t, cache.SetVaneState("vane-state-v1:key", payload))
-	require.NoError(t, cache.SetVaneDiagnostics("vane-state-v1:key", []byte("diagnostics")))
 
 	actual, err := cache.GetVaneState("vane-state-v1:key")
 	require.NoError(t, err)
 	require.Equal(t, payload, actual)
-	diagnostics, err := cache.GetVaneDiagnostics("vane-state-v1:key")
-	require.NoError(t, err)
-	require.Equal(t, []byte("diagnostics"), diagnostics)
 }
 
 func TestVaneStateStoreReportsUnavailableAndOversize(t *testing.T) {

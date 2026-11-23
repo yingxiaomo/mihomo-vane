@@ -23,7 +23,6 @@ var (
 	bucketETag             = []byte("etag")
 	bucketSubscriptionInfo = []byte("subscriptioninfo")
 	bucketStorage          = []byte("storage")
-	bucketVaneDiagnostics  = []byte("vaneDiagnostics")
 	bucketVaneState        = []byte("vaneState")
 	bucketVaneStateMeta    = []byte("vaneStateMeta")
 )
