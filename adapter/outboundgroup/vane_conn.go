@@ -379,8 +379,12 @@ func (r *vaneCountReader) Read(payload []byte) (int, error) {
 	return n, err
 }
 
-// pendingBacklog is clamped: handshake bytes can reach the client without
-// passing through the counting reader, so the raw difference may go negative.
+// pendingBacklog reports bytes the relay read off the node but has not yet
+// handed to the client. Only the relay's counting reader feeds readBytes; a
+// direct Read/ReadBuffer on this conn does not, which is why deliveredBytes is
+// its own field instead of reusing totalReadBytes. The result is clamped:
+// handshake bytes can reach the client without passing through the counting
+// reader, so the raw difference may go negative.
 func (c *vaneObservedConn) pendingBacklog() int64 {
 	if c == nil {
 		return 0

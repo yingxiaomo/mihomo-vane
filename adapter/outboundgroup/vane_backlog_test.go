@@ -166,6 +166,7 @@ func TestVaneBacklogWiredThroughDialContext(t *testing.T) {
 	require.Positive(t, observed.pendingBacklog(), "bytes read by the relay but never delivered")
 
 	group.mediaFlowsMu.Lock()
+	require.Len(t, group.mediaFlowSet, 1, "the rig must expose exactly the flow this test dialled")
 	var flow *vaneMediaFlow
 	for candidate := range group.mediaFlowSet {
 		flow = candidate
@@ -203,6 +204,7 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 	observed := conn.(*vaneObservedConn)
 	reader, counters := observed.UnwrapReader()
 	group.mediaFlowsMu.Lock()
+	require.Len(t, group.mediaFlowSet, 1, "the rig must expose exactly the flow this test dialled")
 	var flow *vaneMediaFlow
 	for candidate := range group.mediaFlowSet {
 		flow = candidate
