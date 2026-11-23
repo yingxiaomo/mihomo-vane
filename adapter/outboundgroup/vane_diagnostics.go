@@ -560,10 +560,10 @@ func (d *vaneDiagnostics) recordReconnectCommit(record vaneDiagnosticRecord) *va
 			d.nextBaselineTokenID++
 			record.handoffID = vaneBaselineTokenIDBase + d.nextBaselineTokenID
 		}
-		event := d.recordLocked(record)
+		d.recordLocked(record)
 		d.mu.Unlock()
 		return &vaneHandoffToken{
-			id:          event.HandoffID,
+			id:          record.handoffID,
 			leaseID:     record.leaseID,
 			target:      normalizeVaneMediaTarget(record.target),
 			bucket:      record.bucket,
