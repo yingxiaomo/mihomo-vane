@@ -4,7 +4,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/log"
@@ -14,7 +13,6 @@ const (
 	VaneDiagnosticsSchemaVersion    = 2
 	vaneDiagnosticsOldestSchema     = 1
 	vaneDiagnosticsRecentEventLimit = 64
-	vaneDiagnosticsRegistryLimit    = 256
 
 	// vaneBaselineTokenIDBase offsets baseline reconnect token IDs far away
 	// from the race task ID space (nextTaskID counts up from 1), so a stale
@@ -237,11 +235,6 @@ type vaneDiagnostics struct {
 	mu           sync.Mutex
 	clock        vaneClock
 	snapshotData VaneDiagnosticsSnapshot
-	retired      bool
-	detached     bool
-	retiring     bool
-	redirect     *vaneDiagnostics
-	lastAccess   atomic.Uint64
 	// nextBaselineTokenID allocates IDs for baseline reconnect tokens. It
 	// lives far away from the race task ID space (nextTaskID counts up from
 	// 1) so a stale race settlement can never present an ID that matches a
@@ -369,112 +362,6 @@ type vaneDiagnosticRecord struct {
 	force       bool
 }
 
-type vaneDiagnosticsRegistryState struct {
-	sync.Mutex
-	entries map[string]*vaneDiagnostics
-	current sync.Map
-	access  atomic.Uint64
-}
-
-var vaneDiagnosticsRegistry = vaneDiagnosticsRegistryState{entries: make(map[string]*vaneDiagnostics)}
-
-// vaneDiagnosticsRegistryKey keeps one counter set alive across a config
-// reload, so a reload does not zero the totals.
-func vaneDiagnosticsRegistryKey(group string) string {
-	return group
-}
-
-func (r *vaneDiagnosticsRegistryState) touch(diagnostics *vaneDiagnostics) {
-	if diagnostics != nil {
-		diagnostics.lastAccess.Store(r.access.Add(1))
-	}
-}
-
-func (r *vaneDiagnosticsRegistryState) addLocked(key string, diagnostics *vaneDiagnostics) bool {
-	if current := r.entries[key]; current != nil {
-		r.touch(current)
-		return current == diagnostics
-	}
-	if len(r.entries) >= vaneDiagnosticsRegistryLimit {
-		var victimKey string
-		var victim *vaneDiagnostics
-		var oldest uint64
-		for candidateKey, candidate := range r.entries {
-			access := candidate.lastAccess.Load()
-			if victim == nil || access < oldest {
-				victimKey, victim, oldest = candidateKey, candidate, access
-			}
-		}
-		if victim != nil {
-			victim.mu.Lock()
-			victim.retired = true
-			victim.detached = true
-			victim.mu.Unlock()
-			delete(r.entries, victimKey)
-			r.current.Delete(victimKey)
-		}
-	}
-	r.entries[key] = diagnostics
-	r.current.Store(key, diagnostics)
-	r.touch(diagnostics)
-	return true
-}
-
-func (d *vaneDiagnostics) active() *vaneDiagnostics {
-	if d == nil {
-		return nil
-	}
-	for {
-		d.mu.Lock()
-		if d.redirect != nil {
-			next := d.redirect
-			d.mu.Unlock()
-			d = next
-			continue
-		}
-		if d.retiring {
-			d.mu.Unlock()
-			return d
-		}
-		if !d.retired && !d.detached {
-			d.mu.Unlock()
-			vaneDiagnosticsRegistry.touch(d)
-			return d
-		}
-		detached := d.detached
-		storageKey := vaneDiagnosticsRegistryKey(d.snapshotData.Group)
-		d.mu.Unlock()
-
-		value, ok := vaneDiagnosticsRegistry.current.Load(storageKey)
-		current, _ := value.(*vaneDiagnostics)
-		if ok && current != nil && current != d {
-			d.mu.Lock()
-			d.redirect = current
-			d.mu.Unlock()
-			vaneDiagnosticsRegistry.touch(current)
-			d = current
-			continue
-		}
-		if detached {
-			return d
-		}
-		return nil
-	}
-}
-
-func sharedVaneDiagnostics(group string, clock vaneClock) *vaneDiagnostics {
-	key := vaneDiagnosticsRegistryKey(group)
-	vaneDiagnosticsRegistry.Lock()
-	defer vaneDiagnosticsRegistry.Unlock()
-	if diagnostics := vaneDiagnosticsRegistry.entries[key]; diagnostics != nil {
-		vaneDiagnosticsRegistry.touch(diagnostics)
-		return diagnostics
-	}
-	diagnostics := newVaneDiagnostics(group, clock)
-	vaneDiagnosticsRegistry.addLocked(key, diagnostics)
-	return diagnostics
-}
-
 func newVaneDiagnostics(group string, clock vaneClock) *vaneDiagnostics {
 	if clock == nil {
 		clock = vaneSystemClock{}
@@ -502,76 +389,39 @@ func (d *vaneDiagnostics) record(record vaneDiagnosticRecord) {
 	if d == nil {
 		return
 	}
-	for {
-		current := d.active()
-		if current == nil {
-			return
-		}
-		if current != d {
-			d = current
-			continue
-		}
-		d.mu.Lock()
-		if d.redirect != nil {
-			d.mu.Unlock()
-			continue
-		}
-		if d.retired && !d.detached {
-			d.mu.Unlock()
-			return
-		}
-		d.recordLocked(record)
-		d.mu.Unlock()
-		return
-	}
+	d.mu.Lock()
+	d.recordLocked(record)
+	d.mu.Unlock()
 }
 
 func (d *vaneDiagnostics) recordReconnectCommit(record vaneDiagnosticRecord) *vaneHandoffToken {
 	if d == nil {
 		return nil
 	}
-	for {
-		current := d.active()
-		if current == nil {
-			return nil
-		}
-		if current != d {
-			d = current
-			continue
-		}
-		d.mu.Lock()
-		if d.redirect != nil {
-			d.mu.Unlock()
-			continue
-		}
-		if d.retired && !d.detached {
-			d.mu.Unlock()
-			return nil
-		}
-		if record.kind == "" {
-			record.kind = "reconnect-committed"
-		}
-		record.force = true
-		// A caller-supplied handoffID (a race task ID) wins: it stitches the
-		// race-stage events to every handoff lifecycle event. Otherwise the
-		// commit event takes an ID from the dedicated baseline counter, which
-		// lives far above the race task ID space so the two can never collide.
-		if record.handoffID == 0 {
-			d.nextBaselineTokenID++
-			record.handoffID = vaneBaselineTokenIDBase + d.nextBaselineTokenID
-		}
-		d.recordLocked(record)
-		d.mu.Unlock()
-		return &vaneHandoffToken{
-			id:          record.handoffID,
-			leaseID:     record.leaseID,
-			target:      normalizeVaneMediaTarget(record.target),
-			bucket:      record.bucket,
-			port:        record.port,
-			from:        record.from,
-			to:          record.to,
-			previousBPS: record.bps,
-		}
+	d.mu.Lock()
+	if record.kind == "" {
+		record.kind = "reconnect-committed"
+	}
+	record.force = true
+	// A caller-supplied handoffID (a race task ID) wins: it stitches the
+	// race-stage events to every handoff lifecycle event. Otherwise the
+	// commit event takes an ID from the dedicated baseline counter, which
+	// lives far above the race task ID space so the two can never collide.
+	if record.handoffID == 0 {
+		d.nextBaselineTokenID++
+		record.handoffID = vaneBaselineTokenIDBase + d.nextBaselineTokenID
+	}
+	d.recordLocked(record)
+	d.mu.Unlock()
+	return &vaneHandoffToken{
+		id:          record.handoffID,
+		leaseID:     record.leaseID,
+		target:      normalizeVaneMediaTarget(record.target),
+		bucket:      record.bucket,
+		port:        record.port,
+		from:        record.from,
+		to:          record.to,
+		previousBPS: record.bps,
 	}
 }
 
@@ -579,51 +429,33 @@ func (d *vaneDiagnostics) recordExplorationSelection(selection vaneExplorationSe
 	if d == nil {
 		return nil
 	}
-	for {
-		current := d.active()
-		if current == nil {
-			return nil
-		}
-		if current != d {
-			d = current
-			continue
-		}
-		d.mu.Lock()
-		if d.redirect != nil {
-			d.mu.Unlock()
-			continue
-		}
-		if d.retired && !d.detached {
-			d.mu.Unlock()
-			return nil
-		}
-		record := vaneDiagnosticRecord{
-			kind:                   "exploration-selected",
-			transport:              selection.transport.String(),
-			scene:                  selection.scene.String(),
-			target:                 selection.target,
-			port:                   selection.port,
-			from:                   selection.fromAnchor,
-			to:                     selection.toCandidate,
-			evidenceCoverageMicros: selection.evidenceCoverageMicros,
-			scopeEligibleOrdinal:   selection.scopeEligibleOrdinal,
-		}
-		d.nextExplorationID++
-		record.explorationID = d.nextExplorationID
-		d.recordLocked(record)
-		d.mu.Unlock()
-		return &vaneExplorationToken{
-			diagnostics:            d,
-			id:                     record.explorationID,
-			transport:              selection.transport,
-			scene:                  selection.scene,
-			target:                 selection.target,
-			port:                   selection.port,
-			fromAnchor:             selection.fromAnchor,
-			toCandidate:            selection.toCandidate,
-			evidenceCoverageMicros: selection.evidenceCoverageMicros,
-			scopeEligibleOrdinal:   selection.scopeEligibleOrdinal,
-		}
+	d.mu.Lock()
+	record := vaneDiagnosticRecord{
+		kind:                   "exploration-selected",
+		transport:              selection.transport.String(),
+		scene:                  selection.scene.String(),
+		target:                 selection.target,
+		port:                   selection.port,
+		from:                   selection.fromAnchor,
+		to:                     selection.toCandidate,
+		evidenceCoverageMicros: selection.evidenceCoverageMicros,
+		scopeEligibleOrdinal:   selection.scopeEligibleOrdinal,
+	}
+	d.nextExplorationID++
+	record.explorationID = d.nextExplorationID
+	d.recordLocked(record)
+	d.mu.Unlock()
+	return &vaneExplorationToken{
+		diagnostics:            d,
+		id:                     record.explorationID,
+		transport:              selection.transport,
+		scene:                  selection.scene,
+		target:                 selection.target,
+		port:                   selection.port,
+		fromAnchor:             selection.fromAnchor,
+		toCandidate:            selection.toCandidate,
+		evidenceCoverageMicros: selection.evidenceCoverageMicros,
+		scopeEligibleOrdinal:   selection.scopeEligibleOrdinal,
 	}
 }
 
@@ -824,18 +656,10 @@ func (d *vaneDiagnostics) snapshot() VaneDiagnosticsSnapshot {
 	if d == nil {
 		return VaneDiagnosticsSnapshot{}
 	}
-	for {
-		d.mu.Lock()
-		if d.redirect != nil {
-			next := d.redirect
-			d.mu.Unlock()
-			d = next
-			continue
-		}
-		snapshot := cloneVaneDiagnosticsSnapshot(d.snapshotData)
-		d.mu.Unlock()
-		return snapshot
-	}
+	d.mu.Lock()
+	snapshot := cloneVaneDiagnosticsSnapshot(d.snapshotData)
+	d.mu.Unlock()
+	return snapshot
 }
 
 func cloneVaneDiagnosticsSnapshot(source VaneDiagnosticsSnapshot) VaneDiagnosticsSnapshot {

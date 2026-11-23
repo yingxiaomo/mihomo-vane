@@ -1,0 +1,34 @@
+package outboundgroup
+
+import (
+	"testing"
+	"time"
+
+	A "github.com/metacubex/mihomo/adapter"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/stretchr/testify/require"
+)
+
+// REGISTRY-01: a real reload (a second group with the same name, activated
+// through the live entry point) starts from zero and leaves the old group's
+// counters alone. Asserting only the new group would also pass if the
+// implementation zeroed every counter, so both halves are required.
+func TestVaneReloadStartsCountersFromZero(t *testing.T) {
+	oldHome := C.Path.HomeDir()
+	C.SetHomeDir(t.TempDir())
+	t.Cleanup(func() { C.SetHomeDir(oldHome) })
+	useVaneLearningRegistryStoreForTest(t, "vane-test", newVaneLearningTestStore())
+
+	clock := newVaneConnTestClock()
+	first, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true))
+	require.NoError(t, ActivateVaneLearningStates(map[string]C.Proxy{"vane": A.NewProxy(first)}))
+	first.diagnostics.record(vaneDiagnosticRecord{kind: "handoff-committed"})
+	require.Equal(t, uint64(1), first.VaneDiagnostics().Counters.HandoffCommitted)
+
+	second, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true))
+	require.NoError(t, ActivateVaneLearningStates(map[string]C.Proxy{"vane": A.NewProxy(second)}))
+	require.Equal(t, uint64(1), first.VaneDiagnostics().Counters.HandoffCommitted,
+		"activating a second group must not touch the first one's counters")
+	require.Zero(t, second.VaneDiagnostics().Counters.HandoffCommitted,
+		"a fresh group starts from zero")
+}

@@ -495,10 +495,9 @@ func (a *Vane) attachLearningState(learning *vaneLearningState, generation uint6
 }
 
 type vaneLearningActivationEntry struct {
-	group       *Vane
-	owner       *vaneLearningState
-	diagnostics *vaneDiagnostics
-	collector   *vaneNativeCollector
+	group     *Vane
+	owner     *vaneLearningState
+	collector *vaneNativeCollector
 }
 
 type VaneLearningActivation struct {
@@ -524,13 +523,12 @@ func PrepareVaneLearningStates(proxies map[string]C.Proxy) *VaneLearningActivati
 			vane.activationMu.Unlock()
 			if !activated {
 				owner := acquireVaneLearningState(vane.Name(), vane.clock, vane.stateTTL, vane.maxStates)
-				diagnostics := sharedVaneDiagnostics(vane.Name(), vane.clock)
 				collector, err := acquireVaneNativeCollector(vane.collectorSpec)
 				if err != nil {
 					batch.err = errors.Join(batch.err, fmt.Errorf("vane %q native collector: %w", vane.Name(), err))
 					continue
 				}
-				batch.entries = append(batch.entries, vaneLearningActivationEntry{group: vane, owner: owner, diagnostics: diagnostics, collector: collector})
+				batch.entries = append(batch.entries, vaneLearningActivationEntry{group: vane, owner: owner, collector: collector})
 			}
 		}
 	}
@@ -556,8 +554,6 @@ func (b *VaneLearningActivation) Commit() {
 			generation := activateVaneLearningState(entry.owner, a.stateTTL, a.maxStates)
 			a.mu.Lock()
 			a.attachLearningState(entry.owner, generation)
-			a.diagnostics = entry.diagnostics
-			a.gray.setDiagnostics(entry.diagnostics)
 			a.collector = entry.collector
 			a.collectorReleased = false
 			a.learningActivated = true

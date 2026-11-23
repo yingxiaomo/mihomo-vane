@@ -22,7 +22,6 @@ func TestVaneNamespaceNamesAndPrivacyIsolation(t *testing.T) {
 	require.Equal(t, 1, VaneLearningSchemaVersion)
 	require.Equal(t, 2, VaneDiagnosticsSchemaVersion)
 	require.Contains(t, vaneLearningStorageKey("test"), "vane-state-v1:")
-	require.Equal(t, "test", vaneDiagnosticsRegistryKey("test"))
 	spec, err := newVaneNativeCollectorSpec(true, "", 0, 0, 0, 0)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(home, "vane-events"), spec.directory)

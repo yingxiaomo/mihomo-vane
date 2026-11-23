@@ -207,15 +207,6 @@ func newVaneGrayObserver(enabled bool, clock vaneClock, diagnostics *vaneDiagnos
 	}
 }
 
-func (o *vaneGrayObserver) setDiagnostics(diagnostics *vaneDiagnostics) {
-	if o == nil {
-		return
-	}
-	o.mu.Lock()
-	o.diagnostics = diagnostics
-	o.mu.Unlock()
-}
-
 func (o *vaneGrayObserver) newAttempt(selection vaneGraySelection, metadata *C.Metadata) *vaneGrayAttempt {
 	if o == nil || !o.isEnabled() {
 		return nil
