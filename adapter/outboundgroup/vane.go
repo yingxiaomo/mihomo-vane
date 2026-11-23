@@ -760,6 +760,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		}
 		if mediaFlow != nil {
 			mediaFlow.setPolicySubmitter(observed.submitPolicyAction)
+			mediaFlow.setBacklogFunc(observed.pendingBacklog)
 			// §E: the switched-to flow counts empty windows on its own
 			// connection; other connections on the same hint never arm it.
 			observed.setOnEmptyWindow(mediaFlow.noteEmptyWindow)

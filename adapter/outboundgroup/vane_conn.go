@@ -162,6 +162,12 @@ type vaneObservedConn struct {
 	segmentLastRead  time.Time
 	segmentBytes     int64
 	totalReadBytes   int64
+	// §6 backlog: readBytes is fed by the counting reader UnwrapReader hands
+	// to sing; deliveredBytes only by the post-write CountFunc. Pending
+	// backlog is bytes that reached the proxy but not the client, i.e. the
+	// client is the bottleneck, not the node.
+	readBytes        int64
+	deliveredBytes   int64
 	closing          bool
 	policyClosed     bool
 	relayDepth       int
@@ -355,8 +361,40 @@ func (c *vaneObservedConn) ReadBuffer(buffer *buf.Buffer) error {
 	return err
 }
 
+// vaneCountReader counts bytes as sing reads them off the node. It must stay
+// a bare io.Reader: implementing ReadBuffer, UnwrapReader/ReadCounter,
+// Upstream/ReaderReplaceable or syscall.Conn would let sing skip or unwrap
+// the counting, and the backlog signal would silently stay zero.
+type vaneCountReader struct {
+	conn *vaneObservedConn
+}
+
+func (r *vaneCountReader) Read(payload []byte) (int, error) {
+	n, err := r.conn.Conn.Read(payload)
+	if n > 0 {
+		r.conn.mu.Lock()
+		r.conn.readBytes += int64(n)
+		r.conn.mu.Unlock()
+	}
+	return n, err
+}
+
+// pendingBacklog is clamped: handshake bytes can reach the client without
+// passing through the counting reader, so the raw difference may go negative.
+func (c *vaneObservedConn) pendingBacklog() int64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.readBytes <= c.deliveredBytes {
+		return 0
+	}
+	return c.readBytes - c.deliveredBytes
+}
+
 func (c *vaneObservedConn) UnwrapReader() (io.Reader, []N.CountFunc) {
-	return c.Conn, []N.CountFunc{func(read int64) {
+	return &vaneCountReader{conn: c}, []N.CountFunc{func(read int64) {
 		if read > 0 {
 			// sing invokes reader counters only after the positive payload has
 			// reached the destination. Policy close is permitted only here;
@@ -547,6 +585,9 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 
 	c.mu.Lock()
 	c.totalReadBytes += count
+	if delivered {
+		c.deliveredBytes += count
+	}
 	if c.wrotePayload && !c.responseRecorded {
 		c.responseRecorded = true
 		c.responseBytes = c.totalReadBytes

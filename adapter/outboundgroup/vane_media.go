@@ -235,6 +235,11 @@ type vaneMediaFlow struct {
 	switchedTo        bool
 	valveCurrentBPS   float64
 	valveEmptyWindows int
+	// §6 backlog: the last time the watchdog saw unwritten bytes queued on the
+	// connection. A low window is not counted for two ticks after that, since
+	// the client, not the node, was the bottleneck.
+	backloggedAt time.Time
+	backlogFunc  func() int64
 }
 
 // mediaFlowStarted and mediaFlowEnded maintain the per-node live media-flow
@@ -367,6 +372,8 @@ func (a *Vane) runMediaWatchdogTick(now time.Time) {
 	}
 	a.mediaFlowsMu.Unlock()
 	for _, flow := range flows {
+		// Backlog first: the synthetic window below must already see it.
+		flow.noteBacklog(now)
 		flow.observeSyntheticStall(now)
 	}
 }
@@ -440,6 +447,39 @@ func (f *vaneMediaFlow) discardHandoff() {
 	f.handoff = nil
 	f.mu.Unlock()
 	f.group.discardTargetHandoff(handoff)
+}
+
+func (f *vaneMediaFlow) setBacklogFunc(probe func() int64) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	f.backlogFunc = probe
+	f.mu.Unlock()
+}
+
+// noteBacklog stamps the flow when the connection is holding unwritten bytes.
+// The probe runs outside f.mu: it takes vaneObservedConn.mu, and observeRead
+// calls its callbacks only after dropping that lock.
+func (f *vaneMediaFlow) noteBacklog(now time.Time) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	if f.closed || f.aborted {
+		f.mu.Unlock()
+		return
+	}
+	probe := f.backlogFunc
+	f.mu.Unlock()
+	if probe == nil || probe() <= 0 {
+		return
+	}
+	f.mu.Lock()
+	if !f.closed && !f.aborted {
+		f.backloggedAt = now
+	}
+	f.mu.Unlock()
 }
 
 func (f *vaneMediaFlow) setPolicySubmitter(submitter func(vanePolicyAction, bool)) {
@@ -516,16 +556,23 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	if sample.LatencySupported && sample.Latency > 0 {
 		f.group.recordLatencyIdentity(f.candidate, f.identity, f.nodeEpoch, sample.Latency)
 	}
-	graced := false
+	graceReason := ""
 	if low {
 		// P1 grace: the measured rate is the delivery rate, so a brief client
 		// throttle (background tab) can dip below the line while the node is
 		// fine. A low sample within vaneMediaFastGrace of the last non-low
 		// sample only delays the streak — it never cancels a genuine collapse,
 		// which keeps accumulating once the grace is over.
-		if !f.lastNonLowAt.IsZero() && now.Sub(f.lastNonLowAt) < vaneMediaFastGrace {
-			graced = true
-		} else {
+		//
+		// §6 backlog: unwritten bytes on the connection are direct proof the
+		// client is behind, which is stronger than "it was fast recently", so
+		// it wins when both apply.
+		switch {
+		case !f.backloggedAt.IsZero() && now.Sub(f.backloggedAt) < 2*vaneMediaWatchdogTick:
+			graceReason = "client-backlog"
+		case !f.lastNonLowAt.IsZero() && now.Sub(f.lastNonLowAt) < vaneMediaFastGrace:
+			graceReason = "recently-fast"
+		default:
 			f.lowWindows++
 		}
 	} else {
@@ -561,10 +608,10 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		latencyMillis: sample.Latency.Milliseconds(),
 		lossRate:      sample.LossRate,
 	})
-	if graced {
+	if graceReason != "" {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:       "low-window-graced",
-			reason:     "recently-fast",
+			reason:     graceReason,
 			target:     f.target,
 			bucket:     f.targetKey.target,
 			port:       f.port,
@@ -575,7 +622,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 			lowWindows: lowWindows,
 		})
 	}
-	untrusted := sample.untrusted || graced
+	untrusted := sample.untrusted || graceReason != ""
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
 	if !untrusted {
 		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond, lowLoss || lowLatency)

@@ -837,11 +837,18 @@ func TestVaneOptimizedCountCallbacks(t *testing.T) {
 
 	writer, writeCounters := SN.UnwrapCountWriter(wrapped, nil)
 	reader, readCounters := SN.UnwrapCountReader(wrapped, nil)
-	if _, ok := writer.(*vaneObservedWriter); !ok || reader != base {
-		t.Fatalf("initial optimized endpoints = (%T, %T), want vane pending writer and base reader", writer, reader)
+	if _, ok := writer.(*vaneObservedWriter); !ok {
+		t.Fatalf("initial optimized writer = %T, want the vane pending writer", writer)
 	}
-	if len(writeCounters) != 1 || len(readCounters) != 2 {
-		t.Fatalf("initial counter lengths = (write %d, read %d), want (1, 2)", len(writeCounters), len(readCounters))
+	// §6: the reader is the counting reader, not the raw connection, so sing's
+	// reads can be told apart from what actually reached the client.
+	if _, ok := reader.(*vaneCountReader); !ok {
+		t.Fatalf("initial optimized reader = %T, want the vane counting reader", reader)
+	}
+	if len(writeCounters) != 1 || len(readCounters) != 1 {
+		// §6: the counting reader stops UnwrapCountReader's recursion, so the
+		// underlying conn's own counters are no longer collected here.
+		t.Fatalf("initial counter lengths = (write %d, read %d), want (1, 1)", len(writeCounters), len(readCounters))
 	}
 
 	n, err := writer.Write([]byte("payload"))
@@ -869,9 +876,6 @@ func TestVaneOptimizedCountCallbacks(t *testing.T) {
 
 	if got := counted.writeCount.Load(); got != 7 {
 		t.Fatalf("upstream write counter = %d, want 7", got)
-	}
-	if got := counted.readCount.Load(); got != 64*1024 {
-		t.Fatalf("upstream read counter = %d, want 64KiB", got)
 	}
 	if got := responses.Load(); got != 1 {
 		t.Fatalf("optimized response callbacks = %d, want 1", got)
