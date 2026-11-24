@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math"
 	"net"
@@ -37,6 +38,7 @@ type VaneOption struct {
 	CollectorMaxFileAge    int           `group:"collector-max-file-age,omitempty"`
 	CollectorFlushInterval int           `group:"collector-flush-interval,omitempty"`
 	SceneRules             []string      `group:"scene-rules,omitempty"`
+	HashRules              []string      `group:"hash-rules,omitempty"`
 	SwitchMargin           float64       `group:"switch-margin,omitempty"`
 	TargetCooldown         int           `group:"target-cooldown,omitempty"`
 	StateTTL               int           `group:"state-ttl,omitempty"`
@@ -274,6 +276,7 @@ type vaneRankedProxy struct {
 	cooldownUntil          time.Time
 	evidenceCoverageMicros int64
 	parts                  vaneScoreParts
+	hardCapped             bool
 }
 
 type vanePickDecision struct {
@@ -292,6 +295,7 @@ type Vane struct {
 	testURL            string
 	expectedStatus     string
 	rules              []vaneSceneRule
+	hashRules          []vaneSceneRule
 	switchMargin       int64
 	targetCooldown     time.Duration
 	stateTTL           time.Duration
@@ -361,6 +365,10 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 	if err != nil {
 		return nil, err
 	}
+	hashRules, err := parseVaneHashRules(vaneOption.HashRules)
+	if err != nil {
+		return nil, err
+	}
 
 	switchMargin := vaneOption.SwitchMargin
 	if switchMargin == 0 {
@@ -409,6 +417,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 		return nil, err
 	}
 	group := newVaneWithClock(option, emptyFallback, providers, rules, switchMargin, targetCooldown, stateTTL, maxStates, vaneSystemClock{})
+	group.hashRules = hashRules
 	group.media = media
 	group.racing = racing
 	group.exploration = exploration
@@ -1076,11 +1085,14 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	if commit {
 		a.refreshNodeIdentities(proxies)
 	}
+	// disableUDP can no longer be folded into the compatible filter: the hash
+	// pool below must be transport-independent, so UDP-incompatible nodes stay
+	// in `compatible` and are skipped per-candidate inside the loop.
+	if transport == vaneTransportUDP && a.disableUDP {
+		return vanePickDecision{proxy: a.EmptyFallback()}
+	}
 	compatible := make([]C.Proxy, 0, len(proxies))
 	for _, proxy := range proxies {
-		if transport == vaneTransportUDP && (a.disableUDP || !proxy.SupportUDP()) {
-			continue
-		}
 		compatible = append(compatible, proxy)
 	}
 	if len(compatible) == 0 {
@@ -1160,6 +1172,13 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	}
 	ranked := make([]vaneRankedProxy, 0, len(compatible))
 	var capped []vaneRankedProxy
+	// The hash pool is only built when it can be used, and it is deliberately
+	// independent of scoring, per-target cooldown and transport: those make
+	// `ranked` drift, which would move a pinned rule-set to another node.
+	var poolAll []vaneRankedProxy
+	if len(a.hashRules) > 0 {
+		poolAll = make([]vaneRankedProxy, 0, len(compatible))
+	}
 	for _, proxy := range compatible {
 		snapshot := vaneMetricsSnapshot{}
 		identity := vaneProxyPersistentIdentity(proxy)
@@ -1192,6 +1211,10 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			}
 		}
 		parts := scoreVaneMetricsParts(scene, snapshot)
+		// Computed before the literal: a candidate that goes to `capped` must
+		// carry hardCapped into the pool too, otherwise the pin would happily
+		// select a node the latency cap just excluded.
+		hardCapped := snapshot.latency.valid && snapshot.latency.value > math.Log(vaneLatencyHardCapMs)
 		candidate := vaneRankedProxy{
 			proxy: proxy,
 			vaneCandidateScore: vaneCandidateScore{
@@ -1201,17 +1224,30 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			parts:                  parts,
 			cooldownUntil:          until,
 			evidenceCoverageMicros: vaneEvidenceCoverageMicros(snapshot, transport, scene),
+			hardCapped:             hardCapped,
 		}
-		if snapshot.latency.valid && snapshot.latency.value > math.Log(vaneLatencyHardCapMs) {
+		if len(a.hashRules) > 0 {
+			poolAll = append(poolAll, candidate)
+		}
+		if transport == vaneTransportUDP && !proxy.SupportUDP() {
+			continue
+		}
+		if hardCapped {
 			capped = append(capped, candidate)
 			continue
 		}
 		ranked = append(ranked, candidate)
 	}
 
-	// The hard cap never empties the pool: a slow node beats no node at all.
+	// The hard cap never empties the ranking: a slow node beats no node at all.
 	if len(ranked) == 0 {
 		ranked = capped
+	}
+	// Without the UDP filter above, every candidate can be skipped (UDP pick,
+	// no UDP-capable node), leaving both queues empty. Degrade instead of
+	// indexing an empty slice.
+	if len(ranked) == 0 {
+		return vanePickDecision{proxy: a.EmptyFallback()}
 	}
 	if commit && len(capped) > 0 {
 		a.diagnostics.record(vaneDiagnosticRecord{
@@ -1242,8 +1278,48 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	}
 	ranked = vanePreferAvailable(ranked)
 
+	// Deterministic per-rule-set pin. The pool is sorted by name (not score) so
+	// jumpHash's minimal remapping applies to node changes, and it walks the
+	// ring on failure instead of re-hashing per attempt.
+	var pinned *vaneRankedProxy
+	pinnedReason := ""
+	if len(a.hashRules) > 0 {
+		if rule, ok := matchVaneSceneRule(metadata, a.hashRules); ok && rule.scope() != "" {
+			sort.Slice(poolAll, func(i, j int) bool { return poolAll[i].name < poolAll[j].name })
+			h := fnv.New64a()
+			_, _ = h.Write([]byte(rule.scope()))
+			idx := int(jumpHash(h.Sum64(), int32(len(poolAll))))
+			for i := 0; i < len(poolAll); i++ {
+				candidate := &poolAll[(idx+i)%len(poolAll)]
+				if a.hashCandidateUsableLocked(candidate, transport, scene, now, commit) {
+					pinned = candidate
+					pinnedReason = "direct"
+					if i > 0 {
+						pinnedReason = "failover"
+					}
+					break
+				}
+			}
+			if commit && pinned != nil {
+				a.diagnostics.record(vaneDiagnosticRecord{
+					kind:      "hash-pinned",
+					reason:    pinnedReason,
+					target:    target,
+					bucket:    rule.scope(),
+					port:      port,
+					from:      ranked[0].name,
+					to:        pinned.name,
+					transport: transport.String(),
+					scene:     scene.String(),
+				})
+			}
+		}
+	}
+
 	chosen := ranked[0]
-	if anchor.name != "" {
+	if pinned != nil {
+		chosen = *pinned
+	} else if anchor.name != "" {
 		for _, candidate := range ranked {
 			if candidate.name != anchor.name || candidate.cooldownUntil.After(now) {
 				continue
@@ -1256,7 +1332,9 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	}
 	baseline := chosen
 	var explorationSelection *vaneExplorationSelection
-	if commit {
+	// Exploring would pick another node on purpose, which is exactly what the
+	// pin exists to prevent; unmatched traffic still explores normally.
+	if commit && pinned == nil {
 		explorationSelection = a.maybeSelectExplorationLocked(
 			metadata, transport, scene, now, target, port, ranked, baseline, anchor, anchorCoolingAnywhere, hasAlive,
 		)
@@ -1275,7 +1353,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		// A target-scoped failure is a one-off bypass, not evidence that the
 		// scene's healthy global preference should change for every target. An
 		// explicit exploration is an observation allocation, not an anchor vote.
-		if explorationSelection == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
+		if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
 			a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
 		}
 		selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
@@ -1294,7 +1372,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	var coldPick *coldPickProbe
 	var coldPickTop2 []vaneRankedProxy
 	if commit && transport == vaneTransportTCP && scene == vaneSceneMedia &&
-		explorationSelection == nil && claimHandoff {
+		explorationSelection == nil && pinned == nil && claimHandoff {
 		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
 			coldPickScope = targetKey.targetScope
 			if coldPickScope != "" && len(ranked) >= 2 {
@@ -1493,6 +1571,27 @@ func (a *Vane) cooldownUntilLocked(key vaneCooldownKey, now time.Time, cleanup b
 		return time.Time{}
 	}
 	return until
+}
+
+// hashCandidateUsableLocked reports whether the pinned node may serve this
+// connection. Cooldowns do not change the pool or its order, so honouring them
+// here cannot move anyone else's bucket.
+func (a *Vane) hashCandidateUsableLocked(cand *vaneRankedProxy, transport vaneTransport, scene vaneScene, now time.Time, commit bool) bool {
+	if cand.hardCapped {
+		return false
+	}
+	if transport == vaneTransportUDP && !cand.proxy.SupportUDP() {
+		return false
+	}
+	if cand.cooldownUntil.After(now) {
+		return false
+	}
+	if transport == vaneTransportTCP && scene == vaneSceneMedia {
+		if a.mediaCandidateCoolingLockedWithCleanup(cand.name, vaneProxyPersistentIdentity(cand.proxy), now, commit) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *Vane) candidateCoolingLocked(transport vaneTransport, candidate, identity string, now time.Time, cleanup bool) bool {

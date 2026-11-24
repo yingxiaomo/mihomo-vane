@@ -133,17 +133,52 @@ func parseVaneSceneRule(text string) (vaneSceneRule, error) {
 		return vaneSceneRule{}, fmt.Errorf("expected TYPE,payload,scene")
 	}
 
-	ruleType := strings.ToUpper(strings.TrimSpace(parts[0]))
-	payload := strings.TrimSpace(parts[1])
 	scene, ok := parseVaneScene(parts[2])
 	if !ok {
 		return vaneSceneRule{}, fmt.Errorf("unsupported scene %q", strings.TrimSpace(parts[2]))
 	}
+
+	rule, err := parseVaneRulePayload(parts[0], parts[1])
+	if err != nil {
+		return vaneSceneRule{}, err
+	}
+	rule.scene = scene
+	return rule, nil
+}
+
+// parseVaneHashRules parses the two-part hash-rules list. The hash key is the
+// rule's set name, so the type must be one that carries a scope at all.
+func parseVaneHashRules(raw []string) ([]vaneSceneRule, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	rules := make([]vaneSceneRule, 0, len(raw))
+	for i, text := range raw {
+		parts := strings.Split(text, ",")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("vane hash rule %d: expected TYPE,payload", i)
+		}
+		rule, err := parseVaneRulePayload(parts[0], parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("vane hash rule %d: %w", i, err)
+		}
+		if rule.scope() == "" {
+			return nil, fmt.Errorf("vane hash rule %d: %s carries no rule-set name", i, strings.ToUpper(strings.TrimSpace(parts[0])))
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
+}
+
+func parseVaneRulePayload(typeText, payloadText string) (vaneSceneRule, error) {
+	ruleType := strings.ToUpper(strings.TrimSpace(typeText))
+	payload := strings.TrimSpace(payloadText)
 	if payload == "" {
 		return vaneSceneRule{}, fmt.Errorf("empty payload for %s", ruleType)
 	}
 
-	rule := vaneSceneRule{scene: scene}
+	rule := vaneSceneRule{}
 	switch ruleType {
 	case "DOMAIN":
 		rule.kind = vaneRuleDomain
