@@ -270,6 +270,11 @@ type vaneMediaFlow struct {
 	// PHASE1: only a configured media target holds a B2 media-flow count.
 	// Every TCP flow is watched, but the count keeps its media meaning.
 	counted bool
+	// PHASE2: a flow that matches a configured media target keeps media
+	// semantics (its own diagnostics and target-evidence writes). Other TCP
+	// flows are watched and may now be switched, but stay out of the
+	// media-only bookkeeping.
+	flowMedia bool
 	// §E: only the flow that claimed the handoff token (the connection the
 	// switch was made for) arms the re-evaluation valve. valveCurrentBPS
 	// keeps the pre-switch speed from the token for the re-run prepare.
@@ -324,13 +329,18 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 	if target == "" {
 		return nil
 	}
-	// PHASE1: every TCP flow enters the watchdog, not only media targets. A
-	// flow whose target is not a configured media target keeps an empty
-	// targetKey: it still counts low windows and feeds node health, but it
-	// owns no target state and never reaches the switch path in observe.
-	targetKey := group.mediaTargetKey(target, port)
+	// PHASE2: every TCP flow gets a target scope so a stalled download can be
+	// rescued the same way a video flow is. A media target keeps its
+	// rule-derived scope and its target state; any other host gets a per-host
+	// scope and skips the target-evidence writes (it has no rule identity).
+	mediaKey := group.mediaTargetKey(target, port)
+	flowMedia := mediaKey.target != ""
+	targetKey := mediaKey
+	if !flowMedia {
+		targetKey = vaneMediaTargetKey{target: target, port: port}
+	}
 	targetStateKey, _ := group.targetKeyForMedia(target, port)
-	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey}
+	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey, flowMedia: flowMedia}
 	if len(handoff) > 0 && handoff[0] != nil {
 		flow.handoff = handoff[0]
 		// §E: this flow is the one the switch was made for — arm the
@@ -349,7 +359,7 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 	// rides on the connection settlement (releaseActiveFlowCount); a
 	// never-closing connection keeps holding its count, which is acceptable —
 	// connections eventually close.
-	if targetKey.target != "" {
+	if flowMedia {
 		flow.counted = true
 		group.mediaFlowStarted(candidate)
 	}
@@ -660,7 +670,7 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	// owns target state, may arm a switch, and emits per-sample diagnostics.
 	// A flow with an empty targetKey still counts low windows so the phase-2
 	// rollout has data, without flooding the log with one record per window.
-	mediaTarget := f.targetKey.target != ""
+	mediaTarget := f.flowMedia
 	if mediaTarget {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:          "throughput-sample",
@@ -732,10 +742,6 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 			})
 			f.group.settleTargetHandoff(handoff, member, sample)
 		}
-	}
-	// PHASE1: a non-media flow is observed only; phase 2 will let it switch.
-	if !mediaTarget {
-		return nil
 	}
 	if lowWindows < config.lowWindows || sample.Age < config.minAge || sample.TotalBytes < config.minBytes {
 		return nil

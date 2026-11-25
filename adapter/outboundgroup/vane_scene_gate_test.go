@@ -152,6 +152,6 @@ func TestVaneSceneGateBuildsMediaFlowWithoutGate(t *testing.T) {
 
 	outside := newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "other.example", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, outside, "PHASE1: every TCP flow is watched")
-	require.Empty(t, outside.targetKey.target, "a host outside every scene rule cannot arm the switch path")
+	require.False(t, outside.flowMedia, "a host outside every media rule is not a media flow")
 	outside.releaseActiveFlowCount()
 }

@@ -71,6 +71,6 @@ func TestVaneRuleSetSceneRuleRejectsLookalikeHost(t *testing.T) {
 		"a lookalike host must not open the gate")
 	lookalike := newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "example.com.evil.test", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, lookalike, "PHASE1: every TCP flow is watched")
-	require.Empty(t, lookalike.targetKey.target, "a lookalike host must not arm the switch path")
+	require.False(t, lookalike.flowMedia, "a lookalike host is not a media flow")
 	lookalike.releaseActiveFlowCount()
 }
