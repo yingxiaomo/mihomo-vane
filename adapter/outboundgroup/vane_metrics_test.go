@@ -207,11 +207,11 @@ func candidateNames(ranked []vaneCandidateScore) []string {
 // match — registration, updates and removals are all reflected, an
 // unregistered provider is "no match", never an error.
 func TestVaneSceneRuleSet(t *testing.T) {
-	rule, err := parseVaneSceneRule("RULE-SET,streaming,media")
+	rule, err := parseVaneFamilyRule("RULE-SET,streaming,media")
 	require.NoError(t, err)
 	require.Equal(t, vaneRuleRuleSet, rule.kind)
 	require.Equal(t, "streaming", rule.value)
-	_, err = parseVaneSceneRule("RULE-SET,,media")
+	_, err = parseVaneFamilyRule("RULE-SET,,media")
 	require.Error(t, err, "empty payload is rejected by the shared check")
 
 	metadata := &C.Metadata{Host: "media.streaming-provider.test"}
@@ -260,11 +260,11 @@ func TestVaneSceneRuleSet(t *testing.T) {
 // matching is fail-closed — without a GeoSite database the load errors and
 // the rule never matches, with no error and no panic.
 func TestVaneSceneGeoSite(t *testing.T) {
-	rule, err := parseVaneSceneRule("GEOSITE,category-openai,media")
+	rule, err := parseVaneFamilyRule("GEOSITE,category-openai,media")
 	require.NoError(t, err)
 	require.Equal(t, vaneRuleGeoSite, rule.kind)
 	require.Equal(t, "category-openai", rule.value)
-	_, err = parseVaneSceneRule("GEOSITE,,media")
+	_, err = parseVaneFamilyRule("GEOSITE,,media")
 	require.Error(t, err, "empty category is rejected by the shared check")
 
 	metadata := &C.Metadata{Host: "api.openai.com"}
