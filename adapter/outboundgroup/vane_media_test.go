@@ -990,3 +990,18 @@ func TestVaneSwitchObserveWindowBlocksImmediateReswitch(t *testing.T) {
 	require.Equal(t, "switch-observing", group.mediaTargetBudgetBlocksLocked(key, now.Add(10*time.Second)))
 	require.Empty(t, group.mediaTargetBudgetBlocksLocked(key, now.Add(vaneSwitchObserveWindow+time.Second)))
 }
+
+// PHASE2: a non-media flow must still carry a concrete state scope, else the
+// commit path answered "invalid-target" and burned race budget for nothing.
+func TestVaneNonMediaFlowHasStateScope(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	md := &C.Metadata{Host: "api.example.com", DstPort: 443, NetWork: C.TCP}
+	flow := newVaneMediaFlow(group, "alpha", md)
+	require.NotNil(t, flow)
+	require.False(t, flow.flowMedia)
+	require.Equal(t, "api.example.com", flow.targetStateKey.targetScope)
+	flow.releaseActiveFlowCount()
+}

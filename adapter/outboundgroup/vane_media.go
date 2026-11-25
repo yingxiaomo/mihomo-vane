@@ -192,12 +192,12 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 	if demand > 0 {
 		config.demandBPS = float64(demand)
 	}
-	// §L: the low-window trigger line follows the group's demand (floored at
-	// the 5M default). demand already dominates the close bar, knownGood and
-	// the settlement line; a 4K-demand group must also accumulate low windows
-	// below its own bar, or a 40→10 drop never triggers at all.
-	if config.demandBPS > config.lowThroughputBPS {
-		config.lowThroughputBPS = config.demandBPS
+	// LOW-LINE: the low-window trigger line stays at the flat 5M default or the
+	// explicit low-throughput-bps value. It must NOT follow demand - on a pool
+	// that peaks at 25M a 15M demand marked 71% of real samples "low" and kept
+	// the watchdog switching forever.
+	if option.LowThroughputBPS > 0 {
+		config.lowThroughputBPS = float64(option.LowThroughputBPS)
 	}
 	return config, nil
 }
@@ -339,7 +339,13 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 	if !flowMedia {
 		targetKey = vaneMediaTargetKey{target: target, port: port}
 	}
-	targetStateKey, _ := group.targetKeyForMedia(target, port)
+	targetStateKey, stateOK := group.targetKeyForMedia(target, port)
+	if !stateOK {
+		// PHASE2: every TCP flow is switchable, so a non-media host still needs
+		// a concrete state scope; without it the commit path answered
+		// "invalid-target" and burned the race budget.
+		targetStateKey = vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneDefault, targetScope: target, port: port}
+	}
 	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey, flowMedia: flowMedia}
 	if len(handoff) > 0 && handoff[0] != nil {
 		flow.handoff = handoff[0]

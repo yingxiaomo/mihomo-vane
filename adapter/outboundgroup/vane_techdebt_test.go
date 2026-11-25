@@ -342,8 +342,8 @@ func TestVaneImprovedSettlementNeedsAbsoluteLine(t *testing.T) {
 // §L: the low-window trigger line follows demand (floored at 5M). The config
 // is built through newVaneMediaConfig — the production path that applies the
 // raise — so mutating the raise breaks these tests.
-func TestVaneTriggerLineFollowsDemand(t *testing.T) {
-	newFlow := func(t *testing.T, demandBPS int64) (*Vane, *vaneMediaFlow) {
+func TestVaneTriggerLineIgnoresDemand(t *testing.T) {
+	newFlow := func(t *testing.T, demandBPS, lowBPS int64) (*Vane, *vaneMediaFlow) {
 		t.Helper()
 		clock := newVaneConnTestClock()
 		alpha := newVaneTestProxy("alpha", true, true)
@@ -352,11 +352,15 @@ func TestVaneTriggerLineFollowsDemand(t *testing.T) {
 		parsed, err := parseVaneSceneRules([]string{"DOMAIN-SUFFIX,googlevideo.com,media"})
 		require.NoError(t, err)
 		group.rules = parsed
-		config, err := newVaneMediaConfig(VaneOption{
+		option := VaneOption{
 			MediaReconnect:        true,
 			MediaReconnectDomains: []string{"googlevideo.com"},
 			MediaDemandBPS:        vaneBandwidth(demandBPS),
-		})
+		}
+		if lowBPS > 0 {
+			option.LowThroughputBPS = vaneBandwidth(lowBPS)
+		}
+		config, err := newVaneMediaConfig(option)
 		require.NoError(t, err)
 		config.enabled = true
 		group.media = config
@@ -370,30 +374,28 @@ func TestVaneTriggerLineFollowsDemand(t *testing.T) {
 		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 		return group, flow
 	}
+	lowOf := func(flow *vaneMediaFlow) int {
+		flow.mu.Lock()
+		defer flow.mu.Unlock()
+		return flow.lowWindows
+	}
 
-	// TRIGGER-01: a 10M-demand group counts an 8M window as low (5M line would not).
-	_, flow := newFlow(t, 10_000_000)
+	// TRIGGER-01: demand must NOT raise the line - a 10M-demand group keeps the
+	// flat 5M door, so an 8M window is healthy and stays out of the streak.
+	_, flow := newFlow(t, 10_000_000, 0)
 	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 8_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
-	flow.mu.Lock()
-	lowWindows := flow.lowWindows
-	flow.mu.Unlock()
-	require.Equal(t, 1, lowWindows, "8M is below the 10M line")
+	require.Zero(t, lowOf(flow), "demand must not lift the trigger line")
 
-	// TRIGGER-02: a 2M-demand group keeps the 5M floor — 7M is not low.
-	_, flow = newFlow(t, 2_000_000)
-	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 7_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
-	flow.mu.Lock()
-	lowWindows = flow.lowWindows
-	flow.mu.Unlock()
-	require.Zero(t, lowWindows, "7M is above the 5M floor")
+	// TRIGGER-02: an explicit low-throughput-bps does lift it: a 12M line counts
+	// an 8M window as low.
+	_, flow = newFlow(t, 10_000_000, 12_000_000)
+	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 8_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
+	require.Equal(t, 1, lowOf(flow), "8M is below the explicit 12M line")
 
-	// TRIGGER-03: the floor still catches a 3M window on the low-demand group.
-	_, flow = newFlow(t, 2_000_000)
+	// TRIGGER-03: the 5M floor still catches a 3M window.
+	_, flow = newFlow(t, 2_000_000, 0)
 	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 3_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
-	flow.mu.Lock()
-	lowWindows = flow.lowWindows
-	flow.mu.Unlock()
-	require.Equal(t, 1, lowWindows, "3M is below the 5M floor")
+	require.Equal(t, 1, lowOf(flow), "3M is below the 5M floor")
 }
 
 // §L exemption: a plan admitted on fresh target evidence survives the CHAIN-04

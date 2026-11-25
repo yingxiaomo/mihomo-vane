@@ -49,6 +49,7 @@ type VaneOption struct {
 	MediaReconnect         bool          `group:"media-reconnect,omitempty"`
 	MediaReconnectDomains  []string      `group:"media-reconnect-domains,omitempty"`
 	DemandBPS              vaneBandwidth `group:"demand-bps,omitempty"`
+	LowThroughputBPS       vaneBandwidth `group:"low-throughput-bps,omitempty"`
 	Vane                   *bool         `group:"vane,omitempty"`
 	RacingURL              string        `group:"racing-url,omitempty"`
 	// MediaDemandBPS is the pre-simplification key. It still parses so an
@@ -336,22 +337,22 @@ type Vane struct {
 	activationMu       sync.Mutex
 	learningActivated  bool
 
-	mu                 sync.Mutex
-	nodes              map[string]*vaneNodeState
-	stickiness         map[vaneTargetKey]vaneStickyChoice
-	nodeControls       map[string]*vaneNodeControlState
-	nodeIdentities     map[string]string
-	anchors            map[vaneAnchorKey]vaneAnchor
-	cooldowns          map[vaneCooldownKey]time.Time
-	mediaHints         map[vaneMediaTargetKey]vaneMediaHint
-	mediaReconnects    map[vaneMediaNodeKey]time.Time
+	mu                  sync.Mutex
+	nodes               map[string]*vaneNodeState
+	stickiness          map[vaneTargetKey]vaneStickyChoice
+	nodeControls        map[string]*vaneNodeControlState
+	nodeIdentities      map[string]string
+	anchors             map[vaneAnchorKey]vaneAnchor
+	cooldowns           map[vaneCooldownKey]time.Time
+	mediaHints          map[vaneMediaTargetKey]vaneMediaHint
+	mediaReconnects     map[vaneMediaNodeKey]time.Time
 	mediaTargetSwitches map[vaneMediaTargetKey]vaneTargetSwitchBudget
-	mediaSlowCooldowns map[vaneMediaCandidateKey]time.Time
-	mediaBudgets       map[vaneMediaNodeKey]vaneMediaBudget
-	targetHandoffs     map[vaneTargetKey]vaneHandoffLease
-	targetPreferences  map[vaneTargetKey]vaneTargetPreference
-	targetEvidence     map[vaneTargetEvidenceKey]vaneTargetEvidence
-	targetFailures     map[vaneTargetFailureKey]vaneTargetFailureState
+	mediaSlowCooldowns  map[vaneMediaCandidateKey]time.Time
+	mediaBudgets        map[vaneMediaNodeKey]vaneMediaBudget
+	targetHandoffs      map[vaneTargetKey]vaneHandoffLease
+	targetPreferences   map[vaneTargetKey]vaneTargetPreference
+	targetEvidence      map[vaneTargetEvidenceKey]vaneTargetEvidence
+	targetFailures      map[vaneTargetFailureKey]vaneTargetFailureState
 	// Cold-pick probe throttle (COLD-PICK): per target scope. Both maps are
 	// guarded by a.mu and only touched in pickInternalDecision's (a)/(c)
 	// stages — never inside racingRuntime.mu (see snapshotFreshCapabilities).
@@ -476,41 +477,41 @@ func newVaneWithClock(
 			EmptyFallback:  emptyFallback,
 			Providers:      providers,
 		}),
-		disableUDP:         option.DisableUDP,
-		testURL:            option.URL,
-		expectedStatus:     option.ExpectedStatus,
-		rules:              rules,
-		switchMargin:       int64(switchMargin*1_000_000 + 0.5),
-		targetCooldown:     targetCooldown,
-		stateTTL:           stateTTL,
-		maxStates:          maxStates,
-		clock:              clock,
-		media:              defaultVaneMediaConfig(),
-		racing:             vaneRacingConfig{mode: vaneRacingOn},
-		racingRuntime:      newVaneRacingRuntime(),
-		explorationSince:   clock.Now().UTC(),
-		diagnostics:        newVaneDiagnostics(option.Name, clock),
-		anchors:            make(map[vaneAnchorKey]vaneAnchor),
-		stickiness:         make(map[vaneTargetKey]vaneStickyChoice),
-		cooldowns:          make(map[vaneCooldownKey]time.Time),
-		mediaHints:         make(map[vaneMediaTargetKey]vaneMediaHint),
-		mediaReconnects:    make(map[vaneMediaNodeKey]time.Time),
+		disableUDP:          option.DisableUDP,
+		testURL:             option.URL,
+		expectedStatus:      option.ExpectedStatus,
+		rules:               rules,
+		switchMargin:        int64(switchMargin*1_000_000 + 0.5),
+		targetCooldown:      targetCooldown,
+		stateTTL:            stateTTL,
+		maxStates:           maxStates,
+		clock:               clock,
+		media:               defaultVaneMediaConfig(),
+		racing:              vaneRacingConfig{mode: vaneRacingOn},
+		racingRuntime:       newVaneRacingRuntime(),
+		explorationSince:    clock.Now().UTC(),
+		diagnostics:         newVaneDiagnostics(option.Name, clock),
+		anchors:             make(map[vaneAnchorKey]vaneAnchor),
+		stickiness:          make(map[vaneTargetKey]vaneStickyChoice),
+		cooldowns:           make(map[vaneCooldownKey]time.Time),
+		mediaHints:          make(map[vaneMediaTargetKey]vaneMediaHint),
+		mediaReconnects:     make(map[vaneMediaNodeKey]time.Time),
 		mediaTargetSwitches: make(map[vaneMediaTargetKey]vaneTargetSwitchBudget),
-		mediaSlowCooldowns: make(map[vaneMediaCandidateKey]time.Time),
-		mediaBudgets:       make(map[vaneMediaNodeKey]vaneMediaBudget),
-		targetHandoffs:     make(map[vaneTargetKey]vaneHandoffLease),
-		targetPreferences:  make(map[vaneTargetKey]vaneTargetPreference),
-		targetEvidence:     make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
-		targetFailures:     make(map[vaneTargetFailureKey]vaneTargetFailureState),
-		pickProbeInflight:  make(map[string]bool),
-		lastPickProbeAt:    make(map[string]time.Time),
-		mediaValveLastRun:  make(map[vaneTargetKey]time.Time),
-		nodes:              make(map[string]*vaneNodeState),
-		nodeControls:       make(map[string]*vaneNodeControlState),
-		nodeIdentities:     make(map[string]string),
-		churn:              make(map[vaneChurnKey]*vaneChurnState),
-		mediaActiveFlows:   make(map[string]int),
-		mediaFlowSet:       make(map[*vaneMediaFlow]struct{}),
+		mediaSlowCooldowns:  make(map[vaneMediaCandidateKey]time.Time),
+		mediaBudgets:        make(map[vaneMediaNodeKey]vaneMediaBudget),
+		targetHandoffs:      make(map[vaneTargetKey]vaneHandoffLease),
+		targetPreferences:   make(map[vaneTargetKey]vaneTargetPreference),
+		targetEvidence:      make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
+		targetFailures:      make(map[vaneTargetFailureKey]vaneTargetFailureState),
+		pickProbeInflight:   make(map[string]bool),
+		lastPickProbeAt:     make(map[string]time.Time),
+		mediaValveLastRun:   make(map[vaneTargetKey]time.Time),
+		nodes:               make(map[string]*vaneNodeState),
+		nodeControls:        make(map[string]*vaneNodeControlState),
+		nodeIdentities:      make(map[string]string),
+		churn:               make(map[vaneChurnKey]*vaneChurnState),
+		mediaActiveFlows:    make(map[string]int),
+		mediaFlowSet:        make(map[*vaneMediaFlow]struct{}),
 	}
 	group.gray = newVaneGrayObserver(false, clock, group.diagnostics)
 	learning := newVaneLearningState(option.Name, clock, nil, stateTTL, maxStates)
