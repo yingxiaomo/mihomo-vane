@@ -82,9 +82,7 @@ func TestVaneJitterTracker(t *testing.T) {
 
 func TestVaneJitterScoring(t *testing.T) {
 	t.Run("JITTER-05 ten weights sum to one", func(t *testing.T) {
-		for _, scene := range []vaneScene{vaneSceneDefault, vaneSceneInteractive, vaneSceneMedia, vaneSceneBulk} {
-			require.InDelta(t, 1, vaneSceneScoringSum(vaneScoring(scene)), 1e-12, scene.String())
-		}
+		require.InDelta(t, 1, vaneScoringConfigSum(vaneScoringFlat()), 1e-12)
 	})
 
 	t.Run("JITTER-06 logarithmic cost anchors", func(t *testing.T) {
@@ -104,14 +102,14 @@ func TestVaneJitterScoring(t *testing.T) {
 		low, high := base, base
 		low.jitter = vaneMetricEstimate{value: 3, confidence: 1, valid: true}
 		high.jitter = vaneMetricEstimate{value: 30, confidence: 1, valid: true}
-		require.Less(t, scoreVaneMetrics(vaneSceneMedia, low), scoreVaneMetrics(vaneSceneMedia, high))
+		require.Less(t, scoreVaneMetricsFlat(low), scoreVaneMetricsFlat(high))
 	})
 
 	t.Run("JITTER-08 equal mean stable connection ranks ahead", func(t *testing.T) {
 		stable := vaneMetricsSnapshot{connect: vaneMetricEstimate{value: math.Log(20), confidence: 1, valid: true}, jitter: vaneMetricEstimate{value: 2, confidence: 1, valid: true}}
 		spiky := stable
 		spiky.jitter.value = 30
-		ranked := rankVaneCandidates(vaneSceneInteractive, map[string]vaneMetricsSnapshot{"z-stable": stable, "a-spiky": spiky})
+		ranked := rankVaneCandidates(map[string]vaneMetricsSnapshot{"z-stable": stable, "a-spiky": spiky})
 		require.Equal(t, []string{"z-stable", "a-spiky"}, candidateNames(ranked), "jitter must beat the lexical tie-break")
 	})
 }

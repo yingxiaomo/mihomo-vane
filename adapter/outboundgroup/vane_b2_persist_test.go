@@ -37,13 +37,13 @@ func TestVaneB2TargetPersistenceRoundTrip(t *testing.T) {
 	restored := newVaneLearningState("vane-test", newVaneConnTestClock(), nil, time.Hour, 64)
 	require.NoError(t, restored.restore(payload))
 
-	seed, ok := restored.seedB2Target(vaneTransportTCP, vaneSceneMedia, "rr.googlevideo.com", 443, "beta", "test:beta")
+	seed, ok := restored.seedB2Target(vaneTransportTCP, "rr.googlevideo.com", 443, "beta", "test:beta")
 	require.True(t, ok, "the newest entry must survive the round trip")
 	require.Equal(t, seedA, seed)
 
 	// The restore re-keys by (target, candidate, identity): both entries are
 	// reachable, and the lookup never depends on the epoch.
-	_, ok = restored.seedB2Target(vaneTransportTCP, vaneSceneMedia, "cdn.googlevideo.com", 443, "beta", "test:beta")
+	_, ok = restored.seedB2Target(vaneTransportTCP, "cdn.googlevideo.com", 443, "beta", "test:beta")
 	require.True(t, ok)
 	require.Len(t, restored.targets, 2)
 }
@@ -72,7 +72,7 @@ func TestVaneB2TargetPersistenceValidation(t *testing.T) {
 	restored := newVaneLearningState("vane-test", newVaneConnTestClock(), nil, time.Hour, 64)
 	restoreErr := restored.restore(payload)
 	require.Error(t, restoreErr, "invalid entries are counted in the diagnostics error")
-	seed, ok := restored.seedB2Target(vaneTransportTCP, vaneSceneMedia, "rr.googlevideo.com", 443, "beta", "test:beta")
+	seed, ok := restored.seedB2Target(vaneTransportTCP, "rr.googlevideo.com", 443, "beta", "test:beta")
 	require.True(t, ok, "the good entry must survive the bad ones")
 	require.Equal(t, good, seed)
 	require.Len(t, restored.targets, 1, "all six malformed entries must drop")
@@ -108,7 +108,7 @@ func TestVaneB2TargetSeedAndPush(t *testing.T) {
 	// Simulate a restored learning mirror for the same pair. The scope is the
 	// flow's own bucket key (googlevideo.com), not the request host.
 	group.learning.targets[vaneLearningB2TargetKey(
-		flow.targetStateKey.transport, flow.targetStateKey.scene,
+		flow.targetStateKey.transport,
 		flow.targetStateKey.targetScope, flow.targetStateKey.port, flow.candidate, flow.identity,
 	)] = vaneB2SampleTarget(clock.Now(), 0.07, 8, 30, 5)
 
@@ -129,7 +129,7 @@ func TestVaneB2TargetSeedAndPush(t *testing.T) {
 
 	// The push mirrored the updated state back to learning.
 	pushed, ok := group.learning.seedB2Target(
-		flow.targetStateKey.transport, flow.targetStateKey.scene,
+		flow.targetStateKey.transport,
 		flow.targetStateKey.targetScope, flow.targetStateKey.port, flow.candidate, flow.identity)
 	require.True(t, ok)
 	require.Equal(t, int64(31), pushed.AttemptCount)
@@ -137,7 +137,7 @@ func TestVaneB2TargetSeedAndPush(t *testing.T) {
 
 	// A live record with B2 data is never overwritten by the mirror.
 	group.learning.targets[vaneLearningB2TargetKey(
-		flow.targetStateKey.transport, flow.targetStateKey.scene,
+		flow.targetStateKey.transport,
 		flow.targetStateKey.targetScope, flow.targetStateKey.port, flow.candidate, flow.identity,
 	)] = vaneB2SampleTarget(clock.Now(), 0.9, 100, 500, 400)
 	group.recordB2MediaLoss(flow, vaneConnectionCloseObservation{

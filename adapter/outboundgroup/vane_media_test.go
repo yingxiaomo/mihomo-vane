@@ -22,7 +22,7 @@ import (
 
 func configureVaneMediaForTest(t *testing.T, group *Vane, rules ...string) {
 	t.Helper()
-	parsed, err := parseVaneSceneRules(rules)
+	parsed, err := parseVaneFamilyRules(rules)
 	require.NoError(t, err)
 	group.rules = parsed
 	group.media = defaultVaneMediaConfig()
@@ -87,7 +87,7 @@ func TestVaneMediaReconnectClosesOnceAndHandsOffTarget(t *testing.T) {
 
 	conn, err := group.DialContext(t.Context(), metadata)
 	require.NoError(t, err)
-	anchorKey := vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneMedia}
+	anchorKey := vaneAnchorKey{transport: vaneTransportTCP}
 	group.mu.Lock()
 	selected := group.anchors[anchorKey].name
 	group.mu.Unlock()
@@ -736,7 +736,7 @@ func TestVaneMediaFixedPolicyBoundaries(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
 	defer group.Close()
-	rules, err := parseVaneSceneRules([]string{"DOMAIN-SUFFIX,googlevideo.com,media"})
+	rules, err := parseVaneFamilyRules([]string{"DOMAIN-SUFFIX,googlevideo.com,media"})
 	require.NoError(t, err)
 	group.rules = rules
 	group.media, err = newVaneMediaConfig(VaneOption{MediaReconnect: true, MediaDemandBPS: 5_000_000})
@@ -1052,7 +1052,7 @@ func TestVanePruneDropsExpiredTargetScopedState(t *testing.T) {
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	now := clock.Now()
 	key := vaneMediaTargetKey{target: "rr-prune.example", port: 443}
-	stickyKey := vaneStickyKeyFor("rr-prune.example", 443, vaneSceneDefault)
+	stickyKey := vaneStickyKeyFor("rr-prune.example", 443)
 	group.mu.Lock()
 	group.mediaTargetSwitches[key] = vaneTargetSwitchBudget{windowFrom: now.Add(-2 * vaneTargetSwitchBudgetWindow), lastSwitch: now.Add(-time.Hour), count: 3}
 	group.stickiness[stickyKey] = vaneStickyChoice{name: "alpha", expiresAt: now.Add(-time.Second)}

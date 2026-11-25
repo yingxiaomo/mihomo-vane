@@ -135,8 +135,8 @@ type vanePersistedB2Target struct {
 // vaneLearningB2TargetLimit mirrors the target-state cap.
 const vaneLearningB2TargetLimit = 1024
 
-func vaneLearningB2TargetKey(transport vaneTransport, scene vaneScene, targetScope string, port uint16, candidate, identity string) string {
-	key := vaneTargetKey{transport: transport, scene: scene, targetScope: targetScope, port: port}
+func vaneLearningB2TargetKey(transport vaneTransport, targetScope string, port uint16, candidate, identity string) string {
+	key := vaneTargetKey{transport: transport, targetScope: targetScope, port: port}
 	return key.String() + "\x00" + candidate + "\x00" + identity
 }
 
@@ -489,12 +489,11 @@ func (s *vaneLearningState) restore(payload []byte) error {
 			continue
 		}
 		transport, transportOK := parseVaneTransport(target.Transport)
-		scene, sceneOK := parseVaneScene(target.Scene)
-		if !transportOK || !sceneOK {
+		if !transportOK {
 			invalidTargets++
 			continue
 		}
-		key := vaneLearningB2TargetKey(transport, scene, target.TargetScope, target.Port, target.Candidate, target.Identity)
+		key := vaneLearningB2TargetKey(transport, target.TargetScope, target.Port, target.Candidate, target.Identity)
 		if previous, exists := s.targets[key]; exists && !target.LastObservedAt.After(previous.LastObservedAt) {
 			continue
 		}
@@ -690,13 +689,12 @@ func (s *vaneLearningState) pushB2Target(target vanePersistedB2Target, now time.
 		return
 	}
 	transport, transportOK := parseVaneTransport(target.Transport)
-	scene, sceneOK := parseVaneScene(target.Scene)
-	if !transportOK || !sceneOK {
+	if !transportOK {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.targets[vaneLearningB2TargetKey(transport, scene, target.TargetScope, target.Port, target.Candidate, target.Identity)] = target
+	s.targets[vaneLearningB2TargetKey(transport, target.TargetScope, target.Port, target.Candidate, target.Identity)] = target
 	for len(s.targets) > vaneLearningB2TargetLimit {
 		oldestKey, oldestAt := "", time.Time{}
 		for key, candidate := range s.targets {
@@ -713,13 +711,13 @@ func (s *vaneLearningState) pushB2Target(target vanePersistedB2Target, now time.
 // seedB2Target returns the persisted telemetry for one pair so a live record
 // without B2 data can start from the restored values instead of zero
 // (round6 item 3). Called with a.mu held; takes only learning.mu.
-func (s *vaneLearningState) seedB2Target(transport vaneTransport, scene vaneScene, targetScope string, port uint16, candidate, identity string) (vanePersistedB2Target, bool) {
+func (s *vaneLearningState) seedB2Target(transport vaneTransport, targetScope string, port uint16, candidate, identity string) (vanePersistedB2Target, bool) {
 	if s == nil || targetScope == "" || candidate == "" || identity == "" {
 		return vanePersistedB2Target{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	target, ok := s.targets[vaneLearningB2TargetKey(transport, scene, targetScope, port, candidate, identity)]
+	target, ok := s.targets[vaneLearningB2TargetKey(transport, targetScope, port, candidate, identity)]
 	return target, ok
 }
 

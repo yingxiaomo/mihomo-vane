@@ -79,7 +79,7 @@ func TestVaneLatencyMissingIsNeutral(t *testing.T) {
 	}
 	without := vaneMetricsSnapshot{}
 	// A healthy 40ms node must score strictly lower cost than an unknown node.
-	require.Less(t, scoreVaneMetrics(vaneSceneMedia, withLatency), scoreVaneMetrics(vaneSceneMedia, without))
+	require.Less(t, scoreVaneMetricsFlat(withLatency), scoreVaneMetricsFlat(without))
 }
 
 // LATENCY-04: latency actually moves the score, in the log-ms cost curve.
@@ -89,11 +89,11 @@ func TestVaneLatencyEntersScoring(t *testing.T) {
 			latency: vaneMetricEstimate{value: math.Log(ms), confidence: 1, valid: true},
 		}
 	}
-	fast, slow, awful := scoreVaneMetrics(vaneSceneMedia, snapshot(40)), scoreVaneMetrics(vaneSceneMedia, snapshot(300)), scoreVaneMetrics(vaneSceneMedia, snapshot(800))
+	fast, slow, awful := scoreVaneMetricsFlat(snapshot(40)), scoreVaneMetricsFlat(snapshot(300)), scoreVaneMetricsFlat(snapshot(800))
 	require.Less(t, fast, slow)
 	require.Less(t, slow, awful)
-	// Weight is 0.20; a 40ms -> 800ms swing must move the cost by the full step.
-	require.InDelta(t, 200_000, float64(awful-fast), 5_000)
+	// Weight is 0.18; a 40ms -> 800ms swing must move the cost by the full step.
+	require.InDelta(t, 180_000, float64(awful-fast), 5_000)
 }
 
 // LATENCY-05: a stale reading is dropped instead of being trusted forever.

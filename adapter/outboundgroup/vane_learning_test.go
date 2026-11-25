@@ -298,7 +298,7 @@ func TestVaneLearningProductionConstructorReloadAndFreshProcessRestore(t *testin
 	first.observeConnect("alpha", vaneTransportTCP, first.clock.Now(), 25*time.Millisecond)
 	first.observeResponse("alpha", vaneTransportTCP, first.clock.Now(), 50*time.Millisecond)
 	first.mu.Lock()
-	first.anchors[vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}] = vaneAnchor{name: "alpha"}
+	first.anchors[vaneAnchorKey{transport: vaneTransportTCP}] = vaneAnchor{name: "alpha"}
 	first.cooldowns[vaneCooldownKey{transport: vaneTransportTCP, candidate: "alpha"}] = first.clock.Now().Add(time.Hour)
 	first.mu.Unlock()
 	first.mu.Lock()
@@ -453,7 +453,7 @@ func TestVaneLearningRestartRestoresOnlyMetricEvidenceAndChangesRanking(t *testi
 		first.observeConnect("beta", vaneTransportUDP, clock.Now(), 10*time.Millisecond)
 	}
 	first.mu.Lock()
-	first.anchors[vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}] = vaneAnchor{name: "alpha", scoreMicros: 1}
+	first.anchors[vaneAnchorKey{transport: vaneTransportTCP}] = vaneAnchor{name: "alpha", scoreMicros: 1}
 	first.cooldowns[vaneCooldownKey{transport: vaneTransportTCP, target: "example.com", port: 443, candidate: "beta"}] = clock.Now().Add(time.Hour)
 	first.mu.Unlock()
 	first.mu.Lock()

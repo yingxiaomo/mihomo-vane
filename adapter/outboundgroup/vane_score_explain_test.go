@@ -25,15 +25,15 @@ func TestVaneScorePartsExplain(t *testing.T) {
 		maxRate:    vaneMetricEstimate{value: 20_000_000, confidence: 1, valid: true},
 		duration:   vaneMetricEstimate{value: 60, confidence: 1, valid: true},
 	}
-	for _, scene := range []vaneScene{vaneSceneDefault, vaneSceneInteractive, vaneSceneMedia, vaneSceneBulk} {
-		parts := scoreVaneMetricsParts(scene, snapshot)
-		require.Equal(t, scoreVaneMetrics(scene, snapshot), parts.total, scene.String())
+	{
+		parts := scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot)
+		require.Equal(t, scoreVaneMetricsFlat(snapshot), parts.total)
 		sum := parts.throughput + parts.latency + parts.loss + parts.failure +
 			parts.response + parts.jitter + parts.connect + parts.success +
 			parts.maxRate + parts.duration + parts.downloadTotal
-		require.InDelta(t, float64(parts.total)/1_000_000, sum, 1e-6, scene.String())
+		require.InDelta(t, float64(parts.total)/1_000_000, sum, 1e-6)
 	}
-	line := scoreVaneMetricsParts(vaneSceneMedia, snapshot).explain()
+	line := scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot).explain()
 	for _, key := range []string{"tp=", "rtt=", "loss=", "fail=", "resp=", "jit=", "conn=", "succ=", "peak=", "dur=", "vol="} {
 		require.Contains(t, line, key)
 	}
@@ -95,12 +95,11 @@ func TestVanePickScoredSnapshotRecord(t *testing.T) {
 		throughput: vaneMetricEstimate{value: 12_000_000, confidence: 1, valid: true},
 	}
 
-	group.recordPickScoredSnapshot("media-hint", vaneSceneMedia, vaneTransportTCP, "rr1---sn-x.googlevideo.com", 443, "alpha", snapshot)
+	group.recordPickScoredSnapshot("media-hint", vaneTransportTCP, "rr1---sn-x.googlevideo.com", 443, "alpha", snapshot)
 	require.Len(t, got, 1)
 	require.Equal(t, "pick-scored", got[0].kind)
 	require.Equal(t, "media-hint", got[0].reason)
 	require.Equal(t, "alpha", got[0].to)
-	require.Equal(t, "media", got[0].scene)
 	require.Greater(t, got[0].scoreMicros, int64(0))
 	require.Contains(t, got[0].scoreParts, "tp=")
 }

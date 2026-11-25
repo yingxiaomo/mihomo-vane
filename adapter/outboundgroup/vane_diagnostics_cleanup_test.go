@@ -46,8 +46,8 @@ func TestVaneRecordStillReachesSink(t *testing.T) {
 func TestVaneExplorationIDsStayMonotonic(t *testing.T) {
 	clock := newVaneConnTestClock()
 	diagnostics := newVaneDiagnostics("vane-exploration", clock)
-	first := diagnostics.recordExplorationSelection(vaneExplorationSelection{transport: vaneTransportTCP, scene: vaneSceneMedia})
-	second := diagnostics.recordExplorationSelection(vaneExplorationSelection{transport: vaneTransportTCP, scene: vaneSceneMedia})
+	first := diagnostics.recordExplorationSelection(vaneExplorationSelection{transport: vaneTransportTCP})
+	second := diagnostics.recordExplorationSelection(vaneExplorationSelection{transport: vaneTransportTCP})
 	require.NotNil(t, first)
 	require.NotNil(t, second)
 	require.Equal(t, uint64(1), first.id)

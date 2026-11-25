@@ -217,7 +217,6 @@ func TestNewVaneOptions(t *testing.T) {
 		{"exploration interval one", VaneOption{Exploration: true, ExplorationInterval: 1}},
 		{"negative exploration interval", VaneOption{Exploration: true, ExplorationInterval: -1}},
 		{"exploration interval too large", VaneOption{Exploration: true, ExplorationInterval: vaneMaximumExplorationInterval + 1}},
-		{"invalid scene rule", VaneOption{SceneRules: []string{"NETWORK,icmp,media"}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -367,7 +366,7 @@ func TestParseVaneProxyGroup(t *testing.T) {
 		require.Equal(t, C.DefaultTestURL, group.testURL)
 		require.Equal(t, "fallback", group.EmptyFallback().Name())
 		require.Equal(t, []string{"beta", "alpha"}, proxyNames(group.Proxies()))
-		require.Equal(t, vaneSceneMedia, classifyVaneScene(&C.Metadata{Host: "cdn.video.example"}, group.rules))
+		require.True(t, vaneFamilyMatches(&C.Metadata{Host: "cdn.video.example"}, group.rules))
 		require.Equal(t, int64(200_000), group.switchMargin)
 		require.Equal(t, 9*time.Second, group.targetCooldown)
 		require.Equal(t, time.Minute, group.stateTTL)
@@ -471,7 +470,6 @@ func TestParseVaneProxyGroup(t *testing.T) {
 		{"negative state ttl", "state-ttl", -1},
 		{"state ttl too large", "state-ttl", vaneMaximumConfigSeconds + 1},
 		{"negative max states", "max-states", -1},
-		{"invalid scene rule", "scene-rules", []string{"DOMAIN,example.com,invalid"}},
 	}
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
@@ -552,7 +550,7 @@ func TestVaneTargetCooldownScopeAndAllCooledFallback(t *testing.T) {
 	// target only.
 	group.mu.Lock()
 	for _, m := range []*C.Metadata{target, otherHost, otherPort} {
-		group.stickiness[vaneStickyKeyFor(m.Host, m.DstPort, vaneSceneDefault)] = vaneStickyChoice{
+		group.stickiness[vaneStickyKeyFor(m.Host, m.DstPort)] = vaneStickyChoice{
 			name:      "alpha",
 			expiresAt: clock.Now().Add(time.Minute),
 		}
@@ -612,7 +610,7 @@ func TestVaneTargetFailureDoesNotReplaceOtherTargetAnchor(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	anchorKey := vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}
+	anchorKey := vaneAnchorKey{transport: vaneTransportTCP}
 	group.anchors[anchorKey] = vaneAnchor{name: alpha.Name()}
 	failedTarget := &C.Metadata{Host: "failed.example", DstPort: 443, NetWork: C.TCP}
 	otherTarget := &C.Metadata{Host: "other.example", DstPort: 443, NetWork: C.TCP}
@@ -851,7 +849,7 @@ func TestVaneProviderRemovalInvalidatesAnchor(t *testing.T) {
 	group, provider := newVaneGroupForTest(clock, 10, time.Hour, beta, alpha)
 
 	require.Equal(t, "alpha", group.pick(nil, vaneTransportTCP, false, true).Name())
-	key := vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}
+	key := vaneAnchorKey{transport: vaneTransportTCP}
 	require.Equal(t, "alpha", group.anchors[key].name)
 
 	provider.setProxies(beta)
@@ -866,7 +864,7 @@ func TestVaneReadOnlyViewsDoNotMutatePolicyState(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, beta, alpha)
 	setVaneFailureForTest(group, "alpha", vaneTransportTCP, now, 0.25)
-	key := vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}
+	key := vaneAnchorKey{transport: vaneTransportTCP}
 	group.anchors[key] = vaneAnchor{name: "alpha", scoreMicros: 123}
 	cooldownKey := vaneCooldownKey{transport: vaneTransportTCP, target: "future.example", port: 443, candidate: "beta"}
 	group.cooldowns[cooldownKey] = now.Add(time.Hour)
@@ -1021,17 +1019,17 @@ func TestVaneStickyDoesNotRenewOnHit(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
 	now := clock.Now()
-	k := vaneStickyKeyFor("sticky-renew.example.com", 443, vaneSceneDefault)
+	k := vaneStickyKeyFor("sticky-renew.example.com", 443)
 
 	group.mu.Lock()
-	group.rememberStickyLocked("sticky-renew.example.com", 443, vaneSceneDefault, "alpha", now)
+	group.rememberStickyLocked("sticky-renew.example.com", 443, "alpha", now)
 	first := group.stickiness[k].expiresAt
 	group.mu.Unlock()
 	require.Equal(t, now.Add(vaneStickyTTL), first)
 
 	clock.Advance(20 * time.Second)
 	group.mu.Lock()
-	group.rememberStickyLocked("sticky-renew.example.com", 443, vaneSceneDefault, "alpha", clock.Now())
+	group.rememberStickyLocked("sticky-renew.example.com", 443, "alpha", clock.Now())
 	second := group.stickiness[k].expiresAt
 	group.mu.Unlock()
 	require.Equal(t, first, second, "a sticky hit must not push the expiry out")

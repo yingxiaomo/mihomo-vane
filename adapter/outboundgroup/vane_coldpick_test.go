@@ -423,7 +423,7 @@ func TestVaneColdPickProbeWinRespectsAnchorGuard(t *testing.T) {
 	// — anchorCoolingAnywhere is true, so a probe win here must not move the
 	// scene-global anchor (the same one-off-bypass rule the normal path
 	// enforces). The anchor is seeded; a fresh group has none yet.
-	anchorKey := vaneAnchorKey{scene: vaneSceneMedia, transport: vaneTransportTCP}
+	anchorKey := vaneAnchorKey{transport: vaneTransportTCP}
 	group.mu.Lock()
 	anchorName := alpha.Name()
 	group.anchors[anchorKey] = vaneAnchor{name: anchorName, scoreMicros: 0}

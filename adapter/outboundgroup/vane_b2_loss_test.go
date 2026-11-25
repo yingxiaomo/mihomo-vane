@@ -131,7 +131,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 		base := flow.targetStateKey
 		member := b2Key(flow).member
 		for index := 0; index < vaneTargetStateLimit+1; index++ {
-			key := vaneTargetKey{transport: base.transport, scene: base.scene, targetScope: fmt.Sprintf("rr%04d.example.com", index), port: 443}
+			key := vaneTargetKey{transport: base.transport, targetScope: fmt.Sprintf("rr%04d.example.com", index), port: 443}
 			group.targetFailures[vaneTargetFailureKey{target: key, member: member}] = vaneTargetFailureState{streak: 1, lastFailureAt: old, blockUntil: old}
 		}
 		group.pruneTargetStateLocked(now)

@@ -349,7 +349,7 @@ func TestVaneTriggerLineIgnoresDemand(t *testing.T) {
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		parsed, err := parseVaneSceneRules([]string{"DOMAIN-SUFFIX,googlevideo.com,media"})
+		parsed, err := parseVaneFamilyRules([]string{"DOMAIN-SUFFIX,googlevideo.com,media"})
 		require.NoError(t, err)
 		group.rules = parsed
 		option := VaneOption{

@@ -295,7 +295,7 @@ func TestVaneTargetFailureRejectsReplacementAndBoundsState(t *testing.T) {
 	group.mu.Lock()
 	newLease := group.memberLeaseLocked(newBeta.Name(), newBeta.identity)
 	for index := 0; index < vaneTargetStateLimit+10; index++ {
-		target := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("bucket-%04d", index), port: 443}
+		target := vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("bucket-%04d", index), port: 443}
 		group.targetPreferences[target] = vaneTargetPreference{to: newLease, expiresAt: clock.Now().Add(time.Hour), updatedAt: clock.Now().Add(time.Duration(index) * time.Millisecond)}
 	}
 	group.pruneTargetStateLocked(clock.Now())
@@ -474,9 +474,9 @@ func TestVaneTargetPruneLRUAndEvidenceBranches(t *testing.T) {
 	// 灌满 evidence / failures 超 1024 上限（全部新鲜，只触发 LRU 不触发过期）
 	for i := 0; i < vaneTargetStateLimit+5; i++ {
 		member := vaneMemberLease{name: fmt.Sprintf("e%d", i), identity: fmt.Sprintf("ei%d", i), epoch: uint64(i)}
-		eKey := vaneTargetEvidenceKey{target: vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("s%d.example", i), port: 443}, member: member}
+		eKey := vaneTargetEvidenceKey{target: vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("s%d.example", i), port: 443}, member: member}
 		group.targetEvidence[eKey] = vaneTargetEvidence{observedAt: now.Add(-time.Duration(i) * time.Millisecond)}
-		fKey := vaneTargetFailureKey{target: vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("f%d.example", i), port: 443}, member: member}
+		fKey := vaneTargetFailureKey{target: vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("f%d.example", i), port: 443}, member: member}
 		group.targetFailures[fKey] = vaneTargetFailureState{lastFailureAt: now.Add(-time.Duration(i) * time.Millisecond), streak: 1}
 	}
 	group.pruneTargetStateLocked(now)
@@ -491,9 +491,9 @@ func TestVaneTargetPruneLRUAndEvidenceBranches(t *testing.T) {
 	// 身份失配清理分支：旧 epoch 的 evidence/failures 被清
 	group.mu.Lock()
 	oldMember := vaneMemberLease{name: "beta", identity: vaneProxyPersistentIdentity(beta), epoch: decision.nodeEpoch + 77}
-	oldEKey := vaneTargetEvidenceKey{target: vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: "old.example", port: 443}, member: oldMember}
+	oldEKey := vaneTargetEvidenceKey{target: vaneTargetKey{transport: vaneTransportTCP, targetScope: "old.example", port: 443}, member: oldMember}
 	group.targetEvidence[oldEKey] = vaneTargetEvidence{observedAt: now}
-	oldFKey := vaneTargetFailureKey{target: vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: "oldf.example", port: 443}, member: oldMember}
+	oldFKey := vaneTargetFailureKey{target: vaneTargetKey{transport: vaneTransportTCP, targetScope: "oldf.example", port: 443}, member: oldMember}
 	group.targetFailures[oldFKey] = vaneTargetFailureState{lastFailureAt: now, streak: 2}
 	group.pruneTargetStateLocked(now)
 	_, oldEvidence := group.targetEvidence[oldEKey]
@@ -524,7 +524,7 @@ func TestVaneTargetPruneEqualTimestampsIsDeterministic(t *testing.T) {
 			group.targetEvidence = make(map[vaneTargetEvidenceKey]vaneTargetEvidence)
 			group.targetFailures = make(map[vaneTargetFailureKey]vaneTargetFailureState)
 			for index := 0; index < vaneTargetStateLimit+8; index++ {
-				key := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("rr%04d.googlevideo.com", index), port: 443}
+				key := vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("rr%04d.googlevideo.com", index), port: 443}
 				group.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}] = vaneTargetEvidence{bitsPerSecond: float64(index), observedAt: now}
 				group.targetFailures[vaneTargetFailureKey{target: key, member: member}] = vaneTargetFailureState{streak: 1, lastFailureAt: now}
 			}
@@ -566,7 +566,7 @@ func TestVaneTargetPruneEqualTimestampsIsDeterministic(t *testing.T) {
 		for run := 0; run < 50; run++ {
 			values := make(map[vaneTargetKey]int, vaneTargetStateLimit+8)
 			for index := 0; index < vaneTargetStateLimit+8; index++ {
-				key := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("rr%04d.googlevideo.com", index), port: 443}
+				key := vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("rr%04d.googlevideo.com", index), port: 443}
 				values[key] = index
 			}
 			trimTargetMap(values, vaneTargetStateLimit, func(int) time.Time { return now })

@@ -19,111 +19,18 @@ type vaneFakeClock struct {
 	now time.Time
 }
 
+// vaneFamilyMatches reports whether any family rule claims the metadata.
+func vaneFamilyMatches(metadata *C.Metadata, rules []vaneFamilyRule) bool {
+	_, ok := matchVaneFamilyRule(metadata, rules)
+	return ok
+}
+
 func (c *vaneFakeClock) Now() time.Time { return c.now }
 
 func (c *vaneFakeClock) Add(elapsed time.Duration) { c.now = c.now.Add(elapsed) }
 
-func TestVaneMetricsClassification(t *testing.T) {
-	t.Run("CLS-01 parses every supported matcher and all four scenes", func(t *testing.T) {
-		tests := []struct {
-			name     string
-			raw      string
-			metadata *C.Metadata
-			scene    vaneScene
-		}{
-			{"domain", "DOMAIN,api.example.com,interactive", &C.Metadata{Host: "API.Example.Com"}, vaneSceneInteractive},
-			{"domain root dot", "DOMAIN,api.example.com.,interactive", &C.Metadata{Host: "API.Example.Com."}, vaneSceneInteractive},
-			{"sniff domain", "DOMAIN,sniff.example,media", &C.Metadata{Host: "other.example", SniffHost: "sniff.example"}, vaneSceneMedia},
-			{"domain suffix", "DOMAIN-SUFFIX,example.com,media", &C.Metadata{Host: "video.cdn.EXAMPLE.com"}, vaneSceneMedia},
-			{"domain suffix root dot", "DOMAIN-SUFFIX,example.com.,media", &C.Metadata{Host: "video.cdn.EXAMPLE.com."}, vaneSceneMedia},
-			{"network", "NETWORK,udp,bulk", &C.Metadata{NetWork: C.UDP}, vaneSceneBulk},
-			{"destination port", "DST-PORT,80/443/8000-9000,interactive", &C.Metadata{DstPort: 8443}, vaneSceneInteractive},
-			{"inbound name", "IN-NAME,lan/mixed,default", &C.Metadata{InName: "mixed"}, vaneSceneDefault},
-			{"inbound user", "IN-USER,alice/bob,media", &C.Metadata{InUser: "bob"}, vaneSceneMedia},
-			{"process", "PROCESS,Player.EXE,media", &C.Metadata{Process: "player.exe"}, vaneSceneMedia},
-			{"process path", `PROCESS-PATH,C:\Apps\Downloader.exe,bulk`, &C.Metadata{ProcessPath: `c:\apps\downloader.EXE`}, vaneSceneBulk},
-			{"dscp", "DSCP,8/40-46,interactive", &C.Metadata{DSCP: 46}, vaneSceneInteractive},
-		}
-
-		for _, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				rules, err := parseVaneSceneRules([]string{test.raw})
-				require.NoError(t, err)
-				require.Equal(t, test.scene, classifyVaneScene(test.metadata, rules))
-			})
-		}
-	})
-
-	t.Run("CLS-02 first matching rule wins", func(t *testing.T) {
-		rules, err := parseVaneSceneRules([]string{
-			"DOMAIN-SUFFIX,example.com,interactive",
-			"DOMAIN,video.example.com,media",
-			"NETWORK,tcp,bulk",
-		})
-		require.NoError(t, err)
-		metadata := &C.Metadata{Host: "video.example.com", NetWork: C.TCP}
-		require.Equal(t, vaneSceneInteractive, classifyVaneScene(metadata, rules))
-	})
-
-	t.Run("CLS-03 nil missing unmatched and invalid fall back", func(t *testing.T) {
-		require.Equal(t, vaneSceneDefault, classifyVaneScene(nil, nil))
-		require.Equal(t, vaneSceneDefault, classifyVaneScene(&C.Metadata{}, nil))
-		require.Equal(t, vaneSceneDefault, classifyVaneScene(&C.Metadata{Host: "other.example"}, []vaneSceneRule{{}}))
-		missingRules, err := parseVaneSceneRules([]string{
-			"DST-PORT,0,bulk",
-			"DSCP,0,media",
-		})
-		require.NoError(t, err)
-		require.Equal(t, vaneSceneDefault, classifyVaneScene(&C.Metadata{}, missingRules))
-
-		invalid := []string{
-			"DOMAIN,example.com,unknown",
-			"DOMAIN,..,media",
-			"DOMAIN,.example.com,media",
-			"DOMAIN,example..com,media",
-			"DOMAIN,example.com..,media",
-			"DOMAIN-SUFFIX,..,media",
-			"DOMAIN-SUFFIX,.example.com,media",
-			"DOMAIN-SUFFIX,example..com,media",
-			"DOMAIN-SUFFIX,example.com..,media",
-			"NETWORK,icmp,media",
-			"DST-PORT,70000,media",
-			"DSCP,64,media",
-			"PROCESS,,media",
-			"UNKNOWN,value,media",
-			"DOMAIN,missing-scene",
-		}
-		for _, raw := range invalid {
-			_, err := parseVaneSceneRules([]string{raw})
-			require.Error(t, err, raw)
-		}
-	})
-
-	t.Run("CLS-04 invalid domain labels never match domain rules", func(t *testing.T) {
-		rules, err := parseVaneSceneRules([]string{"DOMAIN-SUFFIX,example.com,media"})
-		require.NoError(t, err)
-		for _, host := range []string{
-			"rr..example.com",
-			".example.com",
-			"example.com..",
-			"192.0.2.1",
-			"2001:db8::1",
-		} {
-			require.Equal(t, vaneSceneDefault, classifyVaneScene(&C.Metadata{Host: host}, rules), host)
-		}
-	})
-}
-
 func TestVaneMetricsDecayAndValidity(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
-
-	t.Run("scene names are closed and stable", func(t *testing.T) {
-		require.Equal(t, "default", vaneSceneDefault.String())
-		require.Equal(t, "interactive", vaneSceneInteractive.String())
-		require.Equal(t, "media", vaneSceneMedia.String())
-		require.Equal(t, "bulk", vaneSceneBulk.String())
-		require.Equal(t, "default", vaneScene(255).String())
-	})
 
 	t.Run("MET-01 one half-life halves weight and sum", func(t *testing.T) {
 		var layer vaneDecayLayer
@@ -221,10 +128,10 @@ func TestVaneMetricsDecayAndValidity(t *testing.T) {
 
 func TestVaneMetricsMissingCosts(t *testing.T) {
 	t.Run("MISS-01 all missing is conservative rather than perfect", func(t *testing.T) {
-		score := scoreVaneMetrics(vaneSceneDefault, vaneMetricsSnapshot{})
+		score := scoreVaneMetricsFlat(vaneMetricsSnapshot{})
 		// Eleven dimensions: latency and the five profile dimensions sit at their
 		// 0.5 neutral, so the whole table still reads "unknown = mediocre".
-		require.Equal(t, int64(519_000), score)
+		require.Equal(t, int64(549_500), score)
 		require.Greater(t, score, int64(0))
 	})
 
@@ -232,46 +139,9 @@ func TestVaneMetricsMissingCosts(t *testing.T) {
 		snapshot := vaneMetricsSnapshot{
 			connect: vaneMetricEstimate{value: math.Log(1), confidence: 1, valid: true},
 		}
-		score := scoreVaneMetrics(vaneSceneDefault, snapshot)
-		require.Equal(t, int64(497_000), score)
+		score := scoreVaneMetricsFlat(snapshot)
+		require.Equal(t, int64(538_500), score)
 		require.Greater(t, score, int64(0))
-	})
-}
-
-func TestVaneMetricsSceneScores(t *testing.T) {
-	profile := func(connectMS, responseMS, throughputBPS float64) vaneMetricsSnapshot {
-		return vaneMetricsSnapshot{
-			failure:    vaneMetricEstimate{value: 0, confidence: 1, valid: true},
-			connect:    vaneMetricEstimate{value: math.Log(connectMS), confidence: 1, valid: true},
-			response:   vaneMetricEstimate{value: math.Log(responseMS), confidence: 1, valid: true},
-			throughput: vaneMetricEstimate{value: math.Log(throughputBPS), confidence: 1, valid: true},
-		}
-	}
-
-	// These exact same node profiles are ranked under every scene.
-	nodes := map[string]vaneMetricsSnapshot{
-		"interactive-node": profile(50, 100, 250_000),
-		"media-node":       profile(200, 300, 12_000_000),
-		"bulk-node":        profile(500, 1000, 80_000_000),
-	}
-
-	// SCORE-01: the guide's weight table puts throughput first and latency second
-	// in every scene, so a 12 Mbps node outranks a 250 kbps one even for
-	// interactive traffic. Connect+response still sum to 0.20 here, which keeps
-	// two equally fast nodes ordered by setup time; the ranking below documents
-	// that throughput now dominates.
-	t.Run("SCORE-01 interactive keeps throughput first", func(t *testing.T) {
-		ranked := rankVaneCandidates(vaneSceneInteractive, nodes)
-		require.Equal(t, "media-node", ranked[0].name)
-		require.Equal(t, "interactive-node", ranked[len(ranked)-1].name)
-	})
-	t.Run("SCORE-02 media rewards adequate throughput without bulk latency", func(t *testing.T) {
-		ranked := rankVaneCandidates(vaneSceneMedia, nodes)
-		require.Equal(t, "media-node", ranked[0].name)
-	})
-	t.Run("SCORE-03 bulk prioritizes sustained throughput", func(t *testing.T) {
-		ranked := rankVaneCandidates(vaneSceneBulk, nodes)
-		require.Equal(t, "bulk-node", ranked[0].name)
 	})
 }
 
@@ -291,7 +161,7 @@ func TestVaneMetricsDeterminism(t *testing.T) {
 				"node-a": profile,
 				"node-b": profile,
 			}
-			ranked := rankVaneCandidates(vaneSceneDefault, candidates)
+			ranked := rankVaneCandidates(candidates)
 			if i == 0 {
 				expected = ranked
 			} else {
@@ -308,13 +178,13 @@ func TestVaneMetricsDeterminism(t *testing.T) {
 				name := names[(i+offset)%len(names)]
 				candidates[name] = profile
 			}
-			ranked := rankVaneCandidates(vaneSceneDefault, candidates)
+			ranked := rankVaneCandidates(candidates)
 			require.Equal(t, []string{"node-a", "node-b", "node-c", "node-d"}, candidateNames(ranked))
 		}
 	})
 
 	t.Run("DEC-03 equal quantized scores use UTF-8 name order", func(t *testing.T) {
-		ranked := rankVaneCandidates(vaneSceneDefault, map[string]vaneMetricsSnapshot{
+		ranked := rankVaneCandidates(map[string]vaneMetricsSnapshot{
 			"节点":     profile,
 			"éclair": profile,
 			"alpha":  profile,
@@ -355,12 +225,12 @@ func TestVaneSceneRuleSet(t *testing.T) {
 		tunnel.UpdateRules(nil, nil, map[string]P.RuleProvider{"streaming": provider})
 		defer tunnel.UpdateRules(oldRules, nil, oldProviders)
 
-		require.Equal(t, vaneSceneMedia, classifyVaneScene(metadata, []vaneSceneRule{rule}),
+		require.True(t, vaneFamilyMatches(metadata, []vaneFamilyRule{rule}),
 			"a host inside the provider is classified")
-		require.Equal(t, vaneSceneDefault, classifyVaneScene(outside, []vaneSceneRule{rule}),
+		require.False(t, vaneFamilyMatches(outside, []vaneFamilyRule{rule}),
 			"a host outside the provider is not classified")
-		require.Equal(t, vaneSceneDefault, classifyVaneScene(metadata, []vaneSceneRule{
-			{kind: vaneRuleRuleSet, value: "missing", scene: vaneSceneMedia},
+		require.False(t, vaneFamilyMatches(metadata, []vaneFamilyRule{
+			{kind: vaneRuleRuleSet, value: "missing"},
 		}), "an unregistered provider never matches and never errors")
 	})
 
@@ -372,16 +242,16 @@ func TestVaneSceneRuleSet(t *testing.T) {
 		tunnel.UpdateRules(nil, nil, map[string]P.RuleProvider{"streaming": provider})
 		defer tunnel.UpdateRules(oldRules, nil, oldProviders)
 
-		domainFirst := []vaneSceneRule{
-			{kind: vaneRuleDomain, value: "media.streaming-provider.test", scene: vaneSceneInteractive},
+		domainFirst := []vaneFamilyRule{
+			{kind: vaneRuleDomain, value: "media.streaming-provider.test"},
 			rule,
 		}
-		require.Equal(t, vaneSceneInteractive, classifyVaneScene(metadata, domainFirst))
-		rulesetFirst := []vaneSceneRule{
+		require.True(t, vaneFamilyMatches(metadata, domainFirst))
+		rulesetFirst := []vaneFamilyRule{
 			rule,
-			{kind: vaneRuleDomain, value: "media.streaming-provider.test", scene: vaneSceneInteractive},
+			{kind: vaneRuleDomain, value: "media.streaming-provider.test"},
 		}
-		require.Equal(t, vaneSceneMedia, classifyVaneScene(metadata, rulesetFirst))
+		require.True(t, vaneFamilyMatches(metadata, rulesetFirst))
 	})
 }
 
@@ -402,9 +272,9 @@ func TestVaneSceneGeoSite(t *testing.T) {
 	require.Error(t, err, "the sandbox has no GeoSite database")
 	require.Nil(t, matcher)
 
-	require.Equal(t, vaneSceneDefault, classifyVaneScene(metadata, []vaneSceneRule{rule}),
+	require.False(t, vaneFamilyMatches(metadata, []vaneFamilyRule{rule}),
 		"fail-closed: no database means the rule never matches, quietly")
-	require.Equal(t, vaneSceneDefault, classifyVaneScene(&C.Metadata{}, []vaneSceneRule{rule}),
+	require.False(t, vaneFamilyMatches(&C.Metadata{}, []vaneFamilyRule{rule}),
 		"an empty host never matches")
 }
 
@@ -444,10 +314,10 @@ func (b *vaneMetricBank) snapshot() vaneMetricsSnapshot {
 }
 
 // TEST-WRAP-001: test-only, moved out of vane_metrics.go.
-func rankVaneCandidates(scene vaneScene, snapshots map[string]vaneMetricsSnapshot) []vaneCandidateScore {
+func rankVaneCandidates(snapshots map[string]vaneMetricsSnapshot) []vaneCandidateScore {
 	ranked := make([]vaneCandidateScore, 0, len(snapshots))
 	for name, snapshot := range snapshots {
-		ranked = append(ranked, vaneCandidateScore{name: name, scoreMicros: scoreVaneMetrics(scene, snapshot)})
+		ranked = append(ranked, vaneCandidateScore{name: name, scoreMicros: scoreVaneMetricsFlat(snapshot)})
 	}
 	sort.Slice(ranked, func(i, j int) bool {
 		return compareVaneCandidateScores(ranked[i], ranked[j]) < 0

@@ -45,7 +45,6 @@ type vaneExplorationScopeState struct {
 type vaneExplorationSelection struct {
 	proxy                  C.Proxy
 	transport              vaneTransport
-	scene                  vaneScene
 	target                 string
 	port                   uint16
 	fromAnchor             string
@@ -59,7 +58,6 @@ type vaneExplorationToken struct {
 	diagnostics            *vaneDiagnostics
 	id                     uint64
 	transport              vaneTransport
-	scene                  vaneScene
 	target                 string
 	port                   uint16
 	fromAnchor             string
@@ -78,7 +76,6 @@ func (t *vaneExplorationToken) settle(kind, reason string) {
 			reason:                 reason,
 			explorationID:          t.id,
 			transport:              t.transport.String(),
-			scene:                  t.scene.String(),
 			target:                 t.target,
 			port:                   t.port,
 			from:                   t.fromAnchor,
@@ -96,16 +93,16 @@ func (t vaneTransport) String() string {
 	return "tcp"
 }
 
-func vaneExplorationScopeIndex(transport vaneTransport, scene vaneScene) int {
-	return int(transport)*4 + int(scene)
+func vaneExplorationScopeIndex(transport vaneTransport) int {
+	return int(transport)
 }
 
-func vaneExplorationScopeValues(index int) (vaneTransport, vaneScene) {
-	return vaneTransport(index / 4), vaneScene(index % 4)
+func vaneExplorationScopeValues(index int) vaneTransport {
+	return vaneTransport(index)
 }
 
-func vaneEvidenceCoverageMicros(snapshot vaneMetricsSnapshot, transport vaneTransport, scene vaneScene) int64 {
-	weights := vaneScoring(scene)
+func vaneEvidenceCoverageMicros(snapshot vaneMetricsSnapshot, transport vaneTransport) int64 {
+	weights := vaneScoringFlat()
 	weighted := weights.failureWeight*vaneEstimateConfidence(snapshot.failure) +
 		weights.connectWeight*vaneEstimateConfidence(snapshot.connect) +
 		weights.jitterWeight*vaneEstimateConfidence(snapshot.jitter)
@@ -135,7 +132,6 @@ func vaneEstimateConfidence(estimate vaneMetricEstimate) float64 {
 func (a *Vane) maybeSelectExplorationLocked(
 	metadata *C.Metadata,
 	transport vaneTransport,
-	scene vaneScene,
 	now time.Time,
 	target string,
 	port uint16,
@@ -154,7 +150,7 @@ func (a *Vane) maybeSelectExplorationLocked(
 		return nil
 	}
 
-	scopeIndex := vaneExplorationScopeIndex(transport, scene)
+	scopeIndex := vaneExplorationScopeIndex(transport)
 	var selected *vaneRankedProxy
 	var selectedLastOrdinal uint64
 	for i := range ranked {
@@ -199,7 +195,6 @@ func (a *Vane) maybeSelectExplorationLocked(
 	return &vaneExplorationSelection{
 		proxy:                  selected.proxy,
 		transport:              transport,
-		scene:                  scene,
 		target:                 target,
 		port:                   port,
 		fromAnchor:             anchor.name,

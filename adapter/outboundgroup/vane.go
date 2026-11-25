@@ -262,7 +262,6 @@ func (s vaneNodeState) downloadTotalEstimate(now time.Time) vaneMetricEstimate {
 
 type vaneAnchorKey struct {
 	transport vaneTransport
-	scene     vaneScene
 }
 
 type vaneAnchor struct {
@@ -315,8 +314,8 @@ type Vane struct {
 	disableUDP         bool
 	testURL            string
 	expectedStatus     string
-	rules              []vaneSceneRule
-	hashRules          []vaneSceneRule
+	rules              []vaneFamilyRule
+	hashRules          []vaneFamilyRule
 	switchMargin       int64
 	targetCooldown     time.Duration
 	stateTTL           time.Duration
@@ -384,7 +383,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 		return nil, errors.New("empty fallback proxy not exist")
 	}
 
-	rules, err := parseVaneSceneRules(vaneOption.SceneRules)
+	rules, err := parseVaneFamilyRules(vaneOption.SceneRules)
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +452,7 @@ func newVaneWithClock(
 	option GroupCommonOption,
 	emptyFallback C.Proxy,
 	providers []P.ProxyProvider,
-	rules []vaneSceneRule,
+	rules []vaneFamilyRule,
 	switchMargin float64,
 	targetCooldown time.Duration,
 	stateTTL time.Duration,
@@ -1040,11 +1039,10 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		snapshot.Runtime.ExplorationSince = a.explorationSince
 		snapshot.Runtime.ExplorationScopes = make([]VaneDiagnosticExplorationScope, 0, vaneExplorationScopeCount)
 		for index, state := range a.explorationScopes {
-			transport, scene := vaneExplorationScopeValues(index)
+			transport := vaneExplorationScopeValues(index)
 			nextIn := a.exploration.interval - state.sinceLastExploration
 			snapshot.Runtime.ExplorationScopes = append(snapshot.Runtime.ExplorationScopes, VaneDiagnosticExplorationScope{
 				Transport:             transport.String(),
-				Scene:                 scene.String(),
 				EligibleSelections:    state.eligibleSelections,
 				ExplorationSelections: state.explorationSelections,
 				SinceLastExploration:  state.sinceLastExploration,
@@ -1136,7 +1134,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	}
 
 	now := a.clock.Now()
-	scene := classifyVaneScene(metadata, a.rules)
 	target, port := vaneTarget(metadata)
 
 	a.mu.Lock()
@@ -1194,7 +1191,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			},
 			parts:                  parts,
 			cooldownUntil:          until,
-			evidenceCoverageMicros: vaneEvidenceCoverageMicros(snapshot, transport, scene),
+			evidenceCoverageMicros: vaneEvidenceCoverageMicros(snapshot, transport),
 			hardCapped:             hardCapped,
 		}
 		if len(a.hashRules) > 0 {
@@ -1223,7 +1220,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	if commit && len(capped) > 0 {
 		a.diagnostics.record(vaneDiagnosticRecord{
 			kind: "latency-cap-excluded", target: target, port: port,
-			transport: transport.String(), scene: scene.String(),
+			transport:   transport.String(),
 			occurrences: len(capped),
 		})
 	}
@@ -1232,7 +1229,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		return compareVaneCandidateScores(ranked[i].vaneCandidateScore, ranked[j].vaneCandidateScore) < 0
 	})
 
-	anchorKey := vaneAnchorKey{transport: transport, scene: scene}
+	anchorKey := vaneAnchorKey{transport: transport}
 	anchor := a.anchors[anchorKey]
 	anchorCoolingAnywhere := false
 	if anchor.name != "" {
@@ -1255,14 +1252,14 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	var pinned *vaneRankedProxy
 	pinnedReason := ""
 	if len(a.hashRules) > 0 {
-		if rule, ok := matchVaneSceneRule(metadata, a.hashRules); ok && rule.scope() != "" {
+		if rule, ok := matchVaneFamilyRule(metadata, a.hashRules); ok && rule.scope() != "" {
 			sort.Slice(poolAll, func(i, j int) bool { return poolAll[i].name < poolAll[j].name })
 			h := fnv.New64a()
 			_, _ = h.Write([]byte(rule.scope()))
 			idx := int(jumpHash(h.Sum64(), int32(len(poolAll))))
 			for i := 0; i < len(poolAll); i++ {
 				candidate := &poolAll[(idx+i)%len(poolAll)]
-				if a.hashCandidateUsableLocked(candidate, transport, scene, now, commit) {
+				if a.hashCandidateUsableLocked(candidate, transport, now, commit) {
 					pinned = candidate
 					pinnedReason = "direct"
 					if i > 0 {
@@ -1281,7 +1278,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					from:      ranked[0].name,
 					to:        pinned.name,
 					transport: transport.String(),
-					scene:     scene.String(),
 				})
 			}
 		}
@@ -1307,7 +1303,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					port:      port,
 					to:        selected.Name(),
 					transport: vaneTransportTCP.String(),
-					scene:     vaneSceneMedia.String(),
 				}
 				if handoff != nil {
 					record.handoffID = handoff.id
@@ -1316,7 +1311,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					record.previousBPS = handoff.previousBPS
 				}
 				a.diagnostics.record(record)
-				a.recordPickScoredSnapshot("target-hint", scene, transport, target, port, selected.Name(), state.snapshot(transport, now))
+				a.recordPickScoredSnapshot("target-hint", transport, target, port, selected.Name(), state.snapshot(transport, now))
 				return vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 			}
 		}
@@ -1341,7 +1336,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				record.previousBPS = handoff.previousBPS
 			}
 			a.diagnostics.record(record)
-			a.recordPickScoredSnapshot("media-hint", scene, transport, target, port, hinted.Name(), state.snapshot(transport, now))
+			a.recordPickScoredSnapshot("media-hint", transport, target, port, hinted.Name(), state.snapshot(transport, now))
 			return vanePickDecision{proxy: hinted, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 		}
 	}
@@ -1349,7 +1344,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	chosen := ranked[0]
 	if pinned != nil {
 		chosen = *pinned
-	} else if stickyName, ok := a.stickyChoiceLocked(target, port, scene, now); ok {
+	} else if stickyName, ok := a.stickyChoiceLocked(target, port, now); ok {
 		// STICKY: a host keeps one exit for 60s so a burst of connections to the
 		// same site does not fan out across the pool. This replaces the old
 		// per-scene anchor, which made every site share one sticky slot.
@@ -1366,7 +1361,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	// pin exists to prevent; unmatched traffic still explores normally.
 	if commit && pinned == nil {
 		explorationSelection = a.maybeSelectExplorationLocked(
-			metadata, transport, scene, now, target, port, ranked, baseline, anchor, anchorCoolingAnywhere, hasAlive,
+			metadata, transport, now, target, port, ranked, baseline, anchor, anchorCoolingAnywhere, hasAlive,
 		)
 		if explorationSelection != nil {
 			for _, candidate := range ranked {
@@ -1385,7 +1380,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		// explicit exploration is an observation allocation, not an anchor vote.
 		if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
 			a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
-			a.rememberStickyLocked(target, port, scene, chosen.name, now)
+			a.rememberStickyLocked(target, port, chosen.name, now)
 		}
 		selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 		// State liveness follows provider membership, not this selection's
@@ -1429,7 +1424,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 					if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
 						a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
-						a.rememberStickyLocked(target, port, scene, chosen.name, now)
+						a.rememberStickyLocked(target, port, chosen.name, now)
 					}
 				}
 			}
@@ -1529,14 +1524,14 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			// preference should change for every target.
 			if !anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name {
 				a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
-				a.rememberStickyLocked(target, port, scene, chosen.name, now)
+				a.rememberStickyLocked(target, port, chosen.name, now)
 			}
 			selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 			a.pruneLocked(now, proxies)
 			a.learning.markDirtyLocked(now)
 		}
 		if commit {
-			a.recordPickScored(scene, transport, target, port, chosen, ranked, anchor)
+			a.recordPickScored(transport, target, port, chosen, ranked, anchor)
 		}
 		a.diagnostics.record(vaneDiagnosticRecord{
 			kind: "pick-probe-selected", reason: reason,
@@ -1558,7 +1553,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		return decision
 	}
 	if commit {
-		a.recordPickScored(scene, transport, target, port, chosen, ranked, anchor)
+		a.recordPickScored(transport, target, port, chosen, ranked, anchor)
 	}
 	decision := vanePickDecision{proxy: chosen.proxy}
 	decision.reportedAliveAtSelection = hasAlive
@@ -1574,12 +1569,12 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 
 // recordPickScoredSnapshot covers the sticky early returns that never reach the
 // ranking loop: without it a media flow served from target memory logs nothing.
-func (a *Vane) recordPickScoredSnapshot(reason string, scene vaneScene, transport vaneTransport, target string, port uint16, name string, snapshot vaneMetricsSnapshot) {
+func (a *Vane) recordPickScoredSnapshot(reason string, transport vaneTransport, target string, port uint16, name string, snapshot vaneMetricsSnapshot) {
 	parts := scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot)
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind: "pick-scored", reason: reason, target: target, port: port,
-		transport: transport.String(), scene: scene.String(),
-		to: name, scoreMicros: parts.total, scoreParts: parts.explain(),
+		transport: transport.String(),
+		to:        name, scoreMicros: parts.total, scoreParts: parts.explain(),
 	})
 }
 
@@ -1587,14 +1582,14 @@ func (a *Vane) recordPickScoredSnapshot(reason string, scene vaneScene, transpor
 // dimension contributions, and the raw best score when the anchor rule or a
 // probe overrode it. Media picks always log; other scenes only when the pick
 // moves away from the scene anchor, so plain browsing stays quiet.
-func (a *Vane) recordPickScored(scene vaneScene, transport vaneTransport, target string, port uint16, chosen vaneRankedProxy, ranked []vaneRankedProxy, anchor vaneAnchor) {
-	if len(ranked) == 0 || (scene != vaneSceneMedia && chosen.name == anchor.name) {
+func (a *Vane) recordPickScored(transport vaneTransport, target string, port uint16, chosen vaneRankedProxy, ranked []vaneRankedProxy, anchor vaneAnchor) {
+	if len(ranked) == 0 || (chosen.name == anchor.name) {
 		return
 	}
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind: "pick-scored", target: target, port: port,
-		transport: transport.String(), scene: scene.String(),
-		to: chosen.name, scoreMicros: chosen.scoreMicros,
+		transport: transport.String(),
+		to:        chosen.name, scoreMicros: chosen.scoreMicros,
 		bestMicros: ranked[0].scoreMicros, scoreParts: chosen.parts.explain(),
 	})
 }
@@ -1626,7 +1621,7 @@ func (a *Vane) cooldownUntilLocked(key vaneCooldownKey, now time.Time, cleanup b
 // hashCandidateUsableLocked reports whether the pinned node may serve this
 // connection. Cooldowns do not change the pool or its order, so honouring them
 // here cannot move anyone else's bucket.
-func (a *Vane) hashCandidateUsableLocked(cand *vaneRankedProxy, transport vaneTransport, scene vaneScene, now time.Time, commit bool) bool {
+func (a *Vane) hashCandidateUsableLocked(cand *vaneRankedProxy, transport vaneTransport, now time.Time, commit bool) bool {
 	if cand.hardCapped {
 		return false
 	}

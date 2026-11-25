@@ -82,7 +82,7 @@ func TestVaneHashPinRuleSetKeepsPageAndStreamTogether(t *testing.T) {
 	for i := 0; i < 32 && !found; i++ {
 		name := fmt.Sprintf("vane-hash-yt-%d", i)
 		installVaneHashRuleSet(t, name, pageHost, "+.googlevideo.com")
-		group.hashRules = []vaneSceneRule{{kind: vaneRuleRuleSet, value: name}}
+		group.hashRules = []vaneFamilyRule{{kind: vaneRuleRuleSet, value: name}}
 		pinned = group.pick(vaneHashMetadata(pageHost), vaneTransportTCP, false, false)
 		require.NotNil(t, pinned)
 		require.Equal(t, pinned.Name(), group.pick(vaneHashMetadata(streamHost), vaneTransportTCP, false, false).Name(),
@@ -108,7 +108,7 @@ func TestVaneHashPinRuleSetKeepsPageAndStreamTogether(t *testing.T) {
 func TestVaneHashPinMissFallsBackToRanking(t *testing.T) {
 	installVaneHashRuleSet(t, "vane-hash-yt", "youtube.com", "+.googlevideo.com")
 	group, _, _ := newVaneHashPinGroup(t, "a", "b", "c")
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleRuleSet, value: "vane-hash-yt"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleRuleSet, value: "vane-hash-yt"}}
 
 	group.pick(vaneHashMetadata("t.me"), vaneTransportTCP, true, true)
 	require.Empty(t, vaneHashPinnedEvents(group), "an unhashed host must not record a pin")
@@ -117,7 +117,7 @@ func TestVaneHashPinMissFallsBackToRanking(t *testing.T) {
 // HASH-03: a cooled pinned node fails over to the next ring position.
 func TestVaneHashPinFailsOverOnCooldown(t *testing.T) {
 	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 
 	metadata := vaneHashMetadata("youtube.com")
 	pinned := group.pick(metadata, vaneTransportTCP, true, false)
@@ -142,7 +142,7 @@ func TestVaneHashPinFailsOverOnCooldown(t *testing.T) {
 // HASH-04: every candidate cooled still picks something, like before.
 func TestVaneHashPinAllCooledStillPicks(t *testing.T) {
 	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c")
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 
 	group.mu.Lock()
 	for name, proxy := range byName {
@@ -190,9 +190,9 @@ func TestVaneHashPinNodeRemovalOnlyMovesItsBucket(t *testing.T) {
 	}
 	keys = append(keys, movedKey)
 
-	group.hashRules = make([]vaneSceneRule, 0, len(keys))
+	group.hashRules = make([]vaneFamilyRule, 0, len(keys))
 	for _, key := range keys {
-		group.hashRules = append(group.hashRules, vaneSceneRule{kind: vaneRuleDomain, value: key})
+		group.hashRules = append(group.hashRules, vaneFamilyRule{kind: vaneRuleDomain, value: key})
 	}
 	before := make(map[string]string, len(keys))
 	for _, key := range keys {
@@ -219,7 +219,7 @@ func TestVaneHashPinBeatsSticky(t *testing.T) {
 	rankedFirst := group.pick(metadata, vaneTransportTCP, true, false).Name()
 	require.Equal(t, "a", rankedFirst, "equal scores rank by name")
 
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 	pinned := group.pick(metadata, vaneTransportTCP, true, false).Name()
 	require.NotEqual(t, rankedFirst, pinned, "the pinned bucket must differ from the ranking leader")
 
@@ -234,7 +234,7 @@ func TestVaneHashPinBeatsSticky(t *testing.T) {
 
 	setSticky := func(name string) {
 		group.mu.Lock()
-		group.stickiness[vaneStickyKeyFor(metadata.Host, metadata.DstPort, vaneSceneDefault)] = vaneStickyChoice{
+		group.stickiness[vaneStickyKeyFor(metadata.Host, metadata.DstPort)] = vaneStickyChoice{
 			name:      name,
 			expiresAt: clock.Now().Add(time.Minute),
 		}
@@ -256,7 +256,7 @@ func TestVaneHashPinBeatsSticky(t *testing.T) {
 func TestVaneHashPinSurvivesExplorationAndColdPick(t *testing.T) {
 	t.Run("exploration", func(t *testing.T) {
 		group, _, _ := newVaneHashPinGroup(t, "a", "b", "c")
-		group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+		group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 		metadata := vaneHashMetadata("youtube.com")
 		pinned := group.pick(metadata, vaneTransportTCP, true, false).Name()
 
@@ -264,7 +264,7 @@ func TestVaneHashPinSurvivesExplorationAndColdPick(t *testing.T) {
 		require.NoError(t, err)
 		group.exploration = exploration
 		group.mu.Lock()
-		group.anchors[vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}] = vaneAnchor{name: pinned}
+		group.anchors[vaneAnchorKey{transport: vaneTransportTCP}] = vaneAnchor{name: pinned}
 		group.mu.Unlock()
 
 		for i := 0; i < 4; i++ {
@@ -296,7 +296,7 @@ func TestVaneHashPinSurvivesExplorationAndColdPick(t *testing.T) {
 
 		// The control pick armed the per-scope probe throttle; clear it so the
 		// pinned pick below would really probe if the guard were missing.
-		group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: metadata.Host}}
+		group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: metadata.Host}}
 		group.mu.Lock()
 		// Clear both gates the control pick armed: the per-scope throttle and
 		// the capability cache that would make the pin look redundant.
@@ -353,7 +353,7 @@ func TestVaneHashPinConfigValidation(t *testing.T) {
 func TestVaneHashPinSharedAcrossTransports(t *testing.T) {
 	t.Run("pinned node speaks UDP", func(t *testing.T) {
 		group, _, _ := newVaneHashPinGroup(t, "a", "b", "c", "d")
-		group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+		group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 		metadata := vaneHashMetadata("youtube.com")
 
 		tcp := group.pick(metadata, vaneTransportTCP, true, false)
@@ -377,7 +377,7 @@ func TestVaneHashPinSharedAcrossTransports(t *testing.T) {
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, proxies...)
 		t.Cleanup(func() { _ = group.Close() })
 		t.Cleanup(func() { dropVaneRecordedEvents(group) })
-		group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: scope}}
+		group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: scope}}
 		metadata := vaneHashMetadata(scope)
 
 		require.Equal(t, pinnedTarget.Name(), group.pick(metadata, vaneTransportTCP, true, false).Name())
@@ -393,7 +393,7 @@ func TestVaneHashPinUDPWithoutAnyUDPNode(t *testing.T) {
 		newVaneTestProxy("a", true, false), newVaneTestProxy("b", true, false))
 	t.Cleanup(func() { _ = group.Close() })
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 
 	require.NotPanics(t, func() {
 		selected := group.pick(vaneHashMetadata("youtube.com"), vaneTransportUDP, true, true)
@@ -405,7 +405,7 @@ func TestVaneHashPinUDPWithoutAnyUDPNode(t *testing.T) {
 // hardCapped into its entries).
 func TestVaneHashPinSkipsLatencyCappedNode(t *testing.T) {
 	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 	metadata := vaneHashMetadata("youtube.com")
 
 	pinned := group.pick(metadata, vaneTransportTCP, true, false)
@@ -427,7 +427,7 @@ func TestVaneHashPinSkipsLatencyCappedNode(t *testing.T) {
 // HASH-12: a pin is per rule set, so it must not rewrite the scene anchor.
 func TestVaneHashPinDoesNotWriteAnchor(t *testing.T) {
 	group, _, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomain, value: "youtube.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: "youtube.com"}}
 	metadata := vaneHashMetadata("youtube.com")
 
 	pinned := group.pick(metadata, vaneTransportTCP, true, false).Name()
@@ -437,7 +437,7 @@ func TestVaneHashPinDoesNotWriteAnchor(t *testing.T) {
 	}
 	require.NotEqual(t, anchorName, pinned)
 
-	anchorKey := vaneAnchorKey{transport: vaneTransportTCP, scene: classifyVaneScene(metadata, group.rules)}
+	anchorKey := vaneAnchorKey{transport: vaneTransportTCP}
 	group.mu.Lock()
 	group.anchors[anchorKey] = vaneAnchor{name: anchorName}
 	group.mu.Unlock()
@@ -467,14 +467,14 @@ func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 
 	cand := &vaneRankedProxy{proxy: byName["a"]}
 	cand.name = "a"
-	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, vaneSceneMedia, clock.Now(), true),
+	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, clock.Now(), true),
 		"a media-cooled node must be refused for a media flow")
-	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, vaneSceneDefault, clock.Now(), true),
+	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, clock.Now(), true),
 		"a demoted node is refused for every scene now that the per-scene gate is gone")
 
 	// The end-to-end path agrees: the pin fails over instead of reusing it.
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
 	metadata := vaneHashMetadata("rr1.googlevideo.com")
 	failedOver := group.pick(metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, failedOver)
@@ -486,7 +486,7 @@ func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 func TestVaneHashPinOutranksMediaHint(t *testing.T) {
 	group, clock, _ := newVaneHashPinGroup(t, "alpha", "beta", "gamma")
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
-	group.hashRules = []vaneSceneRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
+	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
 	metadata := vaneHashMetadata("rr1.googlevideo.com")
 
 	pinned := group.pick(metadata, vaneTransportTCP, false, true)

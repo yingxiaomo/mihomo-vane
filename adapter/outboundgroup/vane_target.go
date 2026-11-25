@@ -26,7 +26,6 @@ var vaneTargetFailureBackoff = [...]time.Duration{
 
 type vaneTargetKey struct {
 	transport   vaneTransport
-	scene       vaneScene
 	targetScope string
 	port        uint16
 }
@@ -119,7 +118,7 @@ const (
 // String renders the key for learning-state maps (round6 item 3). The format
 // is internal to this package: persisted records carry the structured fields.
 func (k vaneTargetKey) String() string {
-	return fmt.Sprintf("%s|%s|%s|%d", k.transport.String(), k.scene.String(), k.targetScope, k.port)
+	return fmt.Sprintf("%s|%s|%d", k.transport.String(), k.targetScope, k.port)
 }
 
 func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, bool) {
@@ -129,7 +128,6 @@ func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, boo
 	}
 	return vaneTargetKey{
 		transport:   vaneTransportTCP,
-		scene:       vaneSceneMedia,
 		targetScope: key.target,
 		port:        port,
 	}, true
@@ -144,8 +142,8 @@ const vaneStickySwitchWindow = 30 * time.Minute
 // vaneStickyKeyFor builds the per-host stickiness key. Unlike targetKeyForMedia
 // it does not require a media rule: every TCP host gets its own 60s slot, which
 // is the whole point of replacing the per-scene anchor.
-func vaneStickyKeyFor(target string, port uint16, scene vaneScene) vaneTargetKey {
-	return vaneTargetKey{transport: vaneTransportTCP, scene: scene, targetScope: target, port: port}
+func vaneStickyKeyFor(target string, port uint16) vaneTargetKey {
+	return vaneTargetKey{transport: vaneTransportTCP, targetScope: target, port: port}
 }
 
 // stickyChoiceLocked reports the live sticky node for this host, if any.
@@ -156,15 +154,15 @@ func vaneStickyKeyFor(target string, port uint16, scene vaneScene) vaneTargetKey
 // covers www.youtube.com and every rr*.googlevideo.com. Keying the sticky on
 // the raw host gave each of them its own choice, so a switch could leave the
 // page on one exit and the video on another — two IPs for one account.
-func (a *Vane) stickyKeyFor(target string, port uint16, scene vaneScene) vaneTargetKey {
+func (a *Vane) stickyKeyFor(target string, port uint16) vaneTargetKey {
 	if mediaKey := a.mediaTargetKey(target, port); mediaKey.target != "" {
-		return vaneTargetKey{transport: vaneTransportTCP, scene: scene, targetScope: mediaKey.target, port: port}
+		return vaneTargetKey{transport: vaneTransportTCP, targetScope: mediaKey.target, port: port}
 	}
-	return vaneStickyKeyFor(target, port, scene)
+	return vaneStickyKeyFor(target, port)
 }
 
-func (a *Vane) stickyChoiceLocked(target string, port uint16, scene vaneScene, now time.Time) (string, bool) {
-	choice, ok := a.stickiness[a.stickyKeyFor(target, port, scene)]
+func (a *Vane) stickyChoiceLocked(target string, port uint16, now time.Time) (string, bool) {
+	choice, ok := a.stickiness[a.stickyKeyFor(target, port)]
 	if !ok || choice.name == "" || !choice.expiresAt.After(now) {
 		return "", false
 	}
@@ -174,7 +172,7 @@ func (a *Vane) stickyChoiceLocked(target string, port uint16, scene vaneScene, n
 // rememberStickyLocked pins this host to name for vaneStickyTTL and bumps the
 // 30 minute switch counter when the choice actually changes. The caller must
 // hold a.mu.
-func (a *Vane) rememberStickyLocked(target string, port uint16, scene vaneScene, name string, now time.Time) {
+func (a *Vane) rememberStickyLocked(target string, port uint16, name string, now time.Time) {
 	if name == "" {
 		return
 	}
@@ -182,7 +180,7 @@ func (a *Vane) rememberStickyLocked(target string, port uint16, scene vaneScene,
 	if st := a.nodes[name]; st != nil {
 		identity = st.identity
 	}
-	key := a.stickyKeyFor(target, port, scene)
+	key := a.stickyKeyFor(target, port)
 	choice := a.stickiness[key]
 	if choice.name != name || choice.identity != identity {
 		if now.Sub(choice.switchWindowFrom) > vaneStickySwitchWindow {
@@ -399,7 +397,6 @@ func (a *Vane) recordB2MediaStall(flow *vaneMediaFlow, observation vaneConnectio
 func (a *Vane) b2TargetSnapshot(flow *vaneMediaFlow, state vaneTargetFailureState) vanePersistedB2Target {
 	return vanePersistedB2Target{
 		Transport:           flow.targetStateKey.transport.String(),
-		Scene:               flow.targetStateKey.scene.String(),
 		TargetScope:         flow.targetStateKey.targetScope,
 		Port:                flow.targetStateKey.port,
 		Candidate:           flow.candidate,
@@ -420,7 +417,7 @@ func (a *Vane) seedB2StateFromLearning(flow *vaneMediaFlow, state vaneTargetFail
 		return state
 	}
 	seed, ok := a.learning.seedB2Target(
-		flow.targetStateKey.transport, flow.targetStateKey.scene,
+		flow.targetStateKey.transport,
 		flow.targetStateKey.targetScope, flow.targetStateKey.port,
 		flow.candidate, flow.identity,
 	)

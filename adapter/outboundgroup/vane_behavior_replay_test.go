@@ -40,14 +40,12 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 		metrics.observeThroughput(clock.Now(), 8000000)
 		clock.Advance(time.Second)
 	}
-	for _, scene := range []vaneScene{vaneSceneDefault, vaneSceneInteractive, vaneSceneMedia, vaneSceneBulk} {
-		scores = append(scores, scoreVaneMetrics(scene, metrics.snapshot(clock.Now())))
-	}
+	scores = append(scores, scoreVaneMetricsFlat(metrics.snapshot(clock.Now())))
 	// D batch weight table: connect is 0.08 of interactive and 0.04 of default,
 	// and this fixture varies only connect latency (900ms vs 20ms). That is a
 	// ~2.9% score difference, below the 5% strict margin, so the anchor is kept.
 	// The fixture now pins that "better connect alone does not justify a switch".
 	require.Equal(t, []string{"alpha", "alpha", "alpha", "beta"}, choices)
 	// Absolute scores shift by the neutral profile blend; the ordering is the contract.
-	require.Equal(t, []int64{329620, 233812, 323671, 492767}, scores)
+	require.Equal(t, []int64{346692}, scores)
 }

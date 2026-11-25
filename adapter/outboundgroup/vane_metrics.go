@@ -14,30 +14,6 @@ import (
 	"github.com/metacubex/mihomo/tunnel"
 )
 
-// vaneScene is deliberately small and closed: unknown values use the
-// conservative default scene rather than acquiring their own metric history.
-type vaneScene uint8
-
-const (
-	vaneSceneDefault vaneScene = iota
-	vaneSceneInteractive
-	vaneSceneMedia
-	vaneSceneBulk
-)
-
-func (s vaneScene) String() string {
-	switch s {
-	case vaneSceneInteractive:
-		return "interactive"
-	case vaneSceneMedia:
-		return "media"
-	case vaneSceneBulk:
-		return "bulk"
-	default:
-		return "default"
-	}
-}
-
 // parseVaneTransport is the persistence-side counterpart of
 // vaneTransport.String (round6 item 3).
 func parseVaneTransport(value string) (vaneTransport, bool) {
@@ -48,21 +24,6 @@ func parseVaneTransport(value string) (vaneTransport, bool) {
 		return vaneTransportUDP, true
 	}
 	return vaneTransportTCP, false
-}
-
-func parseVaneScene(value string) (vaneScene, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "default":
-		return vaneSceneDefault, true
-	case "interactive":
-		return vaneSceneInteractive, true
-	case "media":
-		return vaneSceneMedia, true
-	case "bulk":
-		return vaneSceneBulk, true
-	default:
-		return vaneSceneDefault, false
-	}
 }
 
 func normalizeVaneDomain(value string) (string, bool) {
@@ -100,23 +61,22 @@ func (r vaneUintRange) contains(value uint64) bool {
 	return value >= r.first && value <= r.last
 }
 
-// vaneSceneRule is the parsed, I/O-free form used on the selection path.
+// vaneFamilyRule is the parsed, I/O-free form used on the selection path.
 // Config strings use TYPE,payload,scene and are evaluated in slice order.
-type vaneSceneRule struct {
+type vaneFamilyRule struct {
 	kind    vaneRuleKind
-	scene   vaneScene
 	value   string
 	values  []string
 	ranges  []vaneUintRange
 	network C.NetWork
 }
 
-func parseVaneSceneRules(raw []string) ([]vaneSceneRule, error) {
+func parseVaneFamilyRules(raw []string) ([]vaneFamilyRule, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 
-	rules := make([]vaneSceneRule, 0, len(raw))
+	rules := make([]vaneFamilyRule, 0, len(raw))
 	for i, text := range raw {
 		rule, err := parseVaneSceneRule(text)
 		if err != nil {
@@ -127,33 +87,29 @@ func parseVaneSceneRules(raw []string) ([]vaneSceneRule, error) {
 	return rules, nil
 }
 
-func parseVaneSceneRule(text string) (vaneSceneRule, error) {
+func parseVaneSceneRule(text string) (vaneFamilyRule, error) {
 	parts := strings.Split(text, ",")
-	if len(parts) != 3 {
-		return vaneSceneRule{}, fmt.Errorf("expected TYPE,payload,scene")
+	if len(parts) < 2 {
+		return vaneFamilyRule{}, fmt.Errorf("expected TYPE,payload")
 	}
-
-	scene, ok := parseVaneScene(parts[2])
-	if !ok {
-		return vaneSceneRule{}, fmt.Errorf("unsupported scene %q", strings.TrimSpace(parts[2]))
-	}
+	// FAMILY: a third field used to name the scene. It is accepted and ignored
+	// so existing "GEOSITE,youtube,media" lines keep working.
 
 	rule, err := parseVaneRulePayload(parts[0], parts[1])
 	if err != nil {
-		return vaneSceneRule{}, err
+		return vaneFamilyRule{}, err
 	}
-	rule.scene = scene
 	return rule, nil
 }
 
 // parseVaneHashRules parses the two-part hash-rules list. The hash key is the
 // rule's set name, so the type must be one that carries a scope at all.
-func parseVaneHashRules(raw []string) ([]vaneSceneRule, error) {
+func parseVaneHashRules(raw []string) ([]vaneFamilyRule, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 
-	rules := make([]vaneSceneRule, 0, len(raw))
+	rules := make([]vaneFamilyRule, 0, len(raw))
 	for i, text := range raw {
 		parts := strings.Split(text, ",")
 		if len(parts) != 2 {
@@ -171,28 +127,28 @@ func parseVaneHashRules(raw []string) ([]vaneSceneRule, error) {
 	return rules, nil
 }
 
-func parseVaneRulePayload(typeText, payloadText string) (vaneSceneRule, error) {
+func parseVaneRulePayload(typeText, payloadText string) (vaneFamilyRule, error) {
 	ruleType := strings.ToUpper(strings.TrimSpace(typeText))
 	payload := strings.TrimSpace(payloadText)
 	if payload == "" {
-		return vaneSceneRule{}, fmt.Errorf("empty payload for %s", ruleType)
+		return vaneFamilyRule{}, fmt.Errorf("empty payload for %s", ruleType)
 	}
 
-	rule := vaneSceneRule{}
+	rule := vaneFamilyRule{}
 	switch ruleType {
 	case "DOMAIN":
 		rule.kind = vaneRuleDomain
 		var valid bool
 		rule.value, valid = normalizeVaneDomain(payload)
 		if !valid {
-			return vaneSceneRule{}, fmt.Errorf("invalid DOMAIN payload %q", payload)
+			return vaneFamilyRule{}, fmt.Errorf("invalid DOMAIN payload %q", payload)
 		}
 	case "DOMAIN-SUFFIX":
 		rule.kind = vaneRuleDomainSuffix
 		var valid bool
 		rule.value, valid = normalizeVaneDomain(payload)
 		if !valid {
-			return vaneSceneRule{}, fmt.Errorf("invalid DOMAIN-SUFFIX payload %q", payload)
+			return vaneFamilyRule{}, fmt.Errorf("invalid DOMAIN-SUFFIX payload %q", payload)
 		}
 	case "NETWORK":
 		rule.kind = vaneRuleNetwork
@@ -202,7 +158,7 @@ func parseVaneRulePayload(typeText, payloadText string) (vaneSceneRule, error) {
 		case "udp":
 			rule.network = C.UDP
 		default:
-			return vaneSceneRule{}, fmt.Errorf("unsupported network %q", payload)
+			return vaneFamilyRule{}, fmt.Errorf("unsupported network %q", payload)
 		}
 	case "RULE-SET":
 		// The provider name is stored verbatim and resolved lazily at match
@@ -219,21 +175,21 @@ func parseVaneRulePayload(typeText, payloadText string) (vaneSceneRule, error) {
 		rule.kind = vaneRuleDstPort
 		ranges, err := parseVaneUintRanges(payload, math.MaxUint16)
 		if err != nil {
-			return vaneSceneRule{}, fmt.Errorf("invalid DST-PORT payload %q: %w", payload, err)
+			return vaneFamilyRule{}, fmt.Errorf("invalid DST-PORT payload %q: %w", payload, err)
 		}
 		rule.ranges = ranges
 	case "IN-NAME":
 		rule.kind = vaneRuleInName
 		values, err := parseVaneAlternatives(payload)
 		if err != nil {
-			return vaneSceneRule{}, err
+			return vaneFamilyRule{}, err
 		}
 		rule.values = values
 	case "IN-USER":
 		rule.kind = vaneRuleInUser
 		values, err := parseVaneAlternatives(payload)
 		if err != nil {
-			return vaneSceneRule{}, err
+			return vaneFamilyRule{}, err
 		}
 		rule.values = values
 	case "PROCESS":
@@ -246,11 +202,11 @@ func parseVaneRulePayload(typeText, payloadText string) (vaneSceneRule, error) {
 		rule.kind = vaneRuleDSCP
 		ranges, err := parseVaneUintRanges(payload, 63)
 		if err != nil {
-			return vaneSceneRule{}, fmt.Errorf("invalid DSCP payload %q: %w", payload, err)
+			return vaneFamilyRule{}, fmt.Errorf("invalid DSCP payload %q: %w", payload, err)
 		}
 		rule.ranges = ranges
 	default:
-		return vaneSceneRule{}, fmt.Errorf("unsupported rule type %q", ruleType)
+		return vaneFamilyRule{}, fmt.Errorf("unsupported rule type %q", ruleType)
 	}
 	return rule, nil
 }
@@ -298,25 +254,16 @@ func parseVaneUintRanges(payload string, maximum uint64) ([]vaneUintRange, error
 	return ranges, nil
 }
 
-func classifyVaneScene(metadata *C.Metadata, rules []vaneSceneRule) vaneScene {
-	if rule, ok := matchVaneSceneRule(metadata, rules); ok {
-		return rule.scene
-	}
-	return vaneSceneDefault
-}
-
-// matchVaneSceneRule returns the first rule matching the metadata, or false.
-// Rules are evaluated in slice order; the first match wins.
-func matchVaneSceneRule(metadata *C.Metadata, rules []vaneSceneRule) (vaneSceneRule, bool) {
+func matchVaneFamilyRule(metadata *C.Metadata, rules []vaneFamilyRule) (vaneFamilyRule, bool) {
 	if metadata == nil {
-		return vaneSceneRule{}, false
+		return vaneFamilyRule{}, false
 	}
 	for _, rule := range rules {
 		if rule.matches(metadata) {
 			return rule, true
 		}
 	}
-	return vaneSceneRule{}, false
+	return vaneFamilyRule{}, false
 }
 
 // scope returns the gate scope this rule carries when it classifies a flow as
@@ -324,7 +271,7 @@ func matchVaneSceneRule(metadata *C.Metadata, rules []vaneSceneRule) (vaneSceneR
 // RULE-SET, the category name for GEOSITE. Rules that match on something other
 // than a target identity (NETWORK, DST-PORT, IN-NAME, IN-USER, PROCESS,
 // PROCESS-PATH, DSCP) carry no scope and return "".
-func (r vaneSceneRule) scope() string {
+func (r vaneFamilyRule) scope() string {
 	switch r.kind {
 	case vaneRuleDomain, vaneRuleDomainSuffix, vaneRuleRuleSet, vaneRuleGeoSite:
 		return r.value
@@ -333,7 +280,7 @@ func (r vaneSceneRule) scope() string {
 	}
 }
 
-func (r vaneSceneRule) matches(metadata *C.Metadata) bool {
+func (r vaneFamilyRule) matches(metadata *C.Metadata) bool {
 	if metadata == nil {
 		return false
 	}
@@ -696,7 +643,7 @@ func (m vaneMetrics) snapshot(now time.Time) vaneMetricsSnapshot {
 	}
 }
 
-type vaneSceneScoring struct {
+type vaneScoringConfig struct {
 	failureWeight       float64
 	connectWeight       float64
 	responseWeight      float64
@@ -724,7 +671,7 @@ type vaneSceneScoring struct {
 
 // normalized keeps the ten weights summing to 1.0 while preserving their
 // relative sizes, so adding dimensions never inflates a score.
-func (c vaneSceneScoring) normalized() vaneSceneScoring {
+func (c vaneScoringConfig) normalized() vaneScoringConfig {
 	total := c.failureWeight + c.connectWeight + c.responseWeight + c.throughputWeight + c.jitterWeight +
 		c.lossWeight + c.latencyWeight + c.successWeight + c.maxRateWeight + c.durationWeight + c.downloadTotalWeight
 	if total <= 0 {
@@ -744,83 +691,28 @@ func (c vaneSceneScoring) normalized() vaneSceneScoring {
 	return c
 }
 
-// vaneSceneScoringSum is the assertion surface for SCORE-WEIGHT-01.
-func vaneSceneScoringSum(scoring vaneSceneScoring) float64 {
+// vaneScoringConfigSum is the assertion surface for SCORE-WEIGHT-01.
+func vaneScoringConfigSum(scoring vaneScoringConfig) float64 {
 	return scoring.failureWeight + scoring.connectWeight + scoring.responseWeight + scoring.throughputWeight +
 		scoring.jitterWeight + scoring.lossWeight + scoring.latencyWeight + scoring.successWeight +
 		scoring.maxRateWeight + scoring.durationWeight + scoring.downloadTotalWeight
 }
 
-// vaneSceneWeights is the raw weight table: throughput > latency > loss >
+// vaneWeightSet is the raw weight table: throughput > latency > loss >
 // everything else in every scene (owner's order). normalized() divides by the
 // sum, so these need not add up to 1.0.
-type vaneSceneWeights struct {
+type vaneWeightSet struct {
 	throughput, latency, loss, failure, response, jitter, connect float64
 	success, maxRate, duration, downloadTotal                     float64
 }
 
-func vaneScoring(scene vaneScene) vaneSceneScoring {
-	const mbps = 1_000_000
-	var weights vaneSceneWeights
-	scoring := vaneSceneScoring{}
-	switch scene {
-	case vaneSceneInteractive:
-		weights = vaneSceneWeights{0.25, 0.20, 0.15, 0.10, 0.12, 0.05, 0.08, 0.02, 0.01, 0.01, 0.01}
-		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
-		scoring.responseGoodMillis, scoring.responseBadMillis = 100, 1500
-		scoring.throughputLowBPS, scoring.throughputHighBPS = 0.25*mbps, 5*mbps
-	case vaneSceneMedia:
-		weights = vaneSceneWeights{0.30, 0.20, 0.15, 0.12, 0.08, 0.06, 0.04, 0.02, 0.02, 0.01, 0.01}
-		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
-		scoring.responseGoodMillis, scoring.responseBadMillis = 200, 3000
-		scoring.throughputLowBPS, scoring.throughputHighBPS = 3*mbps, 12*mbps
-	case vaneSceneBulk:
-		weights = vaneSceneWeights{0.50, 0.15, 0.12, 0.08, 0.04, 0.04, 0.02, 0.02, 0.02, 0.01, 0.01}
-		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
-		scoring.responseGoodMillis, scoring.responseBadMillis = 300, 5000
-		scoring.throughputLowBPS, scoring.throughputHighBPS = 2*mbps, 80*mbps
-	default:
-		weights = vaneSceneWeights{0.28, 0.20, 0.15, 0.12, 0.08, 0.06, 0.04, 0.03, 0.02, 0.01, 0.01}
-		scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
-		scoring.responseGoodMillis, scoring.responseBadMillis = 150, 3000
-		scoring.throughputLowBPS, scoring.throughputHighBPS = 1*mbps, 20*mbps
-	}
-	scoring.throughputWeight = weights.throughput
-	scoring.latencyWeight = weights.latency
-	scoring.lossWeight = weights.loss
-	scoring.failureWeight = weights.failure
-	scoring.responseWeight = weights.response
-	scoring.jitterWeight = weights.jitter
-	scoring.connectWeight = weights.connect
-	scoring.successWeight = weights.success
-	scoring.maxRateWeight = weights.maxRate
-	scoring.durationWeight = weights.duration
-	scoring.downloadTotalWeight = weights.downloadTotal
-	scoring.jitterGoodMillis, scoring.jitterBadMillis = 3, 100
-	// 50ms is a healthy CDN path; 500ms is the media chain's high-latency line,
-	// so scoring and runtime switching agree.
-	scoring.latencyGoodMillis, scoring.latencyBadMillis = 50, 500
-	scoring.durationGoodSeconds = 10
-	scoring.durationBadSeconds = 300
-	return scoring.normalized()
-}
-
-func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
-	return scoreVaneMetricsParts(scene, snapshot).total
-}
-
-// vaneWeights is the single, scene-independent weight table of the simplified
-// kernel (v3). The owner wants "fastest first", so throughput is raised to 0.35
-// while every other dimension keeps the old default tier.
 // BANDWIDTH-FIRST: throughput > latency > loss > the rest, per the user goal.
-var vaneWeights = vaneSceneWeights{0.55, 0.18, 0.12, 0.06, 0.03, 0.02, 0.02, 0.01, 0.005, 0.0025, 0.0025}
+var vaneWeights = vaneWeightSet{0.55, 0.18, 0.12, 0.06, 0.03, 0.02, 0.02, 0.01, 0.005, 0.0025, 0.0025}
 
-// vaneScoringFlat returns the scoring config used once scene grouping is gone.
-// It mirrors the default tier except for the raised throughput weight.
-func vaneScoringFlat() vaneSceneScoring {
+func vaneScoringFlat() vaneScoringConfig {
 	const mbps = 1_000_000
 	weights := vaneWeights
-	scoring := vaneSceneScoring{}
+	scoring := vaneScoringConfig{}
 	scoring.throughputWeight = weights.throughput
 	scoring.latencyWeight = weights.latency
 	scoring.lossWeight = weights.loss
@@ -865,11 +757,7 @@ func (p vaneScoreParts) explain() string {
 	)
 }
 
-func scoreVaneMetricsParts(scene vaneScene, snapshot vaneMetricsSnapshot) vaneScoreParts {
-	return scoreVaneMetricsPartsWith(vaneScoring(scene), snapshot)
-}
-
-func scoreVaneMetricsPartsWith(config vaneSceneScoring, snapshot vaneMetricsSnapshot) vaneScoreParts {
+func scoreVaneMetricsPartsWith(config vaneScoringConfig, snapshot vaneMetricsSnapshot) vaneScoreParts {
 	failure := vaneMetricCost(snapshot.failure, vaneMetricFailure, func(value float64) float64 {
 		return vaneClamp(value, 0, 1)
 	})

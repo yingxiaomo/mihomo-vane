@@ -401,7 +401,6 @@ func (d *vaneDiagnostics) recordExplorationSelection(selection vaneExplorationSe
 	record := vaneDiagnosticRecord{
 		kind:                   "exploration-selected",
 		transport:              selection.transport.String(),
-		scene:                  selection.scene.String(),
 		target:                 selection.target,
 		port:                   selection.port,
 		from:                   selection.fromAnchor,
@@ -417,7 +416,6 @@ func (d *vaneDiagnostics) recordExplorationSelection(selection vaneExplorationSe
 		diagnostics:            d,
 		id:                     record.explorationID,
 		transport:              selection.transport,
-		scene:                  selection.scene,
 		target:                 selection.target,
 		port:                   selection.port,
 		fromAnchor:             selection.fromAnchor,

@@ -832,7 +832,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 
 	t.Run("no-winner suppression window rejects", func(t *testing.T) {
 		configureVaneRacingForTest(t, group, vaneRacingShadow)
-		key := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: "googlevideo.com", port: 443}
+		key := vaneTargetKey{transport: vaneTransportTCP, targetScope: "googlevideo.com", port: 443}
 		group.racingRuntime.mu.Lock()
 		group.racingRuntime.noWinnerUntil[key] = clock.Now().Add(time.Minute)
 		group.racingRuntime.mu.Unlock()

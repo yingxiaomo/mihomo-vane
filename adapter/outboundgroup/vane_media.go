@@ -358,7 +358,7 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 		// PHASE2: every TCP flow is switchable, so a non-media host still needs
 		// a concrete state scope; without it the commit path answered
 		// "invalid-target" and burned the race budget.
-		targetStateKey = vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneDefault, targetScope: target, port: port}
+		targetStateKey = vaneTargetKey{transport: vaneTransportTCP, targetScope: target, port: port}
 	}
 	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey, flowMedia: flowMedia}
 	if len(handoff) > 0 && handoff[0] != nil {
@@ -1905,7 +1905,7 @@ func (a *Vane) mediaTargetKey(target string, port uint16) vaneMediaTargetKey {
 	// precedence, so existing configs behave exactly as before. Rules without
 	// a target identity (NETWORK, DST-PORT, ...) yield no scope and fall
 	// through to the empty key below.
-	if rule, ok := matchVaneSceneRule(&C.Metadata{Host: host}, a.rules); ok && rule.scene == vaneSceneMedia {
+	if rule, ok := matchVaneFamilyRule(&C.Metadata{Host: host}, a.rules); ok && rule.scope() != "" {
 		if scope := rule.scope(); scope != "" {
 			return vaneMediaTargetKey{target: scope, port: port}
 		}

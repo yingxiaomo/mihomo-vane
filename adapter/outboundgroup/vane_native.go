@@ -669,8 +669,8 @@ func (a *Vane) newNativeAttempt(decision vanePickDecision, metadata *C.Metadata,
 		decisionUnixNano: now.UnixNano(), groupID: collector.token("group", a.Name()),
 		nodeID:       collector.token("node", decision.identity),
 		nodeIDStable: decision.identity != "" && !strings.HasPrefix(decision.identity, "instance:"),
-		transport:    vaneNativeTransportName(transport), scene: vaneNativeSceneName(classifyVaneScene(metadata, a.rules)),
-		features: features, exploration: decision.exploration != nil, handoff: decision.handoff != nil,
+		transport:    vaneNativeTransportName(transport),
+		features:     features, exploration: decision.exploration != nil, handoff: decision.handoff != nil,
 	}
 	attempt.emit(vaneNativeEvent{EventType: "decision"}, false, now)
 	return attempt
@@ -718,7 +718,7 @@ func (a *vaneNativeAttempt) decorate(event vaneNativeEvent, now time.Time) vaneN
 	event.AttemptID = a.id
 	event.DecisionUnixNano = a.decisionUnixNano
 	event.GroupID, event.NodeID, event.NodeIDStable = a.groupID, a.nodeID, a.nodeIDStable
-	event.Transport, event.Scene, event.Features = a.transport, a.scene, a.features
+	event.Transport, event.Features = a.transport, a.features
 	event.Exploration, event.Handoff = a.exploration, a.handoff
 	return event
 }
@@ -781,19 +781,6 @@ func vaneNativeTransportName(transport vaneTransport) string {
 		return "udp"
 	}
 	return "tcp"
-}
-
-func vaneNativeSceneName(scene vaneScene) string {
-	switch scene {
-	case vaneSceneInteractive:
-		return "interactive"
-	case vaneSceneMedia:
-		return "media"
-	case vaneSceneBulk:
-		return "bulk"
-	default:
-		return "default"
-	}
 }
 
 func vaneNativeErrorClass(err error) string {

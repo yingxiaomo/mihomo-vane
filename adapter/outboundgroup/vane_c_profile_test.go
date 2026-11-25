@@ -17,7 +17,7 @@ func profileEstimate(value, evidence, confidence float64) vaneMetricEstimate {
 func TestVaneScoreSuccessRate(t *testing.T) {
 	good := vaneMetricsSnapshot{success: profileEstimate(0.9, 100, 1)}
 	bad := vaneMetricsSnapshot{success: profileEstimate(0.1, 10, 1)}
-	require.Less(t, scoreVaneMetrics(vaneSceneDefault, good), scoreVaneMetrics(vaneSceneDefault, bad))
+	require.Less(t, scoreVaneMetricsFlat(good), scoreVaneMetricsFlat(bad))
 }
 
 // SCORE-SUCCESS-02: one sample is not evidence; the node estimate keeps the
@@ -40,7 +40,7 @@ func TestVaneScoreSuccessSingleSampleIsNeutral(t *testing.T) {
 func TestVaneScoreMaxRate(t *testing.T) {
 	fast := vaneMetricsSnapshot{maxRate: profileEstimate(math.Log(50_000_000), 1, 1)}
 	slow := vaneMetricsSnapshot{maxRate: profileEstimate(math.Log(5_000_000), 1, 1)}
-	require.Less(t, scoreVaneMetrics(vaneSceneDefault, fast), scoreVaneMetrics(vaneSceneDefault, slow))
+	require.Less(t, scoreVaneMetricsFlat(fast), scoreVaneMetricsFlat(slow))
 }
 
 // SCORE-MAX-02: profile dimensions only nudge — they cannot overturn a wide
@@ -56,21 +56,21 @@ func TestVaneScoreMaxRateDoesNotOverturnBaseGap(t *testing.T) {
 		response: profileEstimate(math.Log(2900), 10, 1), throughput: profileEstimate(math.Log(4_000_000), 10, 1),
 		jitter: profileEstimate(90, 10, 1), maxRate: profileEstimate(math.Log(200_000_000), 1, 1),
 	}
-	require.Less(t, scoreVaneMetrics(vaneSceneMedia, strong), scoreVaneMetrics(vaneSceneMedia, weak))
+	require.Less(t, scoreVaneMetricsFlat(strong), scoreVaneMetricsFlat(weak))
 }
 
 // SCORE-DURATION-01: long-lived sockets are the stability signal.
 func TestVaneScoreDuration(t *testing.T) {
 	long := vaneMetricsSnapshot{duration: profileEstimate(600, 10, 1)}
 	short := vaneMetricsSnapshot{duration: profileEstimate(5, 10, 1)}
-	require.Less(t, scoreVaneMetrics(vaneSceneDefault, long), scoreVaneMetrics(vaneSceneDefault, short))
+	require.Less(t, scoreVaneMetricsFlat(long), scoreVaneMetricsFlat(short))
 }
 
 // SCORE-TOTAL-01: a proven node gets a bonus, an unproven one stays neutral.
 func TestVaneScoreDownloadTotal(t *testing.T) {
 	proven := vaneMetricsSnapshot{downloadTotal: profileEstimate(math.Log10(500<<20), 1, 1)}
 	unproven := vaneMetricsSnapshot{}
-	require.Less(t, scoreVaneMetrics(vaneSceneBulk, proven), scoreVaneMetrics(vaneSceneBulk, unproven))
+	require.Less(t, scoreVaneMetricsFlat(proven), scoreVaneMetricsFlat(unproven))
 	// Neutral means exactly the missing cost, not "best".
 	total := vaneMetricCost(vaneMetricsSnapshot{}.downloadTotal, vaneMetricDownloadTotal, vaneDownloadTotalCost)
 	require.InDelta(t, 0.5, total, 1e-9)
@@ -78,14 +78,12 @@ func TestVaneScoreDownloadTotal(t *testing.T) {
 
 // SCORE-WEIGHT-01: ten dimensions, normalized to 1.0.
 func TestVaneScoreWeightsNormalize(t *testing.T) {
-	for _, scene := range []vaneScene{vaneSceneDefault, vaneSceneInteractive, vaneSceneMedia, vaneSceneBulk} {
-		scoring := vaneScoring(scene)
-		require.InDelta(t, 1.0, vaneSceneScoringSum(scoring), 1e-9, "scene %v", scene)
-		for _, weight := range []float64{scoring.failureWeight, scoring.connectWeight, scoring.responseWeight,
-			scoring.throughputWeight, scoring.jitterWeight, scoring.lossWeight, scoring.successWeight,
-			scoring.maxRateWeight, scoring.durationWeight, scoring.downloadTotalWeight} {
-			require.Greater(t, weight, 0.0, "scene %v", scene)
-		}
+	scoring := vaneScoringFlat()
+	require.InDelta(t, 1.0, vaneScoringConfigSum(scoring), 1e-9)
+	for _, weight := range []float64{scoring.failureWeight, scoring.connectWeight, scoring.responseWeight,
+		scoring.throughputWeight, scoring.jitterWeight, scoring.lossWeight, scoring.successWeight,
+		scoring.maxRateWeight, scoring.durationWeight, scoring.downloadTotalWeight} {
+		require.Greater(t, weight, 0.0)
 	}
 }
 

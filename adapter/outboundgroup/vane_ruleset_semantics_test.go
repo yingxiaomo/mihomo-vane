@@ -60,7 +60,7 @@ func TestVaneRuleSetSceneRuleRejectsLookalikeHost(t *testing.T) {
 	clock := newVaneConnTestClock()
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
-	group.rules = []vaneSceneRule{{kind: vaneRuleRuleSet, value: providerName, scene: vaneSceneMedia}}
+	group.rules = []vaneFamilyRule{{kind: vaneRuleRuleSet, value: providerName}}
 	group.media.domains = nil
 	group.media.ruleSets = nil
 	group.media.geoSites = nil

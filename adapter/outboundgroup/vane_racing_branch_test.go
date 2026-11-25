@@ -290,19 +290,19 @@ func TestVaneTargetStateLimitsTrimOldestEntries(t *testing.T) {
 	group.mu.Lock()
 	lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 	for index := 0; index < vaneTargetStateLimit+25; index++ {
-		key := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("ev-%04d", index), port: 443}
+		key := vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("ev-%04d", index), port: 443}
 		group.targetEvidence[vaneTargetEvidenceKey{target: key, member: lease}] = vaneTargetEvidence{
 			bitsPerSecond: 1, observedAt: clock.Now().Add(-time.Duration(index) * time.Second),
 		}
-		failureKey := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("fl-%04d", index), port: 443}
+		failureKey := vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("fl-%04d", index), port: 443}
 		group.targetFailures[vaneTargetFailureKey{target: failureKey, member: lease}] = vaneTargetFailureState{
 			streak: 1, blockUntil: clock.Now().Add(-time.Minute), lastFailureAt: clock.Now().Add(-time.Duration(index) * time.Second),
 		}
-		handoffKey := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("ho-%04d", index), port: 443}
+		handoffKey := vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("ho-%04d", index), port: 443}
 		group.targetHandoffs[handoffKey] = vaneHandoffLease{
 			id: uint64(index), from: lease, to: lease, expiresAt: clock.Now().Add(time.Hour), updatedAt: clock.Now().Add(-time.Duration(index) * time.Second),
 		}
-		preferenceKey := vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: fmt.Sprintf("pr-%04d", index), port: 443}
+		preferenceKey := vaneTargetKey{transport: vaneTransportTCP, targetScope: fmt.Sprintf("pr-%04d", index), port: 443}
 		group.targetPreferences[preferenceKey] = vaneTargetPreference{
 			to: lease, expiresAt: clock.Now().Add(time.Hour), updatedAt: clock.Now().Add(-time.Duration(index) * time.Second),
 		}
@@ -313,7 +313,7 @@ func TestVaneTargetStateLimitsTrimOldestEntries(t *testing.T) {
 	require.LessOrEqual(t, len(group.targetHandoffs), vaneTargetStateLimit)
 	require.LessOrEqual(t, len(group.targetPreferences), vaneTargetStateLimit)
 	_, newestKept := group.targetEvidence[vaneTargetEvidenceKey{
-		target: vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: "ev-0000", port: 443}, member: lease,
+		target: vaneTargetKey{transport: vaneTransportTCP, targetScope: "ev-0000", port: 443}, member: lease,
 	}]
 	require.True(t, newestKept, "the newest evidence must survive trimming")
 	group.mu.Unlock()
@@ -730,7 +730,7 @@ func TestVaneRaceCandidateOrderingTieBreaks(t *testing.T) {
 	group.racingRuntime.capabilities[gammaLease] = vaneCapabilityRecord{member: gammaLease, lowerBoundBPS: 8_000_000, observedAt: clock.Now()}
 	group.racingRuntime.mu.Unlock()
 	otherKey := request
-	otherKey.targetKey = vaneTargetKey{transport: vaneTransportTCP, scene: vaneSceneMedia, targetScope: "googlevideo.com", port: 8443}
+	otherKey.targetKey = vaneTargetKey{transport: vaneTransportTCP, targetScope: "googlevideo.com", port: 8443}
 	otherKey.mediaKey = vaneMediaTargetKey{target: "googlevideo.com", port: 8443}
 	candidates, reason = group.snapshotRaceCandidates(otherKey)
 	require.Empty(t, reason)

@@ -33,7 +33,7 @@ func TestVaneExplorationCadenceFairnessAndAnchorIsolation(t *testing.T) {
 	// The first committed selection establishes the anchor and is not an
 	// exploration opportunity.
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
-	anchorKey := vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}
+	anchorKey := vaneAnchorKey{transport: vaneTransportTCP}
 	require.Equal(t, "alpha", group.anchors[anchorKey].name)
 
 	want := []string{"alpha", "alpha", "beta", "alpha", "alpha", "gamma"}
@@ -42,7 +42,7 @@ func TestVaneExplorationCadenceFairnessAndAnchorIsolation(t *testing.T) {
 		require.Equal(t, "alpha", group.anchors[anchorKey].name, "exploration must never replace the baseline anchor")
 	}
 
-	scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP, vaneSceneDefault)]
+	scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP)]
 	require.Equal(t, uint64(6), scope.eligibleSelections)
 	require.Equal(t, uint64(2), scope.explorationSelections)
 	require.Zero(t, scope.sinceLastExploration)
@@ -51,7 +51,7 @@ func TestVaneExplorationCadenceFairnessAndAnchorIsolation(t *testing.T) {
 	require.True(t, snapshot.Config.ExplorationEnabled)
 	require.Equal(t, 3, snapshot.Config.ExplorationInterval)
 	require.Equal(t, vaneExplorationScopeCount, len(snapshot.Runtime.ExplorationScopes))
-	tcpDefault := snapshot.Runtime.ExplorationScopes[vaneExplorationScopeIndex(vaneTransportTCP, vaneSceneDefault)]
+	tcpDefault := snapshot.Runtime.ExplorationScopes[vaneExplorationScopeIndex(vaneTransportTCP)]
 	require.Equal(t, uint64(6), tcpDefault.EligibleSelections)
 	require.Equal(t, uint64(2), tcpDefault.ExplorationSelections)
 	require.Equal(t, uint64(3), tcpDefault.NextIn)
@@ -89,7 +89,7 @@ func TestVaneExplorationEligibilityDoesNotAccumulateDebt(t *testing.T) {
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 	require.Equal(t, "beta", group.pick(metadata, vaneTransportTCP, false, true).Name())
 
-	scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP, vaneSceneDefault)]
+	scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP)]
 	require.Equal(t, uint64(2), scope.eligibleSelections)
 	require.Equal(t, uint64(1), scope.explorationSelections)
 }
@@ -120,12 +120,12 @@ func TestVaneExplorationSkipsControlTrafficAndReadOnlySelectors(t *testing.T) {
 	require.Equal(t, "beta", group.pick(metadata, vaneTransportTCP, false, true).Name())
 }
 
-func TestVaneExplorationTransportAndSceneScopesAreIndependent(t *testing.T) {
+func TestVaneExplorationTransportScopesAreIndependent(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 16, time.Hour, alpha, beta)
-	group.rules = []vaneSceneRule{{kind: vaneRuleDomainSuffix, value: "video.example", scene: vaneSceneMedia}}
+	group.rules = []vaneFamilyRule{{kind: vaneRuleDomainSuffix, value: "video.example"}}
 	enableVaneExplorationForTest(group, 2)
 
 	defaultTCP := vaneExplorationMetadata("api.example", C.TCP)
@@ -134,15 +134,14 @@ func TestVaneExplorationTransportAndSceneScopesAreIndependent(t *testing.T) {
 
 	// Establish one anchor per closed scope.
 	require.Equal(t, "alpha", group.pick(defaultTCP, vaneTransportTCP, false, true).Name())
-	require.Equal(t, "alpha", group.pick(mediaTCP, vaneTransportTCP, false, true).Name())
 	require.Equal(t, "alpha", group.pick(defaultUDP, vaneTransportUDP, false, true).Name())
+	_ = mediaTCP // a media host shares the TCP scope now that scene grouping is gone
 
 	for _, tc := range []struct {
 		metadata  *C.Metadata
 		transport vaneTransport
 	}{
 		{defaultTCP, vaneTransportTCP},
-		{mediaTCP, vaneTransportTCP},
 		{defaultUDP, vaneTransportUDP},
 	} {
 		require.Equal(t, "alpha", group.pick(tc.metadata, tc.transport, false, true).Name())
@@ -164,7 +163,7 @@ func TestVaneExplorationMediaHandoffAlwaysWinsWithoutAdvancingCadence(t *testing
 	group.mediaHints[key] = vaneMediaHint{candidate: "beta", expiresAt: clock.Now().Add(time.Minute)}
 	require.Equal(t, "beta", group.pick(metadata, vaneTransportTCP, false, true).Name())
 
-	scopeIndex := vaneExplorationScopeIndex(vaneTransportTCP, vaneSceneMedia)
+	scopeIndex := vaneExplorationScopeIndex(vaneTransportTCP)
 	require.Zero(t, group.explorationScopes[scopeIndex].eligibleSelections)
 	delete(group.mediaHints, key)
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
@@ -355,16 +354,16 @@ func TestVaneEvidenceCoverageMatchesTransportObservability(t *testing.T) {
 	throughputOnly := vaneMetricsSnapshot{
 		throughput: vaneMetricEstimate{valid: true, confidence: 1},
 	}
-	require.Zero(t, vaneEvidenceCoverageMicros(throughputOnly, vaneTransportUDP, vaneSceneMedia), "UDP cannot observe throughput")
-	require.Equal(t, int64(500_000), vaneEvidenceCoverageMicros(throughputOnly, vaneTransportTCP, vaneSceneMedia))
+	require.Zero(t, vaneEvidenceCoverageMicros(throughputOnly, vaneTransportUDP), "UDP cannot observe throughput")
+	require.Equal(t, int64(808_824), vaneEvidenceCoverageMicros(throughputOnly, vaneTransportTCP))
 
 	udpObservable := vaneMetricsSnapshot{
 		failure: vaneMetricEstimate{valid: true, confidence: 1},
 		connect: vaneMetricEstimate{valid: true, confidence: 1},
 	}
-	require.Equal(t, int64(714_286), vaneEvidenceCoverageMicros(udpObservable, vaneTransportUDP, vaneSceneBulk))
+	require.Equal(t, int64(800_000), vaneEvidenceCoverageMicros(udpObservable, vaneTransportUDP))
 	udpObservable.jitter = vaneMetricEstimate{valid: true, confidence: 1}
-	require.Equal(t, int64(1_000_000), vaneEvidenceCoverageMicros(udpObservable, vaneTransportUDP, vaneSceneBulk))
+	require.Equal(t, int64(1_000_000), vaneEvidenceCoverageMicros(udpObservable, vaneTransportUDP))
 }
 
 func TestVaneExplorationRespectsHealthProtocolAndCooldownBoundaries(t *testing.T) {
@@ -394,7 +393,7 @@ func TestVaneExplorationRespectsHealthProtocolAndCooldownBoundaries(t *testing.T
 		for i := 0; i < 8; i++ {
 			require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 		}
-		scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP, vaneSceneDefault)]
+		scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP)]
 		require.Zero(t, scope.eligibleSelections)
 		require.Zero(t, group.VaneDiagnostics().Counters.ExplorationSelections)
 	})
@@ -424,7 +423,7 @@ func TestVaneExplorationRespectsHealthProtocolAndCooldownBoundaries(t *testing.T
 		for i := 0; i < 8; i++ {
 			require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 		}
-		scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP, vaneSceneDefault)]
+		scope := group.explorationScopes[vaneExplorationScopeIndex(vaneTransportTCP)]
 		require.Zero(t, scope.eligibleSelections)
 	})
 }
