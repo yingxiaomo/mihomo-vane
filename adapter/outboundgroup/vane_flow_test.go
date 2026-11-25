@@ -1105,3 +1105,24 @@ func TestVanePruneDropsStaleInflightProbe(t *testing.T) {
 	require.False(t, stale, "stale in-flight flag is pruned")
 	require.True(t, fresh, "a fresh in-flight flag survives")
 }
+
+// NODE-COOL-IDENTITY: a cooldown belongs to the endpoint that earned it, not to
+// the display name. A subscription reload can reuse a name for a different
+// endpoint, and that new endpoint must not start out cooled.
+func TestVaneNodeCooldownDoesNotFollowAReusedName(t *testing.T) {
+	group, clock, _, _, _ := newTargetGroupForTest(t)
+	now := clock.Now()
+
+	group.mu.Lock()
+	group.nodeIdentities["beta"] = "endpoint-a"
+	group.ensureNodeIdentityLocked("beta", "endpoint-a", now)
+	group.coolNodeLocked("beta", now.Add(time.Minute))
+	held := group.nodeCoolingLocked("beta", now)
+	group.nodeIdentities["beta"] = "endpoint-b"
+	group.ensureNodeIdentityLocked("beta", "endpoint-b", now)
+	reused := group.nodeCoolingLocked("beta", now)
+	group.mu.Unlock()
+
+	require.True(t, held, "the cooldown holds for the endpoint that earned it")
+	require.False(t, reused, "a different endpoint under the same name must not inherit it")
+}

@@ -233,8 +233,9 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffNoGain)
 }
 
-// TARGET-FEEDBACK-001: ordinary success only refreshes an existing preference.
-func TestVaneTargetOrdinarySuccessOnlyRefreshesExistingPreference(t *testing.T) {
+// TARGET-FEEDBACK-001 + PREFERENCE-TTL: an ordinary fast window neither
+// creates a preference nor slides an existing deadline.
+func TestVaneTargetOrdinarySuccessDoesNotSlideThePreference(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
 	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
@@ -252,7 +253,7 @@ func TestVaneTargetOrdinarySuccessOnlyRefreshesExistingPreference(t *testing.T) 
 	group.mu.Lock()
 	after := group.targetPreferences[key].expiresAt
 	group.mu.Unlock()
-	require.True(t, after.After(before))
+	require.Equal(t, before, after, "an ordinary fast window must not slide the preference deadline")
 }
 
 // TARGET-COOLDOWN-001 + TARGET-COOLDOWN-002: progression plus expiry-vs-success reset.
@@ -624,4 +625,28 @@ func TestVaneTargetPruneEqualTimestampsIsDeterministic(t *testing.T) {
 			require.Equal(t, reference, survivors, "capability eviction must be identical on every run")
 		}
 	})
+}
+
+// STABLE-WINDOW: a sub-second burst is not evidence of a better landing. A
+// 200 ms window can report tens of Mbps from a few hundred kilobytes, and the
+// verdict it produces would pin a preference for ten minutes.
+func TestVaneHandoffVerdictNeedsAStableWindow(t *testing.T) {
+	group, _, _, beta, metadata := newTargetGroupForTest(t)
+	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+	require.Empty(t, group.commitTargetHandoff(plan))
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.NotNil(t, decision.handoff)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata, decision.handoff)
+	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
+	flow.observe(vaneThroughputObservation{
+		BitsPerSecond: 50_000_000, TotalBytes: 4 * 1024 * 1024,
+		Age: 200 * time.Millisecond, Delivered: true,
+	})
+
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
+	group.mu.Lock()
+	_, preferred := group.targetPreferences[key]
+	group.mu.Unlock()
+	require.False(t, preferred, "a sub-second burst must not pin a preference")
+	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffNoGain)
 }

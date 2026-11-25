@@ -11,8 +11,12 @@ import (
 
 const (
 	vaneTargetPreferenceTTL = 10 * time.Minute
-	vaneTargetEvidenceTTL   = 10 * time.Minute
-	vaneTargetStateLimit    = 1024
+	// vaneMinVerdictWindow keeps a verdict off a sub-second burst: a 200 ms
+	// sample can report tens of Mbps from a few hundred kilobytes, and that
+	// must not pin a preference.
+	vaneMinVerdictWindow  = 3 * time.Second
+	vaneTargetEvidenceTTL = 10 * time.Minute
+	vaneTargetStateLimit  = 1024
 )
 
 var vaneTargetFailureBackoff = [...]time.Duration{
@@ -704,7 +708,14 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	// cumulative retransmission ratio is noise, and no-gain writes a 30-minute
 	// slow cooldown for the very node we just switched to.
 	signalOK := sample.TotalBytes >= a.flow.minBytes && sample.Delivered
-	improved := sample.BitsPerSecond >= required &&
+	// STABLE-WINDOW (audit 2026-11-26): a verdict must not rest on a short
+	// burst. A 200 ms window can report 50 Mbps from a few hundred kilobytes;
+	// that is not evidence of sustained bandwidth, yet the verdict pins a
+	// preference for ten minutes. Require the window to span the same age the
+	// low-window line uses, so the transfer dominates the measurement and a
+	// brief speed spike cannot promote a slow landing.
+	windowOK := sample.Age >= vaneMinVerdictWindow
+	improved := windowOK && sample.BitsPerSecond >= required &&
 		sample.BitsPerSecond >= a.flow.lowThroughputBPS &&
 		(!signalOK || !sample.LossSupported || sample.LossRate <= vaneDefaultHighLossRate) &&
 		(!signalOK || !sample.LatencySupported || sample.Latency <= vaneDefaultHighLatency)
@@ -816,10 +827,14 @@ func (a *Vane) refreshTargetPreference(key vaneTargetKey, member vaneMemberLease
 	now := a.clock.Now()
 	a.mu.Lock()
 	a.recordTargetEvidenceLocked(key, member, bitsPerSecond, false, now)
-	if preference, ok := a.targetPreferences[key]; ok && preference.to == member && a.memberLeaseCurrentLocked(member) {
-		preference.expiresAt = now.Add(vaneTargetPreferenceTTL)
-		preference.updatedAt = now
-		a.targetPreferences[key] = preference
+	// PREFERENCE-TTL (audit 2026-11-26): the verdict's ten minutes start at the
+	// settlement and do not slide. Renewing on every fast window kept a
+	// preference alive for as long as any flow in the family ran well, so one
+	// optimistic verdict could pin a slow node for an unbounded stretch. The
+	// window below only retires a preference whose node lost its lease; the
+	// deadline itself is left alone so a bad landing genuinely ages out.
+	if preference, ok := a.targetPreferences[key]; ok && preference.to == member && !a.memberLeaseCurrentLocked(member) {
+		delete(a.targetPreferences, key)
 	}
 	a.pruneTargetStateLocked(now)
 	a.mu.Unlock()
