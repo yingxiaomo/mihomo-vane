@@ -210,9 +210,10 @@ func TestVaneHashPinNodeRemovalOnlyMovesItsBucket(t *testing.T) {
 	}
 }
 
-// HASH-06: a pin beats the anchor, and the anchor really would have won.
-func TestVaneHashPinBeatsAnchor(t *testing.T) {
-	group, _, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
+// HASH-06: a pin beats the per-target sticky choice, and the sticky choice
+// really would have won without the pin.
+func TestVaneHashPinBeatsSticky(t *testing.T) {
+	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
 	metadata := vaneHashMetadata("youtube.com")
 
 	rankedFirst := group.pick(metadata, vaneTransportTCP, true, false).Name()
@@ -222,29 +223,36 @@ func TestVaneHashPinBeatsAnchor(t *testing.T) {
 	pinned := group.pick(metadata, vaneTransportTCP, true, false).Name()
 	require.NotEqual(t, rankedFirst, pinned, "the pinned bucket must differ from the ranking leader")
 
-	var anchorName string
+	var stickyName string
 	for name := range byName {
 		if name != rankedFirst && name != pinned {
-			anchorName = name
+			stickyName = name
 			break
 		}
 	}
-	require.NotEmpty(t, anchorName)
-	group.mu.Lock()
-	group.anchors[vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}] = vaneAnchor{name: anchorName}
-	group.mu.Unlock()
+	require.NotEmpty(t, stickyName)
 
+	setSticky := func(name string) {
+		group.mu.Lock()
+		group.stickiness[vaneStickyKeyFor(metadata.Host, metadata.DstPort, vaneSceneDefault)] = vaneStickyChoice{
+			name:      name,
+			expiresAt: clock.Now().Add(time.Minute),
+		}
+		group.mu.Unlock()
+	}
+
+	setSticky(stickyName)
 	require.Equal(t, pinned, group.pick(metadata, vaneTransportTCP, true, false).Name(),
-		"with the pin in force the anchor must not override it")
+		"with the pin in force the sticky choice must not override it")
 
-	// Control: drop the hash rules and the same anchor does win, proving the
-	// assertion above is about the pin and not about the anchor being ignored.
+	// Control: drop the hash rules and the same sticky choice does win,
+	// proving the assertion above is meaningful.
+	setSticky(stickyName)
 	group.hashRules = nil
-	require.Equal(t, anchorName, group.pick(metadata, vaneTransportTCP, true, false).Name(),
-		"the anchor overrides the ranking leader when nothing is pinned")
+	require.Equal(t, stickyName, group.pick(metadata, vaneTransportTCP, true, false).Name(),
+		"without the pin the sticky choice must win")
 }
 
-// HASH-07: exploration and the cold-pick probe must not break the pin.
 func TestVaneHashPinSurvivesExplorationAndColdPick(t *testing.T) {
 	t.Run("exploration", func(t *testing.T) {
 		group, _, _ := newVaneHashPinGroup(t, "a", "b", "c")

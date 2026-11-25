@@ -538,67 +538,6 @@ func TestVaneCandidateEligibilityAndDeterminism(t *testing.T) {
 	})
 }
 
-func TestVaneSoftAnchorStrictMarginPerTransportAndScene(t *testing.T) {
-	scenes := []struct {
-		name  string
-		scene vaneScene
-		host  string
-		rule  string
-	}{
-		{"default", vaneSceneDefault, "default.example", ""},
-		{"interactive", vaneSceneInteractive, "interactive.example", "DOMAIN,interactive.example,interactive"},
-		{"media", vaneSceneMedia, "media.example", "DOMAIN,media.example,media"},
-		{"bulk", vaneSceneBulk, "bulk.example", "DOMAIN,bulk.example,bulk"},
-	}
-	transports := []struct {
-		name      string
-		transport vaneTransport
-		network   C.NetWork
-	}{
-		{"tcp", vaneTransportTCP, C.TCP},
-		{"udp", vaneTransportUDP, C.UDP},
-	}
-
-	for _, sceneTest := range scenes {
-		for _, transportTest := range transports {
-			t.Run(sceneTest.name+"/"+transportTest.name, func(t *testing.T) {
-				now := time.Unix(1_700_000_000, 0)
-				clock := &vaneFakeClock{now: now}
-				anchor := newVaneTestProxy("anchor", true, true)
-				challenger := newVaneTestProxy("challenger", true, true)
-				group, _ := newVaneGroupForTest(clock, 10, time.Hour, anchor, challenger)
-				if sceneTest.rule != "" {
-					rules, err := parseVaneSceneRules([]string{sceneTest.rule})
-					require.NoError(t, err)
-					group.rules = rules
-				}
-				metadata := &C.Metadata{Host: sceneTest.host, NetWork: transportTest.network, DstPort: 443}
-				weight := vaneScoring(sceneTest.scene).failureWeight
-				// 0.9 leaves room for the value step 0.05/weight that every scene
-				// weight now needs; the score step itself is always exactly 5%.
-				anchorFailure := 0.9
-				margin := 0.05
-				exactFailure := anchorFailure - margin/weight
-				wantMargin := int64(math.Round(1_000_000 * margin))
-				setVaneFailureForTest(group, "anchor", transportTest.transport, now, anchorFailure)
-				setVaneFailureForTest(group, "challenger", transportTest.transport, now, exactFailure)
-				key := vaneAnchorKey{transport: transportTest.transport, scene: sceneTest.scene}
-				group.anchors[key] = vaneAnchor{name: "anchor"}
-
-				anchorScore := scoreVaneMetrics(sceneTest.scene, group.nodes["anchor"].snapshot(transportTest.transport, now))
-				challengerScore := scoreVaneMetrics(sceneTest.scene, group.nodes["challenger"].snapshot(transportTest.transport, now))
-				require.Equal(t, wantMargin, anchorScore-challengerScore)
-				require.Equal(t, "anchor", group.pick(metadata, transportTest.transport, false, true).Name(), "an exact margin must not switch")
-
-				setVaneFailureForTest(group, "challenger", transportTest.transport, now, exactFailure-0.00001)
-				challengerScore = scoreVaneMetrics(sceneTest.scene, group.nodes["challenger"].snapshot(transportTest.transport, now))
-				require.Greater(t, anchorScore-challengerScore, wantMargin)
-				require.Equal(t, "challenger", group.pick(metadata, transportTest.transport, false, true).Name(), "a strictly larger margin must switch")
-			})
-		}
-	}
-}
-
 func TestVaneTargetCooldownScopeAndAllCooledFallback(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	clock := &vaneFakeClock{now: now}
@@ -609,19 +548,31 @@ func TestVaneTargetCooldownScopeAndAllCooledFallback(t *testing.T) {
 	otherHost := &C.Metadata{Host: "two.example", DstPort: 443, NetWork: C.TCP}
 	otherPort := &C.Metadata{Host: "one.example", DstPort: 8443, NetWork: C.TCP}
 
+	// A per-target sticky choice for alpha, then alpha cools down for the
+	// target only.
+	group.mu.Lock()
+	for _, m := range []*C.Metadata{target, otherHost, otherPort} {
+		group.stickiness[vaneStickyKeyFor(m.Host, m.DstPort, vaneSceneDefault)] = vaneStickyChoice{
+			name:      "alpha",
+			expiresAt: clock.Now().Add(time.Minute),
+		}
+	}
+	group.mu.Unlock()
 	group.recordDialFailure(context.Background(), target, vaneTransportTCP, alpha, errors.New("refused"), clock.Now())
 	clearVaneMetricsForTest(group)
-	anchorKey := vaneAnchorKey{transport: vaneTransportTCP, scene: vaneSceneDefault}
-	group.anchors[anchorKey] = vaneAnchor{name: "alpha"}
-	require.Equal(t, "beta", group.pick(target, vaneTransportTCP, false, true).Name())
-	require.Equal(t, "alpha", group.anchors[anchorKey].name, "target cooldown must bypass rather than replace the global anchor")
-	require.Equal(t, "alpha", group.pick(otherHost, vaneTransportTCP, false, false).Name())
-	require.Equal(t, "alpha", group.pick(otherPort, vaneTransportTCP, false, false).Name())
+
+	require.Equal(t, "beta", group.pick(target, vaneTransportTCP, false, true).Name(),
+		"a cooled sticky choice must be bypassed, not returned")
+	require.Equal(t, "alpha", group.pick(otherHost, vaneTransportTCP, false, false).Name(),
+		"another host is unaffected by the target cooldown")
+	require.Equal(t, "alpha", group.pick(otherPort, vaneTransportTCP, false, false).Name(),
+		"another port is unaffected by the target cooldown")
 
 	clock.Add(time.Second)
 	group.recordDialFailure(context.Background(), target, vaneTransportTCP, beta, errors.New("refused"), clock.Now())
 	clearVaneMetricsForTest(group)
-	require.Equal(t, "alpha", group.pick(target, vaneTransportTCP, false, false).Name(), "when all candidates cool down, the earliest expiry must win")
+	require.Equal(t, "alpha", group.pick(target, vaneTransportTCP, false, false).Name(),
+		"when all candidates cool down, the earliest expiry must win")
 }
 
 func TestVaneNeutralDialErrorsDoNotPolluteMetricsOrCooldown(t *testing.T) {

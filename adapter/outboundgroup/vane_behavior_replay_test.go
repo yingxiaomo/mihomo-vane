@@ -27,6 +27,8 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 	choices = append(choices, group.pick(meta, vaneTransportTCP, true, true).Name())
 	group.recordDialFailure(context.Background(), meta, vaneTransportTCP, b, errors.New("replay failure"), clock.Now())
 	choices = append(choices, group.pick(meta, vaneTransportTCP, true, true).Name())
+	// STICKY: the per-host sticky choice lasts 60s. After it expires the
+	// pick re-ranks from scratch, so the faster connector (beta) wins.
 	clock.Advance(2 * time.Minute)
 	choices = append(choices, group.pick(meta, vaneTransportTCP, true, true).Name())
 	scores := []int64{}
@@ -45,7 +47,7 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 	// and this fixture varies only connect latency (900ms vs 20ms). That is a
 	// ~2.9% score difference, below the 5% strict margin, so the anchor is kept.
 	// The fixture now pins that "better connect alone does not justify a switch".
-	require.Equal(t, []string{"alpha", "alpha", "alpha", "alpha"}, choices)
+	require.Equal(t, []string{"alpha", "alpha", "alpha", "beta"}, choices)
 	// Absolute scores shift by the neutral profile blend; the ordering is the contract.
 	require.Equal(t, []int64{329620, 233812, 323671, 492767}, scores)
 }

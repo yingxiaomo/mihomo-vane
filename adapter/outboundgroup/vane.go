@@ -96,6 +96,10 @@ type vaneNodeState struct {
 	latencyMs      float64
 	latencySamples uint64
 	latencyAt      time.Time
+	// cooldown is the single node-level penalty of the simplified kernel (v3).
+	// It replaces mediaSlowCooldowns and the per-target mediaReconnects: when a
+	// flow is switched away from this node, the node rests for 30 minutes.
+	cooldown time.Time
 }
 
 // vaneProfileAgeReset is how long a profile counter stays meaningful. Older
@@ -265,6 +269,19 @@ type vaneAnchor struct {
 	scoreMicros int64
 }
 
+// vaneStickyChoice is the single per-target state of the simplified kernel
+// (v3). It replaces the anchor + preferences + handoffs + hints stack: one 60s
+// stickiness so a burst of connections to the same host keeps one exit, plus a
+// sliding 30-minute switch counter that throttles flapping.
+type vaneStickyChoice struct {
+	name             string
+	identity         string
+	expiresAt        time.Time
+	lastSwitch       time.Time
+	switchCount      int
+	switchWindowFrom time.Time
+}
+
 type vaneCooldownKey struct {
 	transport vaneTransport
 	target    string
@@ -321,6 +338,7 @@ type Vane struct {
 
 	mu                 sync.Mutex
 	nodes              map[string]*vaneNodeState
+	stickiness         map[vaneTargetKey]vaneStickyChoice
 	nodeControls       map[string]*vaneNodeControlState
 	nodeIdentities     map[string]string
 	anchors            map[vaneAnchorKey]vaneAnchor
@@ -472,6 +490,7 @@ func newVaneWithClock(
 		explorationSince:   clock.Now().UTC(),
 		diagnostics:        newVaneDiagnostics(option.Name, clock),
 		anchors:            make(map[vaneAnchorKey]vaneAnchor),
+		stickiness:         make(map[vaneTargetKey]vaneStickyChoice),
 		cooldowns:          make(map[vaneCooldownKey]time.Time),
 		mediaHints:         make(map[vaneMediaTargetKey]vaneMediaHint),
 		mediaReconnects:    make(map[vaneMediaNodeKey]time.Time),
@@ -1327,15 +1346,15 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	chosen := ranked[0]
 	if pinned != nil {
 		chosen = *pinned
-	} else if anchor.name != "" {
+	} else if stickyName, ok := a.stickyChoiceLocked(target, port, scene, now); ok {
+		// STICKY: a host keeps one exit for 60s so a burst of connections to the
+		// same site does not fan out across the pool. This replaces the old
+		// per-scene anchor, which made every site share one sticky slot.
 		for _, candidate := range ranked {
-			if candidate.name != anchor.name || candidate.cooldownUntil.After(now) {
-				continue
-			}
-			if candidate.name == chosen.name || chosen.scoreMicros+a.switchMargin >= candidate.scoreMicros {
+			if candidate.name == stickyName && !candidate.cooldownUntil.After(now) {
 				chosen = candidate
+				break
 			}
-			break
 		}
 	}
 	baseline := chosen
@@ -1363,6 +1382,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		// explicit exploration is an observation allocation, not an anchor vote.
 		if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
 			a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
+			a.rememberStickyLocked(target, port, scene, chosen.name, now)
 		}
 		selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 		// State liveness follows provider membership, not this selection's
@@ -1488,6 +1508,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			// preference should change for every target.
 			if !anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name {
 				a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
+				a.rememberStickyLocked(target, port, scene, chosen.name, now)
 			}
 			selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 			a.pruneLocked(now, proxies)

@@ -135,6 +135,56 @@ func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, boo
 	}, true
 }
 
+// vaneStickyTTL is how long a host stays on one exit after a pick.
+const vaneStickyTTL = 60 * time.Second
+
+// vaneStickySwitchWindow is the sliding window that bounds switchCount.
+const vaneStickySwitchWindow = 30 * time.Minute
+
+// vaneStickyKeyFor builds the per-host stickiness key. Unlike targetKeyForMedia
+// it does not require a media rule: every TCP host gets its own 60s slot, which
+// is the whole point of replacing the per-scene anchor.
+func vaneStickyKeyFor(target string, port uint16, scene vaneScene) vaneTargetKey {
+	return vaneTargetKey{transport: vaneTransportTCP, scene: scene, targetScope: target, port: port}
+}
+
+// stickyChoiceLocked reports the live sticky node for this host, if any.
+// The caller must hold a.mu.
+func (a *Vane) stickyChoiceLocked(target string, port uint16, scene vaneScene, now time.Time) (string, bool) {
+	choice, ok := a.stickiness[vaneStickyKeyFor(target, port, scene)]
+	if !ok || choice.name == "" || !choice.expiresAt.After(now) {
+		return "", false
+	}
+	return choice.name, true
+}
+
+// rememberStickyLocked pins this host to name for vaneStickyTTL and bumps the
+// 30 minute switch counter when the choice actually changes. The caller must
+// hold a.mu.
+func (a *Vane) rememberStickyLocked(target string, port uint16, scene vaneScene, name string, now time.Time) {
+	if name == "" {
+		return
+	}
+	identity := ""
+	if st := a.nodes[name]; st != nil {
+		identity = st.identity
+	}
+	key := vaneStickyKeyFor(target, port, scene)
+	choice := a.stickiness[key]
+	if choice.name != name || choice.identity != identity {
+		if now.Sub(choice.switchWindowFrom) > vaneStickySwitchWindow {
+			choice.switchCount = 0
+			choice.switchWindowFrom = now
+		}
+		choice.switchCount++
+		choice.lastSwitch = now
+	}
+	choice.name = name
+	choice.identity = identity
+	choice.expiresAt = now.Add(vaneStickyTTL)
+	a.stickiness[key] = choice
+}
+
 func (a *Vane) memberLeaseLocked(name, identity string) vaneMemberLease {
 	lease := vaneMemberLease{name: name, identity: identity}
 	if state := a.nodes[name]; state != nil && state.identity == identity {

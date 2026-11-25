@@ -809,6 +809,44 @@ func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
 	return scoreVaneMetricsParts(scene, snapshot).total
 }
 
+// vaneWeights is the single, scene-independent weight table of the simplified
+// kernel (v3). The owner wants "fastest first", so throughput is raised to 0.35
+// while every other dimension keeps the old default tier.
+var vaneWeights = vaneSceneWeights{0.35, 0.20, 0.15, 0.12, 0.06, 0.04, 0.03, 0.02, 0.02, 0.005, 0.005}
+
+// vaneScoringFlat returns the scoring config used once scene grouping is gone.
+// It mirrors the default tier except for the raised throughput weight.
+func vaneScoringFlat() vaneSceneScoring {
+	const mbps = 1_000_000
+	weights := vaneWeights
+	scoring := vaneSceneScoring{}
+	scoring.throughputWeight = weights.throughput
+	scoring.latencyWeight = weights.latency
+	scoring.lossWeight = weights.loss
+	scoring.failureWeight = weights.failure
+	scoring.responseWeight = weights.response
+	scoring.jitterWeight = weights.jitter
+	scoring.connectWeight = weights.connect
+	scoring.successWeight = weights.success
+	scoring.maxRateWeight = weights.maxRate
+	scoring.durationWeight = weights.duration
+	scoring.downloadTotalWeight = weights.downloadTotal
+	scoring.connectGoodMillis, scoring.connectBadMillis = 50, 1500
+	scoring.responseGoodMillis, scoring.responseBadMillis = 200, 3000
+	scoring.throughputLowBPS, scoring.throughputHighBPS = 1*mbps, 20*mbps
+	scoring.jitterGoodMillis, scoring.jitterBadMillis = 3, 100
+	// 50ms is a healthy CDN path; 500ms is the media chain's high-latency line.
+	scoring.latencyGoodMillis, scoring.latencyBadMillis = 50, 500
+	scoring.durationGoodSeconds = 10
+	scoring.durationBadSeconds = 300
+	return scoring.normalized()
+}
+
+// scoreVaneMetricsFlat is scoreVaneMetrics without the scene argument.
+func scoreVaneMetricsFlat(snapshot vaneMetricsSnapshot) int64 {
+	return scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot).total
+}
+
 // vaneScoreParts keeps each dimension's weighted contribution so a pick can be
 // explained in the log; total is the only thing ranking compares.
 type vaneScoreParts struct {
@@ -827,7 +865,10 @@ func (p vaneScoreParts) explain() string {
 }
 
 func scoreVaneMetricsParts(scene vaneScene, snapshot vaneMetricsSnapshot) vaneScoreParts {
-	config := vaneScoring(scene)
+	return scoreVaneMetricsPartsWith(vaneScoring(scene), snapshot)
+}
+
+func scoreVaneMetricsPartsWith(config vaneSceneScoring, snapshot vaneMetricsSnapshot) vaneScoreParts {
 	failure := vaneMetricCost(snapshot.failure, vaneMetricFailure, func(value float64) float64 {
 		return vaneClamp(value, 0, 1)
 	})
