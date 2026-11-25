@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dlclark/regexp2"
@@ -16,31 +17,23 @@ import (
 )
 
 func checkVaneRemovedFlowKeys(config map[string]any) error {
+	var found []string
 	for supplied := range config {
-		if strings.EqualFold(supplied, "racing") {
+		lower := strings.ToLower(supplied)
+		if lower == "racing" {
 			return fmt.Errorf("vane group: replace removed racing key with vane: true or false")
 		}
-	}
-	var found []string
-	for _, key := range vaneRemovedFlowKeys {
-		for supplied := range config {
-			if strings.EqualFold(supplied, key) {
-				found = append(found, key)
-				break
-			}
+		// REMOVED-KEYS: the flow model has no media grouping, so any media-*
+		// key is a leftover from a config that no longer parses into anything.
+		if strings.HasPrefix(lower, "media-") || lower == "racing-budget-mb-hour" {
+			found = append(found, supplied)
 		}
 	}
 	if len(found) != 0 {
-		return fmt.Errorf("vane flow thresholds %s are now hardcoded in the kernel; remove them from the config", strings.Join(found, ", "))
+		sort.Slice(found, func(i, j int) bool { return strings.ToLower(found[i]) < strings.ToLower(found[j]) })
+		return fmt.Errorf("vane group: %s was removed with the media grouping; delete it from the config", strings.Join(found, ", "))
 	}
 	return nil
-}
-
-var vaneRemovedFlowKeys = []string{
-	"media-low-throughput", "media-low-windows", "media-min-age", "media-min-bytes",
-	"media-buffer-guard", "media-reconnect-cooldown", "media-slow-cooldown", "media-hint-ttl",
-	"media-challenger-ratio", "media-reconnect-budget", "media-budget-window",
-	"media-max-low-windows", "racing-budget-mb-hour",
 }
 
 var (

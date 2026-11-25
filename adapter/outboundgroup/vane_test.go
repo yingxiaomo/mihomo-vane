@@ -248,7 +248,7 @@ func TestVaneFlowRemovedKeysRejected(t *testing.T) {
 			defer delete(config, key)
 			_, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
 			require.ErrorContains(t, err, key)
-			require.ErrorContains(t, err, "now hardcoded in the kernel")
+			require.ErrorContains(t, err, "was removed with the media grouping")
 			require.Empty(t, providers)
 		})
 	}
@@ -256,7 +256,10 @@ func TestVaneFlowRemovedKeysRejected(t *testing.T) {
 	config["media-buffer-guard"] = 3
 	config["media-max-low-windows"] = 0
 	_, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
-	require.EqualError(t, err, "vane flow thresholds media-low-throughput, media-buffer-guard, media-max-low-windows are now hardcoded in the kernel; remove them from the config")
+	require.ErrorContains(t, err, "was removed with the media grouping")
+	require.ErrorContains(t, err, "MEDIA-LOW-THROUGHPUT")
+	require.ErrorContains(t, err, "media-buffer-guard")
+	require.ErrorContains(t, err, "media-max-low-windows")
 	delete(config, "MEDIA-LOW-THROUGHPUT")
 	delete(config, "media-buffer-guard")
 	delete(config, "media-max-low-windows")
