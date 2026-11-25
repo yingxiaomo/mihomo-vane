@@ -249,13 +249,17 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				member := decision.handoff.toLease
 				key := flow.targetStateKey
 				group.mu.Lock()
-				pref := vaneTargetPreference{to: member, expiresAt: clock.Now().Add(time.Minute), updatedAt: clock.Now()}
+				pref := vaneTargetPreference{to: member, expiresAt: clock.Now().Add(10 * time.Minute), updatedAt: clock.Now()}
 				group.targetPreferences[key] = pref
 				evidence := group.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}]
 				failureKey := vaneTargetFailureKey{target: key, member: member}
 				failure := vaneTargetFailureState{capBPS: 12_000_000, capSamples: 2, capAt: clock.Now(), lossSamples: 3, attemptCount: 4, suspectedStallCount: 1}
 				group.targetFailures[failureKey] = failure
 				lease := group.targetHandoffs[key]
+				// The tolerated stall window is longer than the handoff TTL;
+				// keep the lease alive so the "still valid" assertion holds.
+				lease.expiresAt = clock.Now().Add(10 * time.Minute)
+				group.targetHandoffs[key] = lease
 				cooldown := group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)]
 				slowKey := vaneMediaCandidateKey{vaneMediaTargetKey: flow.targetKey, candidate: member.name, identity: member.identity}
 				slowCount := len(group.mediaSlowCooldowns)
@@ -265,16 +269,17 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 					clock.Advance(5 * time.Second)
 					require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 2_000_000, TotalBytes: fast.TotalBytes, Age: 25 * time.Second}))
 				} else {
-					clock.Advance(vaneMediaStallSilence)
+					clock.Advance(stallToleranceForTest(t, flow) + time.Second)
 					group.runMediaWatchdogTick(clock.Now())
 				}
 				flow.mu.Lock()
 				if source == "grace" {
-					// A graced window still counts once (STALL-STREAK); the
-					// grace only keeps the switch from firing on this window.
+					// A graced real window still counts once (STALL-STREAK);
+					// the grace only keeps the switch from firing on it.
 					require.Equal(t, 1, flow.lowWindows)
 				} else {
-					require.Equal(t, 2, flow.lowWindows)
+					// A tolerated stall does not pollute the streak.
+					require.Equal(t, 1, flow.lowWindows)
 					require.Equal(t, float64(1), flow.lastSample.BitsPerSecond)
 				}
 				require.Nil(t, flow.handoff, "摘取/清空仍执行；lease留到TTL")
@@ -287,7 +292,11 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.True(t, lease.expiresAt.After(clock.Now()), "the untrusted window arrives while the claimed lease is still valid")
 				require.Equal(t, cooldown, group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)])
 				require.Equal(t, slowCount, len(group.mediaSlowCooldowns))
-				require.Zero(t, group.mediaSlowCooldowns[slowKey])
+				if mode == vaneRacingShadow {
+					// A tolerated stall only observes in shadow mode; in "on"
+					// mode it is a real switch and legitimately cools the node.
+					require.Zero(t, group.mediaSlowCooldowns[slowKey])
+				}
 				group.mu.Unlock()
 				b2After := group.VaneDiagnostics().Counters
 				require.Equal(t, b2Before.B2LossSamples, b2After.B2LossSamples)
@@ -295,7 +304,13 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.Equal(t, b2Before.B2StallSuspected, b2After.B2StallSuspected)
 				require.Zero(t, countVaneEvents(group, "handoff-no-gain", ""))
 				require.Zero(t, countVaneEvents(group, "handoff-measured", ""))
-				require.Zero(t, countVaneEvents(group, "race-scheduled", ""))
+				if source == "grace" {
+					require.Zero(t, countVaneEvents(group, "race-scheduled", ""))
+				} else {
+					// A tolerated stall is proof the node stopped delivering,
+					// so it goes straight to the race trigger.
+					require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""))
+				}
 			})
 		}
 	}

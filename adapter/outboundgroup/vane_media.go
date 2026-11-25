@@ -63,6 +63,20 @@ const (
 	// grace, trigger, race and prepare chain all apply. The tick
 	// granularity bounds how late the first synthetic window can arrive.
 	vaneMediaStallSilence = 10 * time.Second
+	// STALL-TOLERANCE: how long a silent flow may stay silent before the
+	// watchdog calls it a stall. A DASH player drains its buffer between
+	// segments: the socket goes quiet, the client has nothing left to read
+	// and reports no backlog, so a fixed silence threshold cannot tell that
+	// gap from a dead node. The buffered playback time can: bytes already
+	// read, divided by the demand rate, is how long the client keeps playing
+	// without us. A flow that banked 534 MB at 15 Mbps is covered for
+	// minutes; a flow that stopped after 2 MB is covered for a second.
+	vaneMediaStallToleranceMin = 30 * time.Second
+	vaneMediaStallToleranceMax = 180 * time.Second
+	// SWITCH-EVIDENCE: a non-media flow has to move this many bytes before a
+	// low rate says anything about the node. A 30 KB API reply is not slow,
+	// it is small, and switching it burns the race budget the video needs.
+	vaneSwitchMinBytes    = int64(8 * 1024 * 1024)
 	vaneMediaWatchdogTick = 5 * time.Second
 	// BACKLOG-STREAK: how long one backlog sighting excuses low windows.
 	// A backgrounded player (browser tab, phone screen off) throttles or
@@ -447,13 +461,16 @@ func (f *vaneMediaFlow) observeSyntheticStall(now time.Time) {
 		return
 	}
 	f.mu.Lock()
-	if f.closed || f.aborted || !f.hasSample || f.lastSampleAt.IsZero() ||
-		now.Sub(f.lastSampleAt) < vaneMediaStallSilence {
+	if f.closed || f.aborted || !f.hasSample || f.lastSampleAt.IsZero() {
+		f.mu.Unlock()
+		return
+	}
+	silence := now.Sub(f.lastSampleAt)
+	if silence < f.stallToleranceLocked() {
 		f.mu.Unlock()
 		return
 	}
 	last := f.lastSample
-	silence := now.Sub(f.lastSampleAt)
 	f.mu.Unlock()
 	// BPS must stay positive: observe() treats <= 0 as "no sample". The byte
 	// total is the last real cumulative total (nothing arrived since), and
@@ -470,6 +487,25 @@ func (f *vaneMediaFlow) observeSyntheticStall(now time.Time) {
 	if action := f.observe(synthetic); action != nil {
 		f.submitPolicyAction(action, vaneActionIsImmediate(synthetic))
 	}
+}
+
+// stallToleranceLocked is how long this flow may stay silent before the
+// watchdog treats the silence as a stall: the playback time its already-read
+// bytes cover, clamped so a tiny flow is not switched on a whim and a huge
+// flow is not left stalled for minutes.
+func (f *vaneMediaFlow) stallToleranceLocked() time.Duration {
+	demand := f.group.media.demandBPS
+	if demand <= 0 {
+		return vaneMediaStallSilence
+	}
+	buffered := time.Duration(float64(f.lastSample.TotalBytes) * 8 / demand * float64(time.Second))
+	if buffered < vaneMediaStallToleranceMin {
+		return vaneMediaStallToleranceMin
+	}
+	if buffered > vaneMediaStallToleranceMax {
+		return vaneMediaStallToleranceMax
+	}
+	return buffered
 }
 
 func (f *vaneMediaFlow) failHandoff(reason string) {
@@ -635,6 +671,11 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		// forever, so a flow that stalled between bursts never reached the
 		// switch threshold and the player stayed stuck on a half-dead node.
 		switch {
+		case sample.synthetic:
+			// STALL-TOLERANCE: a silent window says nothing about the node's
+			// rate; the watchdog only synthesizes one after the flow outlived
+			// its buffered playback time. It must not touch the streak.
+			graceReason = ""
 		case !f.backloggedAt.IsZero() && now.Sub(f.backloggedAt) < vaneMediaBacklogGrace:
 			graceReason = "client-backlog"
 			// BACKLOG-STREAK: a client that is not reading (background tab,
@@ -668,6 +709,11 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	f.lastSample = sample
 	f.hasSample = true
 	lowWindows := f.lowWindows
+	if sample.synthetic {
+		// A tolerated stall is already proof the node stopped delivering, so
+		// the streak is not consulted: the flow goes straight to the trigger.
+		lowWindows = f.group.media.lowWindows
+	}
 	handoff := f.handoff
 	f.handoff = nil
 	f.mu.Unlock()
@@ -766,6 +812,12 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	// its life must not buy it more patience. Letting it do so is how a
 	// connection that downloaded 754 MB and then died kept its slot until the
 	// streak reached maxLowWindows.
+	// SWITCH-EVIDENCE: below this many bytes a low rate is the request being
+	// small, not the node being slow. Media targets keep the older, lower
+	// floor because a video flow proves itself by growing quickly.
+	if !f.flowMedia && sample.TotalBytes < vaneSwitchMinBytes {
+		return nil
+	}
 	if !sample.synthetic && creditBits < guardBits && lowWindows < config.maxLowWindows {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:       "buffer-credit-deferred",

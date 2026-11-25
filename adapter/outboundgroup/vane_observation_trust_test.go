@@ -40,6 +40,16 @@ func vaneObservationLowSample() vaneThroughputObservation {
 	return vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}
 }
 
+// stallToleranceForTest reports how long this flow may stay silent before the
+// watchdog synthesizes a window. Tests advance to the real threshold instead of
+// hard-coding a duration that now depends on how many bytes the flow banked.
+func stallToleranceForTest(t *testing.T, flow *vaneMediaFlow) time.Duration {
+	t.Helper()
+	flow.mu.Lock()
+	defer flow.mu.Unlock()
+	return flow.stallToleranceLocked()
+}
+
 // FAST-GRACE-01: a graced low still counts toward the streak, so a pulsing
 // node (one fast window every 30s, silence in between) can no longer defer the
 // switch forever. The grace only decides when the switch fires, it no longer
@@ -108,20 +118,21 @@ func TestVaneStallWatchdogSynthesizesWindows(t *testing.T) {
 			group, clock, flow := newVaneObservationRig(t, mode)
 			require.Nil(t, flow.observe(vaneObservationLowSample()))
 			require.Nil(t, flow.observe(vaneObservationLowSample()))
-			clock.Advance(9 * time.Second)
+			tol := stallToleranceForTest(t, flow)
+			clock.Advance(tol - time.Second)
 			group.runMediaWatchdogTick(clock.Now())
 			flow.mu.Lock()
 			count := flow.lowWindows
 			flow.mu.Unlock()
-			require.Equal(t, 2, count)
-			clock.Advance(time.Second)
+			require.Equal(t, 2, count, "still inside the tolerated silence")
+			clock.Advance(2 * time.Second)
 			group.runMediaWatchdogTick(clock.Now())
 			flow.mu.Lock()
-			require.Equal(t, 3, flow.lowWindows)
+			require.Equal(t, 2, flow.lowWindows, "a tolerated stall must not pollute the streak")
 			require.Equal(t, float64(1), flow.lastSample.BitsPerSecond)
 			require.True(t, flow.lastSample.untrusted)
 			require.Equal(t, vaneObservationLowSample().TotalBytes, flow.lastSample.TotalBytes)
-			require.Equal(t, 30*time.Second, flow.lastSample.Age)
+			require.Equal(t, 20*time.Second+tol+time.Second, flow.lastSample.Age)
 			flow.mu.Unlock()
 			require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""))
 		})
@@ -170,14 +181,14 @@ func TestVaneStallWatchdogRespectsGrace(t *testing.T) {
 		t.Run(mode.String(), func(t *testing.T) {
 			group, clock, flow := newVaneObservationRig(t, mode)
 			require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
-			clock.Advance(vaneMediaStallSilence)
+			clock.Advance(stallToleranceForTest(t, flow) + time.Second)
 			group.runMediaWatchdogTick(clock.Now())
 			flow.mu.Lock()
 			count := flow.lowWindows
 			flow.mu.Unlock()
-			require.Equal(t, 1, count, "a graced synthetic window still counts once")
-			require.Equal(t, 1, countVaneEvents(group, "low-window-graced", "recently-fast"))
-			require.Zero(t, countVaneEvents(group, "race-scheduled", ""), "one window is far below the threshold")
+			require.Equal(t, 0, count, "a tolerated stall is not a low window")
+			require.Zero(t, countVaneEvents(group, "low-window-graced", "recently-fast"))
+			require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""), "a tolerated stall goes straight to the trigger")
 		})
 	}
 }
@@ -206,8 +217,8 @@ func TestVaneStallWatchdogRealTickerLifecycle(t *testing.T) {
 			}
 			require.Eventually(t, watching, time.Second, time.Millisecond)
 			require.Nil(t, flow.observe(vaneObservationLowSample()))
-			clock.Advance(vaneMediaStallSilence)
-			require.Eventually(t, func() bool { flow.mu.Lock(); defer flow.mu.Unlock(); return flow.lowWindows == 2 }, vaneMediaWatchdogTick+2*time.Second, 10*time.Millisecond, "real ticker must synthesize a window")
+			clock.Advance(stallToleranceForTest(t, flow) + time.Second)
+			require.Eventually(t, func() bool { flow.mu.Lock(); defer flow.mu.Unlock(); return flow.lastSample.BitsPerSecond == 1 }, vaneMediaWatchdogTick+2*time.Second, 10*time.Millisecond, "real ticker must synthesize a window")
 			flow.markClosed()
 			flow.releaseActiveFlowCount()
 			group.mediaFlowsMu.Lock()
@@ -300,13 +311,13 @@ func TestVaneMediaSyntheticWindowIgnoresBufferCredit(t *testing.T) {
 	flow.lowWindows = 2
 	flow.mu.Unlock()
 
-	clock.Advance(vaneMediaStallSilence)
+	clock.Advance(stallToleranceForTest(t, flow) + time.Second)
 	group.runMediaWatchdogTick(clock.Now())
 
 	require.Zero(t, countVaneEvents(group, "buffer-credit-deferred", ""),
 		"a synthetic window must not be deferred by stale credit")
 	flow.mu.Lock()
-	require.Equal(t, 3, flow.lowWindows, "the synthetic window still counts")
+	require.Equal(t, 2, flow.lowWindows, "a tolerated stall leaves the streak alone")
 	flow.mu.Unlock()
 }
 
@@ -340,4 +351,36 @@ func TestVaneNonMediaFlowWatchedAndCanSwitch(t *testing.T) {
 		countVaneEvents(group, "reconnect-prepared", "") +
 		countVaneEvents(group, "reconnect-suppressed", "")
 	require.Greater(t, armed, 0, "a starving non-media flow must reach the switch path")
+}
+
+// STALL-TOLERANCE-01: the tolerated silence scales with the playback time the
+// already-read bytes cover, so a DASH gap on a big flow is ignored while a
+// flow that died early is switched quickly.
+func TestVaneStallToleranceScalesWithBufferedBytes(t *testing.T) {
+	_, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	flow.mu.Lock()
+	flow.lastSample = vaneThroughputObservation{TotalBytes: 500 * 1024 * 1024}
+	huge := flow.stallToleranceLocked()
+	flow.lastSample = vaneThroughputObservation{TotalBytes: 1024 * 1024}
+	tiny := flow.stallToleranceLocked()
+	flow.mu.Unlock()
+	require.Equal(t, vaneMediaStallToleranceMax, huge, "a huge buffer must clamp to the ceiling")
+	require.Equal(t, vaneMediaStallToleranceMin, tiny, "a small flow must clamp to the floor")
+}
+
+// SWITCH-EVIDENCE-01: a non-media flow that moved very little data never
+// triggers a switch, no matter how low its measured rate looks.
+func TestVaneNonMediaFlowNeedsEnoughBytesToSwitch(t *testing.T) {
+	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	flow.mu.Lock()
+	flow.flowMedia = false
+	flow.lowWindows = group.media.lowWindows
+	flow.mu.Unlock()
+	require.Nil(t, flow.observe(vaneThroughputObservation{
+		BitsPerSecond: 1_000_000,
+		TotalBytes:    4 * 1024 * 1024,
+		Age:           20 * time.Second,
+	}))
+	require.Zero(t, countVaneEvents(group, "race-scheduled", ""), "4 MiB is too little to blame the node")
 }

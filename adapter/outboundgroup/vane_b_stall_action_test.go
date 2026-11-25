@@ -49,7 +49,7 @@ func TestVaneStalledFlowSubmitsItsPlan(t *testing.T) {
 		BitsPerSecond: 40_000_000, TotalBytes: 8 << 20, Age: 20 * time.Second, Delivered: true,
 	})
 	for i := 0; i < 4 && len(delivered) == 0; i++ {
-		clock.Advance(vaneMediaStallSilence + 10*time.Second)
+		clock.Advance(stallToleranceForTest(t, flow) + 10*time.Second)
 		flow.observeSyntheticStall(clock.Now())
 	}
 	require.NotEmpty(t, delivered, "a stalled flow past the low-window line must still switch")

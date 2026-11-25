@@ -43,7 +43,7 @@ func TestVaneBacklogStampSuppressesSyntheticWindow(t *testing.T) {
 		}
 	})
 	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
-	clock.Advance(35 * time.Second)
+	clock.Advance(stallToleranceForTest(t, flow) + 5*time.Second)
 
 	flow.mu.Lock()
 	flow.backloggedAt = clock.Now()
