@@ -150,8 +150,21 @@ func vaneStickyKeyFor(target string, port uint16, scene vaneScene) vaneTargetKey
 
 // stickyChoiceLocked reports the live sticky node for this host, if any.
 // The caller must hold a.mu.
+// stickyKeyFor scopes the sticky choice by the media rule set that claims the
+// host, not by the host itself. A page and its CDN are different hostnames but
+// the same service, and the user's rule set already says so: "GEOSITE,youtube"
+// covers www.youtube.com and every rr*.googlevideo.com. Keying the sticky on
+// the raw host gave each of them its own choice, so a switch could leave the
+// page on one exit and the video on another — two IPs for one account.
+func (a *Vane) stickyKeyFor(target string, port uint16, scene vaneScene) vaneTargetKey {
+	if mediaKey := a.mediaTargetKey(target, port); mediaKey.target != "" {
+		return vaneTargetKey{transport: vaneTransportTCP, scene: scene, targetScope: mediaKey.target, port: port}
+	}
+	return vaneStickyKeyFor(target, port, scene)
+}
+
 func (a *Vane) stickyChoiceLocked(target string, port uint16, scene vaneScene, now time.Time) (string, bool) {
-	choice, ok := a.stickiness[vaneStickyKeyFor(target, port, scene)]
+	choice, ok := a.stickiness[a.stickyKeyFor(target, port, scene)]
 	if !ok || choice.name == "" || !choice.expiresAt.After(now) {
 		return "", false
 	}
@@ -169,7 +182,7 @@ func (a *Vane) rememberStickyLocked(target string, port uint16, scene vaneScene,
 	if st := a.nodes[name]; st != nil {
 		identity = st.identity
 	}
-	key := vaneStickyKeyFor(target, port, scene)
+	key := a.stickyKeyFor(target, port, scene)
 	choice := a.stickiness[key]
 	if choice.name != name || choice.identity != identity {
 		if now.Sub(choice.switchWindowFrom) > vaneStickySwitchWindow {

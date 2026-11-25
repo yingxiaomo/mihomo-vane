@@ -384,3 +384,17 @@ func TestVaneNonMediaFlowNeedsEnoughBytesToSwitch(t *testing.T) {
 	}))
 	require.Zero(t, countVaneEvents(group, "race-scheduled", ""), "4 MiB is too little to blame the node")
 }
+
+// STICKY-FAMILY-01: a page and its CDN share one sticky choice because the
+// rule set scopes them into the same bucket. Without this, a switch could leave
+// the page on one exit and the video on another — two IPs for one account.
+func TestVaneStickyIsScopedByRuleSetFamily(t *testing.T) {
+	group, clock, _ := newVaneObservationRig(t, vaneRacingOn)
+	now := clock.Now()
+	group.mu.Lock()
+	group.rememberStickyLocked("www.googlevideo.com", 443, vaneSceneMedia, "alpha", now)
+	name, ok := group.stickyChoiceLocked("rr1.googlevideo.com", 443, vaneSceneMedia, now)
+	group.mu.Unlock()
+	require.True(t, ok, "the CDN host must inherit the family choice")
+	require.Equal(t, "alpha", name)
+}
