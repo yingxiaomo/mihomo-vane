@@ -178,10 +178,13 @@ func (a *Vane) rememberStickyLocked(target string, port uint16, scene vaneScene,
 		}
 		choice.switchCount++
 		choice.lastSwitch = now
+		// STICKY-RENEW: only a real change of exit renews the window. Renewing
+		// on every hit pinned the host forever — each new connection pushed
+		// expiresAt out another 60s, so a slow node was never re-evaluated.
+		choice.expiresAt = now.Add(vaneStickyTTL)
 	}
 	choice.name = name
 	choice.identity = identity
-	choice.expiresAt = now.Add(vaneStickyTTL)
 	a.stickiness[key] = choice
 }
 

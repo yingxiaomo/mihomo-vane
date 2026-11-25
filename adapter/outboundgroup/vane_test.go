@@ -1013,3 +1013,26 @@ func proxyNames(proxies []C.Proxy) []string {
 	}
 	return names
 }
+
+// STICKY-RENEW: a sticky hit must not push the expiry out again, or a host
+// ends up pinned to a slow node forever (every new connection renews 60s).
+func TestVaneStickyDoesNotRenewOnHit(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	now := clock.Now()
+	k := vaneStickyKeyFor("sticky-renew.example.com", 443, vaneSceneDefault)
+
+	group.mu.Lock()
+	group.rememberStickyLocked("sticky-renew.example.com", 443, vaneSceneDefault, "alpha", now)
+	first := group.stickiness[k].expiresAt
+	group.mu.Unlock()
+	require.Equal(t, now.Add(vaneStickyTTL), first)
+
+	clock.Advance(20 * time.Second)
+	group.mu.Lock()
+	group.rememberStickyLocked("sticky-renew.example.com", 443, vaneSceneDefault, "alpha", clock.Now())
+	second := group.stickiness[k].expiresAt
+	group.mu.Unlock()
+	require.Equal(t, first, second, "a sticky hit must not push the expiry out")
+}
