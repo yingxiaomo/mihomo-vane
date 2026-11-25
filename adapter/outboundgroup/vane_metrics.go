@@ -267,8 +267,8 @@ func matchVaneFamilyRule(metadata *C.Metadata, rules []vaneFamilyRule) (vaneFami
 	return vaneFamilyRule{}, false
 }
 
-// scope returns the gate scope this rule carries when it classifies a flow as
-// media: the domain for DOMAIN / DOMAIN-SUFFIX, the provider name for
+// scope returns the gate scope this rule carries: the domain for DOMAIN /
+// DOMAIN-SUFFIX, the provider name for
 // RULE-SET, the category name for GEOSITE. Rules that match on something other
 // than a target identity (NETWORK, DST-PORT, IN-NAME, IN-USER, PROCESS,
 // PROCESS-PATH, DSCP) carry no scope and return "".
@@ -729,7 +729,7 @@ func vaneScoringFlat() vaneScoringConfig {
 	scoring.responseGoodMillis, scoring.responseBadMillis = 200, 3000
 	scoring.throughputLowBPS, scoring.throughputHighBPS = 1*mbps, 20*mbps
 	scoring.jitterGoodMillis, scoring.jitterBadMillis = 3, 100
-	// 50ms is a healthy CDN path; 500ms is the media chain's high-latency line.
+	// 50ms is a healthy CDN path; 500ms is the high-latency line.
 	scoring.latencyGoodMillis, scoring.latencyBadMillis = 50, 500
 	scoring.durationGoodSeconds = 10
 	scoring.durationBadSeconds = 300
@@ -819,7 +819,7 @@ func vaneMetricCost(estimate vaneMetricEstimate, kind vaneMetricKind, observed f
 }
 
 // vaneLossCost: under 1% retransmission is healthy, over 5% is degraded — the
-// same line the media chain uses, so scoring and switching agree.
+// same line the reconnect path uses, so scoring and switching agree.
 func vaneLossCost(rate float64) float64 {
 	return vaneClamp((rate-0.01)/0.04, 0, 1)
 }
@@ -836,7 +836,7 @@ func vaneDownloadTotalCost(logBytes float64) float64 {
 	return 1 - vaneClamp((logBytes-6)/2, 0, 1)
 }
 
-// vaneLatencyHardCapMs is a hard pick-time filter: a node whose media-window
+// vaneLatencyHardCapMs is a hard pick-time filter: a node whose live-window
 // RTT EMA exceeds it is not ranked at all. 350ms is roughly a round trip most
 // of the way around the planet. Nodes without live samples are never capped.
 const vaneLatencyHardCapMs = 350.0

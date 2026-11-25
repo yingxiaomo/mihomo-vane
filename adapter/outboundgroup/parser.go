@@ -3,7 +3,6 @@ package outboundgroup
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/dlclark/regexp2"
@@ -15,26 +14,6 @@ import (
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
 )
-
-func checkVaneRemovedFlowKeys(config map[string]any) error {
-	var found []string
-	for supplied := range config {
-		lower := strings.ToLower(supplied)
-		if lower == "racing" {
-			return fmt.Errorf("vane group: replace removed racing key with vane: true or false")
-		}
-		// REMOVED-KEYS: the flow model has no media grouping, so any media-*
-		// key is a leftover from a config that no longer parses into anything.
-		if strings.HasPrefix(lower, "media-") || lower == "racing-budget-mb-hour" {
-			found = append(found, supplied)
-		}
-	}
-	if len(found) != 0 {
-		sort.Slice(found, func(i, j int) bool { return strings.ToLower(found[i]) < strings.ToLower(found[j]) })
-		return fmt.Errorf("vane group: %s was removed with the media grouping; delete it from the config", strings.Join(found, ", "))
-	}
-	return nil
-}
 
 var (
 	errFormat            = errors.New("format error")
@@ -80,9 +59,6 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		return nil, errFormat
 	}
 	if groupOption.Type == "vane" {
-		if err := checkVaneRemovedFlowKeys(config); err != nil {
-			return nil, err
-		}
 	}
 
 	if _, ok := config["routing-mark"]; ok {

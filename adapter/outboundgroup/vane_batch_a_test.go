@@ -2,7 +2,6 @@ package outboundgroup
 
 import (
 	"context"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -18,24 +17,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
-
-// VANE-CONFIG-01: reject presence, not a decoded value, before registering providers.
-func TestVaneConfigRejectsLegacyRacingPresence(t *testing.T) {
-	for _, key := range []string{"racing", "RACING", "RaCiNg"} {
-		for _, value := range []any{"on", "shadow", "off", "", nil, false, 0} {
-			t.Run(fmt.Sprintf("%s/%v", key, value), func(t *testing.T) {
-				providers := map[string]P.ProxyProvider{}
-				_, err := ParseProxyGroup(map[string]any{
-					"name": "legacy", "type": "vane", "proxies": []string{"alpha"}, key: value,
-				}, map[string]C.Proxy{"COMPATIBLE": newVaneTestProxy("COMPATIBLE", true, false), "alpha": newVaneTestProxy("alpha", true, true)}, providers, nil, nil)
-				require.ErrorContains(t, err, "racing")
-				require.ErrorContains(t, err, "vane")
-				require.ErrorContains(t, err, "replace")
-				require.Empty(t, providers)
-			})
-		}
-	}
-}
 
 // VANE-CONFIG-02 / VANE-OFF-01 / VANE-ON-01: the real parser and DialContext wiring.
 func TestVaneConfigSwitchRunsActualRace(t *testing.T) {

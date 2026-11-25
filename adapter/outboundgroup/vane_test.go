@@ -229,51 +229,6 @@ func TestNewVaneOptions(t *testing.T) {
 	require.EqualError(t, err, "empty fallback proxy not exist")
 }
 
-func TestVaneFlowRemovedKeysRejected(t *testing.T) {
-	keys := []string{
-		"media-low-throughput", "media-low-windows", "media-min-age", "media-min-bytes",
-		"media-buffer-guard", "media-reconnect-cooldown", "media-slow-cooldown", "media-hint-ttl",
-		"media-challenger-ratio", "media-reconnect-budget", "media-budget-window",
-		"media-max-low-windows", "racing-budget-mb-hour",
-	}
-	proxyMap := map[string]C.Proxy{
-		"COMPATIBLE": newVaneTestProxy("COMPATIBLE", true, false),
-		"alpha":      newVaneTestProxy("alpha", true, true),
-	}
-	config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "demand-bps": 5_000_000}
-	providers := map[string]P.ProxyProvider{}
-	for _, key := range keys {
-		t.Run(key, func(t *testing.T) {
-			config[key] = 0
-			defer delete(config, key)
-			_, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
-			require.ErrorContains(t, err, key)
-			require.ErrorContains(t, err, "was removed with the media grouping")
-			require.Empty(t, providers)
-		})
-	}
-	config["MEDIA-LOW-THROUGHPUT"] = nil
-	config["media-buffer-guard"] = 3
-	config["media-max-low-windows"] = 0
-	_, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
-	require.ErrorContains(t, err, "was removed with the media grouping")
-	require.ErrorContains(t, err, "MEDIA-LOW-THROUGHPUT")
-	require.ErrorContains(t, err, "media-buffer-guard")
-	require.ErrorContains(t, err, "media-max-low-windows")
-	delete(config, "MEDIA-LOW-THROUGHPUT")
-	delete(config, "media-buffer-guard")
-	delete(config, "media-max-low-windows")
-	parsed, err := ParseProxyGroup(config, proxyMap, providers, nil, nil)
-	require.NoError(t, err)
-	group := parsed.(*Vane)
-	t.Cleanup(func() { _ = group.Close() })
-	require.Equal(t, 4, group.flow.maxLowWindows)
-	require.Equal(t, float64(5_000_000), group.flow.demandBPS)
-}
-
-// DEMAND-01..04: media-demand-bps accepts a decimal-suffixed string ("10M")
-// and a plain byte count interchangeably; "10M" is exactly 10000000, so the
-// string form never shifts the demand.
 func TestVaneFlowDemandBandwidthParsing(t *testing.T) {
 	proxyMap := map[string]C.Proxy{
 		"COMPATIBLE": newVaneTestProxy("COMPATIBLE", true, false),

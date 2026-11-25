@@ -217,7 +217,7 @@ func (a *Vane) scheduleReconnectRace(request vaneRaceRequest, callback func(vane
 	}
 	// An empty targetScope means the flow is not gate-eligible. The scope comes
 	// from reconnect-domains, or — when that gate is empty — from the
-	// scene rule that classified the flow as media (SCENE-GATE-001).
+	// family rule that scoped the flow (SCENE-GATE-001).
 	if callback == nil || request.targetKey.targetScope == "" {
 		return false, "invalid-race-request"
 	}

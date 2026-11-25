@@ -105,7 +105,7 @@ const (
 	vaneB2StallMinAge      = 10 * time.Second
 	vaneB2StallMinAttempts = 5
 	// Step 3 selection guard rails (B2-STEP3-001 / B2-STEP3-002): a healthy
-	// path retransmits well under 1%, so 5% is already visibly bad for media,
+	// path retransmits well under 1%, so 5% is already visibly bad for a stream,
 	// and stalling one time in five is frequent enough to step aside.
 	vaneLossDegradedThreshold  = 0.05
 	vaneStallFrequentThreshold = 0.20
@@ -598,7 +598,7 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	// RACE-01: the race (or the on+knownGood path) may have admitted this
 	// challenger minutes ago. If the target itself has since produced fresh
 	// evidence below the original bar, refuse before touching budget/cooldown.
-	// RESCUE: same rule as the media commit — demand gates the current flow,
+	// RESCUE: same rule as the reconnect commit — demand gates the current flow,
 	// not the challenger that rescues it.
 	requiredBPS := plan.currentBPS * a.flow.challengerRatio
 	if targetBPS, fresh, degraded := a.targetEvidenceLocked(key, to, now); fresh && (degraded || targetBPS < requiredBPS) {
