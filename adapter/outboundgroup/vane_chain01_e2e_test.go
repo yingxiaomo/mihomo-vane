@@ -202,7 +202,10 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 // is created, and the close itself is vetoed outright (the close bar includes
 // demand) — the flow survives on the slow node rather than being cut to a
 // node that cannot carry 4K.
-func TestVaneChain01E2EDemandGatesTheClose(t *testing.T) {
+// RESCUE-03: end to end, a 6 Mbps probe must rescue a starving flow even when
+// demand is 10 Mbps. Demand describes what the current flow needs, not what a
+// replacement has to reach.
+func TestVaneChain01E2ERescueBeatsDemand(t *testing.T) {
 	const demand = 10_000_000
 
 	clock := newVaneConnTestClock()
@@ -223,8 +226,8 @@ func TestVaneChain01E2EDemandGatesTheClose(t *testing.T) {
 	chain01ProductionValues(t, group, demand)
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
-		// A 6 Mbps probe clears the 5 Mbps slow line but not the 10M
-		// demand-inclusive close bar: the gate must hold.
+		// A 6 Mbps probe clears the 5 Mbps slow line and the 1.25x ratio for
+		// this starving flow, so the gate must let it through.
 		return vaneProbeResult{
 			valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
 			duration: time.Second, lowerBoundBPS: 6_000_000, capHit: true,
@@ -257,19 +260,17 @@ func TestVaneChain01E2EDemandGatesTheClose(t *testing.T) {
 	// (8 MiB*8 - 10M*30s < 10M*5s), so keep driving until the gate speaks.
 	for i := 0; i < 8; i++ {
 		driveSlow(1)
-		snapshot := group.VaneDiagnostics()
-		if snapshot.Suppressions["no-evidence-candidate"] > 0 {
+		if group.VaneDiagnostics().Counters.HandoffCommitted > 0 {
 			break
 		}
 	}
 
 	snapshot := group.VaneDiagnostics()
-	require.GreaterOrEqual(t, snapshot.Suppressions["no-evidence-candidate"], uint64(1),
-		"a 6 Mbps probe cannot justify cutting a 4K flow when demand is 10M")
-	require.Zero(t, snapshot.Counters.HandoffCommitted)
+	require.GreaterOrEqual(t, snapshot.Counters.HandoffCommitted, uint64(1),
+		"a 6 Mbps probe must rescue a starving flow even when demand is 10M")
 	slowConn.mu.Lock()
 	closeCalls := slowConn.closeCalls
 	slowConn.mu.Unlock()
-	require.Zero(t, closeCalls, "the flow must survive: no candidate clears the demand-inclusive bar")
+	require.Positive(t, closeCalls, "the starving flow must be cut")
 	require.NoError(t, first.Close())
 }

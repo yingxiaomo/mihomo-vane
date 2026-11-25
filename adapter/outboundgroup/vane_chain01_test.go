@@ -210,7 +210,7 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 		require.Positive(t, group.VaneDiagnostics().Counters.HandoffImproved)
 	})
 
-	t.Run("6 Mbps below the 10M bar does not close", func(t *testing.T) {
+	t.Run("6 Mbps above the slow line rescues a 1.6 Mbps flow", func(t *testing.T) {
 		clock := newVaneConnTestClock()
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
@@ -222,8 +222,10 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		plan, reason := chain01Prepare(t, group, metadata, alpha, 1_600_000)
-		require.Equal(t, "no-evidence-candidate", reason)
-		require.Empty(t, plan.challenger)
+		// RESCUE: 6 Mbps clears the slow line and the 1.25x ratio, so it is a
+		// valid rescue for a 1.6 Mbps flow even though demand is 10 Mbps.
+		require.Empty(t, reason)
+		require.Equal(t, beta.Name(), plan.challenger)
 	})
 }
 

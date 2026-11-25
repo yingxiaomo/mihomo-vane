@@ -25,13 +25,18 @@ const (
 	vaneDefaultMediaDemandBPS        = int64(1_000_000)
 	vaneDefaultMediaBufferGuard      = 5 * time.Second
 	vaneDefaultMediaReconnectDelay   = 10 * time.Minute
-	vaneDefaultMediaSlowCooldown     = 30 * time.Minute
-	vaneDefaultMediaHintTTL          = 15 * time.Second
-	vaneDefaultMediaChallengerRatio  = 1.25
-	vaneDefaultMediaBudgetMax        = 3
-	vaneDefaultMediaBudgetWindow     = 30 * time.Minute
-	vaneMediaEvidenceMaxAge          = 10 * time.Minute
-	vaneMaximumMediaThroughputBPS    = int64(1_000_000_000)
+	// BREAK-WINDOW: a switch that lands on a worse node must not freeze the
+	// target for the whole reconnect cooldown. Once the new flow is starving
+	// again and this window has passed, one retry is allowed; the budget still
+	// caps the total number of switches per window.
+	vaneMediaBreakWindow            = 5 * time.Minute
+	vaneDefaultMediaSlowCooldown    = 30 * time.Minute
+	vaneDefaultMediaHintTTL         = 15 * time.Second
+	vaneDefaultMediaChallengerRatio = 1.25
+	vaneDefaultMediaBudgetMax       = 3
+	vaneDefaultMediaBudgetWindow    = 30 * time.Minute
+	vaneMediaEvidenceMaxAge         = 10 * time.Minute
+	vaneMaximumMediaThroughputBPS   = int64(1_000_000_000)
 	// B-part degradation lines. Loss reuses the 5% the B2 loss EMA already
 	// treats as degraded (healthy paths retransmit < 1%); latency is where a
 	// video path is visibly unusable (production saw 800 ms), far above the
@@ -807,9 +812,11 @@ func (f *vaneMediaFlow) completeMediaPlan(plan *vaneMediaPlan, sample vaneThroug
 }
 
 func (f *vaneMediaFlow) raceRequest(sample vaneThroughputObservation, lowWindows int) vaneRaceRequest {
+	// RESCUE: the race asks for a node that beats the current flow, not one that
+	// already reaches demand — a 1 bps flow would otherwise race for nothing.
 	required := sample.BitsPerSecond * f.group.media.challengerRatio
-	if required < f.group.media.demandBPS {
-		required = f.group.media.demandBPS
+	if required < f.group.media.lowThroughputBPS {
+		required = f.group.media.lowThroughputBPS
 	}
 	f.group.mu.Lock()
 	f.group.learning.mu.Lock()
@@ -1118,6 +1125,24 @@ type vaneMediaPlan struct {
 	skipReconnectCooldown bool
 }
 
+// mediaCooldownBlocksLocked reports whether the reconnect cooldown still
+// forbids another switch for this target. BREAK-WINDOW: the cooldown exists to
+// stop flapping, not to trap a target on a node that is already starving. When
+// the current flow is back below the low line and the break window has elapsed
+// since the switch that armed the cooldown, one retry is allowed. The caller
+// still has to pass the challenger evidence bar and the budget.
+func (a *Vane) mediaCooldownBlocksLocked(targetKey vaneMediaTargetKey, currentBPS float64, now time.Time) bool {
+	until := a.mediaReconnects[targetKey]
+	if !until.After(now) {
+		return false
+	}
+	if currentBPS >= a.media.lowThroughputBPS {
+		return true
+	}
+	lastSwitch := until.Add(-a.media.reconnectCooldown)
+	return now.Sub(lastSwitch) < vaneMediaBreakWindow
+}
+
 type vaneLockedProxyProvider interface {
 	ProxiesWithLock() ([]C.Proxy, func())
 }
@@ -1210,10 +1235,10 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 	// CHAIN-01: capability evidence is read before a.mu; no path may hold
 	// racingRuntime.mu together with a.mu (see snapshotFreshCapabilities).
 	capSnapshot := a.snapshotFreshCapabilities(now)
+	// RESCUE: demand is the bar the *current* flow has to clear, never the bar
+	// a rescue challenger has to clear. A 1 bps flow must be allowed to move to
+	// any node that beats the slow line by the challenger ratio.
 	requiredBPS := currentBPS * a.media.challengerRatio
-	if requiredBPS < a.media.demandBPS {
-		requiredBPS = a.media.demandBPS
-	}
 	improvementBar := a.media.lowThroughputBPS
 	if requiredBPS > improvementBar {
 		improvementBar = requiredBPS
@@ -1234,10 +1259,8 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 	a.pruneMediaLocked(now)
 	// §E: the valve's re-run carries its own skip flag — the cooldown it would
 	// hit was written by the very commit being re-evaluated.
-	if !skipReconnectCooldown {
-		if until := a.mediaReconnects[targetKey]; until.After(now) {
-			return vaneMediaPlan{}, "reconnect-cooldown"
-		}
+	if !skipReconnectCooldown && a.mediaCooldownBlocksLocked(targetKey, currentBPS, now) {
+		return vaneMediaPlan{}, "reconnect-cooldown"
 	}
 	budget := a.mediaBudgets[targetKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
@@ -1443,7 +1466,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 	if now.Sub(plan.preparedAt) > a.media.hintTTL {
 		return "plan-expired"
 	}
-	if !plan.skipReconnectCooldown && a.mediaReconnects[plan.targetKey].After(now) {
+	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(plan.targetKey, plan.currentBPS, now) {
 		return "reconnect-cooldown"
 	}
 	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: plan.target, port: plan.port, candidate: plan.challenger, identity: plan.challengerIdentity}
@@ -1555,8 +1578,9 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 // The target tier is REQUIRED: a target-evidence race winner never writes the
 // capability cache (runMediaRace returns early), so without this tier commit
 // would veto a legitimate winner. The bar mirrors RACE-01's required
-// (max(currentBPS x challengerRatio, demand)) plus the 5 Mbps slow line:
-// bar = max(5M, currentBPS x 1.25, demandBPS). KnownGood plans are NOT exempt:
+// (max(currentBPS x challengerRatio, the 5 Mbps slow line)): demand is
+// deliberately absent — it gates the current flow, not its rescue. KnownGood
+// plans are NOT exempt:
 // the target tier can still veto them (deliberate target-level strictness).
 func (a *Vane) checkChallengerEvidenceLocked(plan vaneMediaPlan, caps map[vaneMemberLease]float64, now time.Time) string {
 	lease := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: plan.challengerEpoch}

@@ -895,7 +895,10 @@ func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
 
 // CHAIN-09: demand dominates the low-throughput line. A 6 Mbps candidate is
 // not admissible when demand is 8 Mbps, and the race bar is 8 Mbps.
-func TestVaneDemandDominatesCandidateAdmission(t *testing.T) {
+// RESCUE-02: demand gates the current flow, not the challenger that replaces
+// it. A 1.6 Mbps flow may move to a 6 Mbps node even when demand is 8 Mbps;
+// before the fix the demand floor made every such candidate invisible.
+func TestVaneDemandDoesNotGateRescueCandidate(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
@@ -921,15 +924,15 @@ func TestVaneDemandDominatesCandidateAdmission(t *testing.T) {
 	plan, reason := group.prepareMediaReconnectForNodeDetailed(
 		key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_600_000,
 	)
-	require.Equal(t, "no-evidence-candidate", reason)
-	require.Empty(t, plan.challenger)
+	require.Empty(t, reason)
+	require.Equal(t, beta.Name(), plan.challenger)
 
 	flow := newVaneMediaFlow(group, "alpha", metadata)
 	require.NotNil(t, flow)
 	request := flow.raceRequest(vaneThroughputObservation{
 		BitsPerSecond: 1_600_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
 	}, 3)
-	require.Equal(t, float64(8_000_000), request.requiredBPS)
+	require.Equal(t, float64(5_000_000), request.requiredBPS)
 	group.mu.Lock()
 	require.Empty(t, group.targetPreferences)
 	group.mu.Unlock()
@@ -960,4 +963,81 @@ func TestVaneCommitAcceptsRescueBelowDemand(t *testing.T) {
 
 	require.Empty(t, group.commitMediaReconnectDetailed(plan),
 		"a 13.6 Mbps challenger must rescue a 1 bps flow even though demand is 15 Mbps")
+}
+
+// BREAK-WINDOW: a switch that lands on a worse node must not freeze the target
+// for the whole reconnect cooldown. Once the replacement flow is starving
+// again and the break window has elapsed, one retry is allowed.
+func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
+	newRig := func(t *testing.T) (*Vane, *vaneConnTestClock, *C.Metadata, vaneMediaTargetKey, *vaneTestProxy) {
+		t.Helper()
+		clock := newVaneConnTestClock()
+		alpha := newVaneTestProxy("alpha", true, true)
+		beta := newVaneTestProxy("beta", true, true)
+		beta.delay = 10
+		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		group.media.lowThroughputBPS = 5_000_000
+		group.media.demandBPS = 8_000_000
+		// Production cooldown is 10 minutes; the break window has to sit well
+		// inside it for the rule to matter.
+		group.media.reconnectCooldown = 10 * time.Minute
+		now := clock.Now()
+		group.mu.Lock()
+		group.learning.mu.Lock()
+		require.NotNil(t, group.ensureProxyNodeLocked(alpha, now))
+		require.NotNil(t, group.ensureProxyNodeLocked(beta, now))
+		group.nodeControls["beta"].recentTCPThroughput = vaneRecentThroughput{
+			bitsPerSecond: 6_000_000, observedAt: now,
+		}
+		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+		key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+		group.mediaReconnects[key] = now.Add(group.media.reconnectCooldown)
+		group.learning.mu.Unlock()
+		group.mu.Unlock()
+		return group, clock, metadata, key, beta
+	}
+
+	t.Run("starving flow retries after the break window", func(t *testing.T) {
+		group, clock, metadata, key, beta := newRig(t)
+		group.mu.Lock()
+		alphaState := group.nodes["alpha"]
+		group.mu.Unlock()
+		require.NotNil(t, alphaState)
+
+		_, reason := group.prepareMediaReconnectForNodeDetailed(
+			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_000_000,
+		)
+		require.Equal(t, "reconnect-cooldown", reason,
+			"inside the break window the cooldown still holds")
+
+		clock.Advance(vaneMediaBreakWindow + time.Second)
+		plan, reason := group.prepareMediaReconnectForNodeDetailed(
+			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_000_000,
+		)
+		require.Empty(t, reason, "a starving flow must be able to retry after the break window")
+		require.Equal(t, beta.Name(), plan.challenger)
+	})
+
+	t.Run("healthy flow keeps the cooldown", func(t *testing.T) {
+		group, clock, metadata, key, _ := newRig(t)
+		group.mu.Lock()
+		group.learning.mu.Lock()
+		alphaState := group.nodes["alpha"]
+		// A 20 Mbps flow needs a 25 Mbps challenger to be worth switching to;
+		// give beta that much so the candidate bar is not what stops the plan.
+		group.nodeControls["beta"].recentTCPThroughput = vaneRecentThroughput{
+			bitsPerSecond: 30_000_000, observedAt: clock.Now(),
+		}
+		group.learning.mu.Unlock()
+		group.mu.Unlock()
+		require.NotNil(t, alphaState)
+
+		clock.Advance(vaneMediaBreakWindow + time.Second)
+		_, reason := group.prepareMediaReconnectForNodeDetailed(
+			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 20_000_000,
+		)
+		require.Equal(t, "reconnect-cooldown", reason,
+			"a flow above the slow line must not break its own cooldown")
+	})
 }

@@ -523,17 +523,16 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	}
 	// §E: valve plans skip the cooldown they are re-evaluating (no valve plan
 	// reaches the target commit today, but the flag rides the shared plan).
-	if !plan.skipReconnectCooldown && a.mediaReconnects[plan.targetKey].After(now) {
+	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(plan.targetKey, plan.currentBPS, now) {
 		return "reconnect-cooldown"
 	}
 	to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: challengerState.epoch}
 	// RACE-01: the race (or the on+knownGood path) may have admitted this
 	// challenger minutes ago. If the target itself has since produced fresh
 	// evidence below the original bar, refuse before touching budget/cooldown.
+	// RESCUE: same rule as the media commit — demand gates the current flow,
+	// not the challenger that rescues it.
 	requiredBPS := plan.currentBPS * a.media.challengerRatio
-	if requiredBPS < a.media.demandBPS {
-		requiredBPS = a.media.demandBPS
-	}
 	if targetBPS, fresh, degraded := a.targetEvidenceLocked(key, to, now); fresh && (degraded || targetBPS < requiredBPS) {
 		return "challenger-evidence-degraded"
 	}
@@ -620,9 +619,11 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		return
 	}
 	now := a.clock.Now()
+	// RESCUE: a handoff counts as a gain when it beats the flow it replaced,
+	// not when it already reaches demand.
 	required := token.previousBPS * a.media.challengerRatio
-	if required < a.media.demandBPS {
-		required = a.media.demandBPS
+	if required < a.media.lowThroughputBPS {
+		required = a.media.lowThroughputBPS
 	}
 	kind := "handoff-no-gain"
 	a.mu.Lock()
