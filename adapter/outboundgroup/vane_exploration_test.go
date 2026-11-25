@@ -154,7 +154,7 @@ func TestVaneExplorationMediaHandoffAlwaysWinsWithoutAdvancingCadence(t *testing
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 16, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	enableVaneExplorationForTest(group, 2)
 	metadata := vaneExplorationMetadata("rr1.googlevideo.com", C.TCP)
 
@@ -433,7 +433,7 @@ func TestVaneReadOnlySelectorsDoNotPruneExpiredCooldowns(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 16, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	metadata := vaneExplorationMetadata("rr1.googlevideo.com", C.TCP)
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 

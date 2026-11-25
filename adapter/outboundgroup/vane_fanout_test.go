@@ -11,7 +11,7 @@ import (
 // same (target, node) too, while leaving flows on other nodes alone.
 func TestVaneMediaSiblingFlowsCloseTogether(t *testing.T) {
 	group, _, alpha, beta, metadata := newTargetGroupForTest(t)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
 
 	f1 := newVaneMediaFlow(group, alpha.Name(), metadata, nil)
@@ -49,7 +49,7 @@ func TestVaneMediaSiblingFlowsCloseTogether(t *testing.T) {
 // so a slow node must not freeze another node on the same target.
 func TestVaneMediaBudgetScopedPerNode(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.media.reconnectCooldown = 10 * time.Minute
 	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
 	now := clock.Now()

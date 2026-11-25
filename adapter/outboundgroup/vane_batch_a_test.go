@@ -47,8 +47,8 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 			alpha.dialConn, alpha.delay, beta.delay = underlying, 20, 10
 			config := map[string]any{
 				"name": "switch-" + setting, "type": "vane", "proxies": []string{"alpha", "beta"},
-				"scene-rules": []string{"DOMAIN-SUFFIX,googlevideo.com,media"}, "media-reconnect": true,
-				"media-demand-bps": "1M",
+				"families": []string{"DOMAIN-SUFFIX,googlevideo.com"}, "reconnect": true,
+				"demand-bps": "1M",
 			}
 			if setting != "omitted" {
 				config["vane"] = setting == "true"
@@ -164,7 +164,7 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 	// seeded below), so both need a dialable connection for this shadow test.
 	beta.dialConn = underlying
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 	t.Cleanup(func() { _ = group.Close() })
 	seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)

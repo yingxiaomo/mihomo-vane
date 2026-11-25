@@ -349,13 +349,13 @@ func TestVaneTriggerLineIgnoresDemand(t *testing.T) {
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		parsed, err := parseVaneFamilyRules([]string{"DOMAIN-SUFFIX,googlevideo.com,media"})
+		parsed, err := parseVaneFamilyRules([]string{"DOMAIN-SUFFIX,googlevideo.com"})
 		require.NoError(t, err)
 		group.rules = parsed
 		option := VaneOption{
-			MediaReconnect:        true,
-			MediaReconnectDomains: []string{"googlevideo.com"},
-			MediaDemandBPS:        vaneBandwidth(demandBPS),
+			Reconnect:        true,
+			ReconnectDomains: []string{"googlevideo.com"},
+			DemandBPS:        vaneBandwidth(demandBPS),
 		}
 		if lowBPS > 0 {
 			option.LowThroughputBPS = vaneBandwidth(lowBPS)
@@ -457,7 +457,7 @@ func newTargetGroupForTest3(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestP
 	beta := newVaneTestProxy("beta", true, true)
 	gamma := newVaneTestProxy("gamma", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media", "DOMAIN-SUFFIX,interactive.example,interactive")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com", "DOMAIN-SUFFIX,interactive.example")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	return group, clock, alpha, beta, gamma, metadata

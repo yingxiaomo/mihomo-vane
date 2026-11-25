@@ -137,7 +137,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	probeEntered := make(chan struct{})
@@ -231,7 +231,7 @@ func TestVaneRaceRoundRecoversAfterCleanFinish(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	var probeCalls atomic.Int32
@@ -302,7 +302,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 
 		probeEntered := make(chan struct{})
@@ -378,7 +378,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		group.media.lowThroughputBPS = 5_000_000
 		group.media.demandBPS = 2_000_000
@@ -435,7 +435,7 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 
 	probeEntered := make(chan struct{})
@@ -578,7 +578,7 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{
@@ -650,7 +650,7 @@ func TestVaneRaceTokenReleasedWhenEngineHasNoWinner(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	probeEntered := make(chan struct{})
@@ -712,7 +712,7 @@ func TestVaneSyncChainPrepareCommitCloseSettleImproved(t *testing.T) {
 	beta.delay = 10
 	beta.dialConn = betaConn
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.media.lowThroughputBPS = 5_000_000
 	group.media.demandBPS = 2_000_000
 	group.media.minAge = 15 * time.Second
@@ -871,7 +871,7 @@ func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
 			beta := newVaneTestProxy("beta", true, true)
 			gamma := newVaneTestProxy("gamma", true, true)
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 			group.media.lowThroughputBPS = 5_000_000
 			group.media.demandBPS = 2_000_000
 			now := clock.Now()
@@ -904,7 +904,7 @@ func TestVaneDemandDoesNotGateRescueCandidate(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.media.lowThroughputBPS = 5_000_000
 	group.media.demandBPS = 8_000_000
 	now := clock.Now()
@@ -976,7 +976,7 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		group.media.lowThroughputBPS = 5_000_000
 		group.media.demandBPS = 8_000_000
 		// Production cooldown is 10 minutes; the break window has to sit well
@@ -1052,7 +1052,7 @@ func TestVaneRaceRescueFloorIgnoresDemandInflatedSlowLine(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.media.lowThroughputBPS = 15_000_000
 	group.media.demandBPS = 15_000_000
 

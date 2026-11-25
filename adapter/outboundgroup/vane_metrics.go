@@ -11,7 +11,6 @@ import (
 	_ "github.com/metacubex/mihomo/component/geodata/memconservative"
 	_ "github.com/metacubex/mihomo/component/geodata/standard"
 	C "github.com/metacubex/mihomo/constant"
-	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 )
 
@@ -90,16 +89,12 @@ func parseVaneFamilyRules(raw []string) ([]vaneFamilyRule, error) {
 
 func parseVaneFamilyRule(text string) (vaneFamilyRule, error) {
 	parts := strings.Split(text, ",")
-	if len(parts) < 2 {
-		return vaneFamilyRule{}, fmt.Errorf("expected TYPE,payload")
+	if len(parts) != 2 {
+		return vaneFamilyRule{}, fmt.Errorf("expected TYPE,payload, got %q", text)
 	}
-	// FAMILY: a third field used to name the scene. It is accepted and ignored
-	// so existing "GEOSITE,youtube,media" lines keep working. Warn when it is
-	// present because "GEOSITE,telegram,youtube" would otherwise silently drop
-	// the second name instead of matching both.
-	if len(parts) >= 3 && strings.TrimSpace(parts[2]) != "" {
-		log.Warnln("Vane: family rule %q has a third field %q which is ignored; write one rule per name", text, strings.TrimSpace(parts[2]))
-	}
+	// FAMILY: exactly two fields. A third one used to name the scene and is
+	// now an error: "GEOSITE,telegram,youtube" would otherwise read as two
+	// names while matching only the first.
 
 	rule, err := parseVaneRulePayload(parts[0], parts[1])
 	if err != nil {

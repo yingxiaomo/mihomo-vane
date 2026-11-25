@@ -147,7 +147,7 @@ func TestVaneBacklogWiredThroughDialContext(t *testing.T) {
 		readFunc: func(payload []byte) (int, error) { return copy(payload, make([]byte, 4096)), nil },
 	}
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	chain01ProductionValues(t, group, 1_000_000)
 	t.Cleanup(func() { _ = group.Close() })
@@ -190,7 +190,7 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 		readFunc: func(payload []byte) (int, error) { return copy(payload, make([]byte, 4096)), nil },
 	}
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	chain01ProductionValues(t, group, 1_000_000)
 	t.Cleanup(func() { _ = group.Close() })

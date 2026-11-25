@@ -15,7 +15,7 @@ func TestVaneLatencyIdentityFeedsEstimate(t *testing.T) {
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	defer group.Close()
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 
 	metadata := &C.Metadata{Host: "rr-lat.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	group.pick(metadata, vaneTransportTCP, true, true)
@@ -49,7 +49,7 @@ func TestVaneLatencyUnsupportedNeverFeeds(t *testing.T) {
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	defer group.Close()
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 
 	metadata := &C.Metadata{Host: "rr-lat-nosupport.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	group.pick(metadata, vaneTransportTCP, true, true)

@@ -18,7 +18,7 @@ func newLatencyCapGroup(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestProxy
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	metadata := &C.Metadata{Host: "rr-latency.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	return group, clock, alpha, beta, metadata

@@ -182,7 +182,7 @@ func TestVaneRacingShadowKeepsDirectPolicyDisabled(t *testing.T) {
 	alpha.dialConn = alphaConn
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 	conn, err := group.DialContext(t.Context(), &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	require.NoError(t, err)
@@ -217,7 +217,7 @@ func TestVaneRacingOnEndToEndHandoffReconnectAndPreference(t *testing.T) {
 	var betaDials atomic.Int32
 	beta.dialHook = func() { betaDials.Add(1) }
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 40_000_000, capHit: true}

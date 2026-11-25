@@ -473,7 +473,7 @@ func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 		"a demoted node is refused for every scene now that the per-scene gate is gone")
 
 	// The end-to-end path agrees: the pin fails over instead of reusing it.
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
 	metadata := vaneHashMetadata("rr1.googlevideo.com")
 	failedOver := group.pick(metadata, vaneTransportTCP, false, true)
@@ -485,7 +485,7 @@ func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 // every reconnect inside a pinned rule set would silently move the flow.
 func TestVaneHashPinOutranksMediaHint(t *testing.T) {
 	group, clock, _ := newVaneHashPinGroup(t, "alpha", "beta", "gamma")
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
 	metadata := vaneHashMetadata("rr1.googlevideo.com")
 

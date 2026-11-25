@@ -240,7 +240,7 @@ func TestVaneMediaRemovedKeysRejected(t *testing.T) {
 		"COMPATIBLE": newVaneTestProxy("COMPATIBLE", true, false),
 		"alpha":      newVaneTestProxy("alpha", true, true),
 	}
-	config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "media-demand-bps": 5_000_000}
+	config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "demand-bps": 5_000_000}
 	providers := map[string]P.ProxyProvider{}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
@@ -278,7 +278,7 @@ func TestVaneMediaDemandBandwidthParsing(t *testing.T) {
 	}
 	parseDemand := func(t *testing.T, value any) (float64, error) {
 		t.Helper()
-		config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "media-demand-bps": value}
+		config := map[string]any{"name": "vane", "type": "vane", "proxies": []string{"alpha"}, "demand-bps": value}
 		parsed, err := ParseProxyGroup(config, proxyMap, map[string]P.ProxyProvider{}, nil, nil)
 		if err != nil {
 			return 0, err
@@ -341,7 +341,7 @@ func TestParseVaneProxyGroup(t *testing.T) {
 			"name":                     "vane-group",
 			"type":                     "vane",
 			"proxies":                  []string{"beta", "alpha"},
-			"scene-rules":              []string{"DOMAIN-SUFFIX,video.example,media"},
+			"families":                 []string{"DOMAIN-SUFFIX,video.example"},
 			"empty-fallback":           "fallback",
 			"switch-margin":            0.2,
 			"target-cooldown":          9,
@@ -350,9 +350,9 @@ func TestParseVaneProxyGroup(t *testing.T) {
 			"exploration":              true,
 			"exploration-interval":     17,
 			"gray-failure-observation": true,
-			"media-reconnect":          true,
-			"media-reconnect-domains":  []string{"video.example"},
-			"media-demand-bps":         2_000_000,
+			"reconnect":                true,
+			"reconnect-domains":        []string{"video.example"},
+			"demand-bps":               2_000_000,
 			"disable-udp":              false,
 			"expected-status":          "204",
 			"include-all":              false,

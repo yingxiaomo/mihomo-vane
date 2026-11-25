@@ -68,7 +68,7 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			beta := newVaneTestProxy("beta", true, true)
 			beta.delay = 10
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 			chain01ProductionValues(t, group, 2_000_000)
 			configureVaneRacingForTest(t, group, mode)
 			var probeCalls atomic.Int64
@@ -124,7 +124,7 @@ func TestVaneChain01CapabilityEvidenceAdmitsChallenger(t *testing.T) {
 	gamma := newVaneTestProxy("gamma", true, true)
 	gamma.delay = 20
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 10_000_000)
 
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
@@ -161,7 +161,7 @@ func TestVaneChain01FreshEvidenceBelowBarDoesNotClose(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 2_000_000)
 	seedChain01Traffic(t, group, beta.Name(), clock.Now(), 3_000_000)
 
@@ -181,7 +181,7 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		seedChain01Traffic(t, group, beta.Name(), clock.Now(), 12_000_000)
 
@@ -216,7 +216,7 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		seedChain01Traffic(t, group, beta.Name(), clock.Now(), 6_000_000)
 
@@ -238,7 +238,7 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		seedChain01Capability(t, group, vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}, 12_060_000, clock.Now())
@@ -263,7 +263,7 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		seedChain01Capability(t, group, vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}, 12_060_000, clock.Now())
@@ -312,7 +312,7 @@ func TestVaneChain01TargetEvidenceWinnerCommits(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 2_000_000)
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {

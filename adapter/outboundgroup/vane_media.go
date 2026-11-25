@@ -140,7 +140,7 @@ func parseVaneMediaRuleSetEntry(entry string) (string, bool, error) {
 	}
 	name := strings.TrimSpace(trimmed[len("RULE-SET,"):])
 	if name == "" || strings.Contains(name, ",") {
-		return "", false, fmt.Errorf("invalid media-reconnect-domain rule-set entry %q", entry)
+		return "", false, fmt.Errorf("invalid family rule-set entry %q", entry)
 	}
 	return name, true, nil
 }
@@ -159,15 +159,15 @@ func parseVaneMediaGeoSiteEntry(entry string) (string, bool, error) {
 	}
 	category := strings.TrimSpace(trimmed[len("GEOSITE,"):])
 	if category == "" || strings.Contains(category, ",") {
-		return "", false, fmt.Errorf("invalid media-reconnect-domain geosite entry %q", entry)
+		return "", false, fmt.Errorf("invalid family geosite entry %q", entry)
 	}
 	return category, true, nil
 }
 
 func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 	config := defaultVaneMediaConfig()
-	config.enabled = option.MediaReconnect
-	for _, rawDomain := range option.MediaReconnectDomains {
+	config.enabled = option.Reconnect
+	for _, rawDomain := range option.ReconnectDomains {
 		name, isRuleSet, err := parseVaneMediaRuleSetEntry(rawDomain)
 		if err != nil {
 			return vaneMediaConfig{}, err
@@ -186,20 +186,12 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 		}
 		domain, valid := normalizeVaneDomain(rawDomain)
 		if !valid {
-			return vaneMediaConfig{}, fmt.Errorf("invalid media-reconnect-domain %q", rawDomain)
+			return vaneMediaConfig{}, fmt.Errorf("invalid family domain %q", rawDomain)
 		}
 		config.domains = append(config.domains, domain)
 	}
 
-	// PHASE1: demand-bps is the new key. media-demand-bps still parses so an
-	// existing config keeps working; the new key wins when both are set.
 	demand := option.DemandBPS
-	if option.MediaDemandBPS != 0 {
-		log.Warnln("Vane: media-demand-bps is deprecated, use demand-bps")
-		if demand == 0 {
-			demand = option.MediaDemandBPS
-		}
-	}
 	if int64(demand) < 0 || int64(demand) > vaneMaximumMediaThroughputBPS {
 		return vaneMediaConfig{}, fmt.Errorf("demand-bps must be between 0 and %d", vaneMaximumMediaThroughputBPS)
 	}
@@ -1899,7 +1891,7 @@ func (a *Vane) mediaTargetKey(target string, port uint16) vaneMediaTargetKey {
 	// Scene-as-gate (SCENE-GATE-001): a flow classified as media by a scene
 	// rule that carries a target identity is gate-eligible with that identity
 	// as the scope, so the rule set only needs to be named once (in
-	// scene-rules) and media-reconnect-domains can stay empty. The match is
+	// families) and reconnect-domains can stay empty. The match is
 	// re-run against the host alone so the scope is a pure function of
 	// (target, port) and agrees at every call site; the gate lists above keep
 	// precedence, so existing configs behave exactly as before. Rules without

@@ -37,7 +37,7 @@ type VaneOption struct {
 	CollectorMaxFileSize   int64         `group:"collector-max-file-size,omitempty"`
 	CollectorMaxFileAge    int           `group:"collector-max-file-age,omitempty"`
 	CollectorFlushInterval int           `group:"collector-flush-interval,omitempty"`
-	SceneRules             []string      `group:"scene-rules,omitempty"`
+	Families               []string      `group:"families,omitempty"`
 	HashRules              []string      `group:"hash-rules,omitempty"`
 	SwitchMargin           float64       `group:"switch-margin,omitempty"`
 	TargetCooldown         int           `group:"target-cooldown,omitempty"`
@@ -46,15 +46,12 @@ type VaneOption struct {
 	Exploration            bool          `group:"exploration,omitempty"`
 	ExplorationInterval    int           `group:"exploration-interval,omitempty"`
 	GrayFailureObservation bool          `group:"gray-failure-observation,omitempty"`
-	MediaReconnect         bool          `group:"media-reconnect,omitempty"`
-	MediaReconnectDomains  []string      `group:"media-reconnect-domains,omitempty"`
+	Reconnect              bool          `group:"reconnect,omitempty"`
+	ReconnectDomains       []string      `group:"reconnect-domains,omitempty"`
 	DemandBPS              vaneBandwidth `group:"demand-bps,omitempty"`
 	LowThroughputBPS       vaneBandwidth `group:"low-throughput-bps,omitempty"`
 	Vane                   *bool         `group:"vane,omitempty"`
 	RacingURL              string        `group:"racing-url,omitempty"`
-	// MediaDemandBPS is the pre-simplification key. It still parses so an
-	// existing config keeps working, but DemandBPS wins when both are set.
-	MediaDemandBPS vaneBandwidth `group:"media-demand-bps,omitempty"`
 }
 
 type vaneTransport uint8
@@ -383,7 +380,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 		return nil, errors.New("empty fallback proxy not exist")
 	}
 
-	rules, err := parseVaneFamilyRules(vaneOption.SceneRules)
+	rules, err := parseVaneFamilyRules(vaneOption.Families)
 	if err != nil {
 		return nil, err
 	}
