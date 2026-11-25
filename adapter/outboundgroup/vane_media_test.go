@@ -1046,3 +1046,23 @@ func TestVaneVerifyPenaltyCoolsSlowLanding(t *testing.T) {
 	group.mu.Unlock()
 	require.Equal(t, 1, stillOne)
 }
+
+func TestVanePruneDropsExpiredTargetScopedState(t *testing.T) {
+	group, clock, _ := newVaneObservationRig(t, vaneRacingOn)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	now := clock.Now()
+	key := vaneMediaTargetKey{target: "rr-prune.example", port: 443}
+	stickyKey := vaneStickyKeyFor("rr-prune.example", 443, vaneSceneDefault)
+	group.mu.Lock()
+	group.mediaTargetSwitches[key] = vaneTargetSwitchBudget{windowFrom: now.Add(-2 * vaneTargetSwitchBudgetWindow), lastSwitch: now.Add(-time.Hour), count: 3}
+	group.stickiness[stickyKey] = vaneStickyChoice{name: "alpha", expiresAt: now.Add(-time.Second)}
+	group.lastPickProbeAt["rr-prune.example"] = now.Add(-3 * vaneRacingCapabilityTTL)
+	group.pruneMediaLocked(now)
+	_, hasSwitch := group.mediaTargetSwitches[key]
+	_, hasSticky := group.stickiness[stickyKey]
+	_, hasProbe := group.lastPickProbeAt["rr-prune.example"]
+	group.mu.Unlock()
+	require.False(t, hasSwitch, "expired target switch budget must be pruned")
+	require.False(t, hasSticky, "expired sticky choice must be pruned")
+	require.False(t, hasProbe, "stale cold-pick timestamp must be pruned")
+}

@@ -1533,7 +1533,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 			proxy:         proxy,
 			knownGood:     knownGood,
 			throughputBPS: throughputBPS,
-			scoreMicros:   scoreVaneMetrics(vaneSceneMedia, snapshot),
+			scoreMicros:   scoreVaneMetricsFlat(snapshot),
 			delay:         item.delay,
 			evidenceBPS:   bestEvidence,
 		})
@@ -1978,6 +1978,26 @@ func (a *Vane) pruneMediaLocked(now time.Time) {
 	for key, until := range a.mediaValveLastRun {
 		if now.Sub(until) >= vaneMediaValveThrottle {
 			delete(a.mediaValveLastRun, key)
+		}
+	}
+	// PRUNE: the target switch budget and the sticky choice are also per-target
+	// maps that would otherwise grow without bound as new hosts are visited.
+	for key, budget := range a.mediaTargetSwitches {
+		if budget.windowFrom.Add(vaneTargetSwitchBudgetWindow).Before(now) &&
+			(budget.lastSwitch.IsZero() || now.Sub(budget.lastSwitch) >= vaneSwitchObserveWindow) {
+			delete(a.mediaTargetSwitches, key)
+		}
+	}
+	for key, choice := range a.stickiness {
+		if !choice.expiresAt.After(now) {
+			delete(a.stickiness, key)
+		}
+	}
+	// PRUNE: the per-scope cold-pick timestamp is only useful for one
+	// capability TTL; drop it long after it can matter.
+	for key, at := range a.lastPickProbeAt {
+		if now.Sub(at) >= 2*vaneRacingCapabilityTTL {
+			delete(a.lastPickProbeAt, key)
 		}
 	}
 }

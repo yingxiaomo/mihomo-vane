@@ -515,7 +515,7 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 		}
 		candidates = append(candidates, vaneRaceCandidate{
 			proxy: proxy, member: member, targetBPS: targetBPS, targetFresh: targetFresh,
-			scoreMicros: scoreVaneMetrics(vaneSceneMedia, snapshot), blockUntil: blockUntil, delayZero: item.delay == 0,
+			scoreMicros: scoreVaneMetricsFlat(snapshot), blockUntil: blockUntil, delayZero: item.delay == 0,
 		})
 	}
 	a.learning.mu.Unlock()

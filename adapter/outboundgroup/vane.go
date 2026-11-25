@@ -1176,7 +1176,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		}
 		key := vaneCooldownKey{transport: transport, target: target, port: port, candidate: proxy.Name(), identity: identity}
 		until := a.cooldownUntilLocked(key, now, commit)
-		if transport == vaneTransportTCP && scene == vaneSceneMedia {
+		if transport == vaneTransportTCP {
 			if mediaUntil := a.mediaCooldownUntilLockedWithCleanup(target, port, proxy.Name(), vaneProxyPersistentIdentity(proxy), now, commit); mediaUntil.After(until) {
 				until = mediaUntil
 			}
@@ -1240,7 +1240,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			if candidate.name == anchor.name {
 				identity := vaneProxyPersistentIdentity(candidate.proxy)
 				anchorCoolingAnywhere = a.candidateCoolingLocked(transport, anchor.name, identity, now, commit)
-				if transport == vaneTransportTCP && scene == vaneSceneMedia {
+				if transport == vaneTransportTCP {
 					anchorCoolingAnywhere = anchorCoolingAnywhere || a.mediaCandidateCoolingLockedWithCleanup(anchor.name, vaneProxyPersistentIdentity(candidate.proxy), now, commit)
 				}
 				break
@@ -1291,7 +1291,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	// hash pin wins over it. A handoff token is claimed only when the operator
 	// has not pinned this scope; otherwise the media path would silently
 	// override the pin on every reconnect inside the pinned rule set.
-	if pinned == nil && commit && transport == vaneTransportTCP && scene == vaneSceneMedia {
+	if pinned == nil && commit && transport == vaneTransportTCP {
 		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
 			if selected, handoff, source := a.takeTargetSelectionLocked(targetKey, compatible, now, claimHandoff); selected != nil {
 				state := a.ensureProxyNodeLocked(selected, now)
@@ -1402,30 +1402,34 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	coldPickInflightRejected := false
 	var coldPick *coldPickProbe
 	var coldPickTop2 []vaneRankedProxy
-	if commit && transport == vaneTransportTCP && scene == vaneSceneMedia &&
+	if commit && transport == vaneTransportTCP &&
 		explorationSelection == nil && pinned == nil && claimHandoff {
 		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
 			coldPickScope = targetKey.targetScope
-			if coldPickScope != "" && len(ranked) >= 2 {
-				top2 := []vaneRankedProxy{ranked[0], ranked[1]}
-				if a.coldPickGateLocked(freshCaps, coldPickScope, top2, now) {
-					coldPickTop2 = top2
-					a.pickProbeInflight[coldPickScope] = true
-				} else if a.pickProbeInflight[coldPickScope] {
-					coldPickInflightRejected = true
-					// INFLIGHT-BW: another cold pick on this scope is still
-					// probing, so this pick cannot wait for a fresh
-					// measurement. Falling back to plain delay ranking is what
-					// lands the first video connection on a low-bandwidth node,
-					// so reuse whatever capability records already exist and
-					// take the fastest ranked candidate among them.
-					if fastest, ok := a.coldPickInflightChoiceLocked(freshCaps, ranked, now); ok {
-						chosen = fastest
-						selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
-						if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
-							a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
-							a.rememberStickyLocked(target, port, scene, chosen.name, now)
-						}
+		} else {
+			// PHASE2: a non-media target still gets a cold-pick probe; the
+			// target string itself is the per-scope throttle key.
+			coldPickScope = target
+		}
+		if coldPickScope != "" && len(ranked) >= 2 {
+			top2 := []vaneRankedProxy{ranked[0], ranked[1]}
+			if a.coldPickGateLocked(freshCaps, coldPickScope, top2, now) {
+				coldPickTop2 = top2
+				a.pickProbeInflight[coldPickScope] = true
+			} else if a.pickProbeInflight[coldPickScope] {
+				coldPickInflightRejected = true
+				// INFLIGHT-BW: another cold pick on this scope is still
+				// probing, so this pick cannot wait for a fresh
+				// measurement. Falling back to plain delay ranking is what
+				// lands the first video connection on a low-bandwidth node,
+				// so reuse whatever capability records already exist and
+				// take the fastest ranked candidate among them.
+				if fastest, ok := a.coldPickInflightChoiceLocked(freshCaps, ranked, now); ok {
+					chosen = fastest
+					selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
+					if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
+						a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
+						a.rememberStickyLocked(target, port, scene, chosen.name, now)
 					}
 				}
 			}
@@ -1632,7 +1636,7 @@ func (a *Vane) hashCandidateUsableLocked(cand *vaneRankedProxy, transport vaneTr
 	if cand.cooldownUntil.After(now) {
 		return false
 	}
-	if transport == vaneTransportTCP && scene == vaneSceneMedia {
+	if transport == vaneTransportTCP {
 		if a.mediaCandidateCoolingLockedWithCleanup(cand.name, vaneProxyPersistentIdentity(cand.proxy), now, commit) {
 			return false
 		}

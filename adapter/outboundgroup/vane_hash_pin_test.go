@@ -450,9 +450,10 @@ func TestVaneHashPinDoesNotWriteAnchor(t *testing.T) {
 	require.Contains(t, byName, stored)
 }
 
-// HASH-13: a node the media watchdog demoted must not be re-selected through
-// the pin, or the pin would keep a demoted node alive forever. The check is
-// media-only: the same node stays usable for every other scene.
+// HASH-13: a node the watchdog demoted must not be re-selected through the pin,
+// or the pin would keep a demoted node alive forever. Once the per-scene gate
+// is gone the demotion applies to every scene, so the pin fails over for a
+// plain flow too.
 func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
 	key := vaneMediaTargetKey{target: "googlevideo.com", port: 443}
@@ -468,8 +469,8 @@ func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 	cand.name = "a"
 	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, vaneSceneMedia, clock.Now(), true),
 		"a media-cooled node must be refused for a media flow")
-	require.True(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, vaneSceneDefault, clock.Now(), true),
-		"the media cooldown must not block non-media scenes")
+	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, vaneSceneDefault, clock.Now(), true),
+		"a demoted node is refused for every scene now that the per-scene gate is gone")
 
 	// The end-to-end path agrees: the pin fails over instead of reusing it.
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
