@@ -579,6 +579,11 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(vaneMediaNodeKeyFor(plan.targetKey, plan.current), plan.currentBPS, now) {
 		return "reconnect-cooldown"
 	}
+	if !plan.skipReconnectCooldown {
+		if reason := a.mediaTargetBudgetBlocksLocked(plan.targetKey, now); reason != "" {
+			return reason
+		}
+	}
 	to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: challengerState.epoch}
 	// RACE-01: the race (or the on+knownGood path) may have admitted this
 	// challenger minutes ago. If the target itself has since produced fresh
@@ -665,6 +670,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		token:     token,
 	}
 	a.mediaReconnects[vaneMediaNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.media.reconnectCooldown)
+	a.noteMediaTargetSwitchLocked(plan.targetKey, now)
 	return ""
 }
 
@@ -730,6 +736,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		// minute slow cooldown above still stops this same candidate from
 		// being picked again; the two cooldowns guard different things.
 		delete(a.mediaReconnects, vaneMediaNodeKeyFor(legacyKey.vaneMediaTargetKey, token.from))
+		delete(a.mediaTargetSwitches, legacyKey.vaneMediaTargetKey)
 	}
 	// §A: fold the settlement's real-traffic sample into the (target, member)
 	// record — the per-target capability observation, record-only for now.

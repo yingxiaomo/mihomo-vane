@@ -345,6 +345,7 @@ type Vane struct {
 	cooldowns          map[vaneCooldownKey]time.Time
 	mediaHints         map[vaneMediaTargetKey]vaneMediaHint
 	mediaReconnects    map[vaneMediaNodeKey]time.Time
+	mediaTargetSwitches map[vaneMediaTargetKey]vaneTargetSwitchBudget
 	mediaSlowCooldowns map[vaneMediaCandidateKey]time.Time
 	mediaBudgets       map[vaneMediaNodeKey]vaneMediaBudget
 	targetHandoffs     map[vaneTargetKey]vaneHandoffLease
@@ -494,6 +495,7 @@ func newVaneWithClock(
 		cooldowns:          make(map[vaneCooldownKey]time.Time),
 		mediaHints:         make(map[vaneMediaTargetKey]vaneMediaHint),
 		mediaReconnects:    make(map[vaneMediaNodeKey]time.Time),
+		mediaTargetSwitches: make(map[vaneMediaTargetKey]vaneTargetSwitchBudget),
 		mediaSlowCooldowns: make(map[vaneMediaCandidateKey]time.Time),
 		mediaBudgets:       make(map[vaneMediaNodeKey]vaneMediaBudget),
 		targetHandoffs:     make(map[vaneTargetKey]vaneHandoffLease),

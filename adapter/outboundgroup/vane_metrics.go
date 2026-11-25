@@ -812,7 +812,8 @@ func scoreVaneMetrics(scene vaneScene, snapshot vaneMetricsSnapshot) int64 {
 // vaneWeights is the single, scene-independent weight table of the simplified
 // kernel (v3). The owner wants "fastest first", so throughput is raised to 0.35
 // while every other dimension keeps the old default tier.
-var vaneWeights = vaneSceneWeights{0.35, 0.20, 0.15, 0.12, 0.06, 0.04, 0.03, 0.02, 0.02, 0.005, 0.005}
+// BANDWIDTH-FIRST: throughput > latency > loss > the rest, per the user goal.
+var vaneWeights = vaneSceneWeights{0.55, 0.18, 0.12, 0.06, 0.03, 0.02, 0.02, 0.01, 0.005, 0.0025, 0.0025}
 
 // vaneScoringFlat returns the scoring config used once scene grouping is gone.
 // It mirrors the default tier except for the raised throughput weight.

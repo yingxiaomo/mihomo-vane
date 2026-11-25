@@ -711,7 +711,7 @@ func TestVaneMediaReconnectBudgetIsBounded(t *testing.T) {
 		plan, ok := group.prepareMediaReconnect(key, "rr8.googlevideo.com", 443, "alpha", 2_000_000)
 		require.True(t, ok)
 		require.True(t, group.commitMediaReconnect(plan))
-		clock.Advance(2 * time.Second)
+		clock.Advance(61 * time.Second)
 	}
 	_, ok := group.prepareMediaReconnect(key, "rr8.googlevideo.com", 443, "alpha", 2_000_000)
 	require.False(t, ok)
@@ -956,4 +956,37 @@ func TestVaneMediaGeoSiteGate(t *testing.T) {
 func (a *Vane) prepareMediaReconnect(targetKey vaneMediaTargetKey, target string, port uint16, current string, currentBPS float64) (vaneMediaPlan, bool) {
 	plan, reason := a.prepareMediaReconnectDetailed(targetKey, target, port, current, currentBPS)
 	return plan, reason == ""
+}
+
+// TARGET-BUDGET: a target must not ping-pong across nodes forever. Three
+// switches within the window are allowed; the fourth is refused.
+func TestVaneTargetSwitchBudgetStopsPingPong(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	key := group.mediaTargetKey("rr-budget.googlevideo.com", 443)
+	now := clock.Now()
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	for i := 0; i < vaneTargetSwitchBudgetMax; i++ {
+		require.Empty(t, group.mediaTargetBudgetBlocksLocked(key, now))
+		group.noteMediaTargetSwitchLocked(key, now)
+		now = now.Add(vaneSwitchObserveWindow + time.Second)
+	}
+	require.Equal(t, "target-switch-budget", group.mediaTargetBudgetBlocksLocked(key, now))
+}
+
+// Observe window: a fresh switch gets 60s to prove itself before it may be
+// judged and switched again.
+func TestVaneSwitchObserveWindowBlocksImmediateReswitch(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	key := group.mediaTargetKey("rr-observe.googlevideo.com", 443)
+	now := clock.Now()
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	group.noteMediaTargetSwitchLocked(key, now)
+	require.Equal(t, "switch-observing", group.mediaTargetBudgetBlocksLocked(key, now.Add(10*time.Second)))
+	require.Empty(t, group.mediaTargetBudgetBlocksLocked(key, now.Add(vaneSwitchObserveWindow+time.Second)))
 }

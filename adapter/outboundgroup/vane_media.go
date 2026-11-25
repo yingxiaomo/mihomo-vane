@@ -1197,6 +1197,49 @@ type vaneMediaPlan struct {
 	skipReconnectCooldown bool
 }
 
+// TARGET-BUDGET: switching is scoped per node, so a target can ping-pong
+// A->B->C forever - each new node carries no cooldown record. The budget and
+// the observe window therefore live on the target, not the node.
+const (
+	vaneTargetSwitchBudgetWindow = 30 * time.Minute
+	vaneTargetSwitchBudgetMax    = 3
+	vaneSwitchObserveWindow      = 60 * time.Second
+)
+
+type vaneTargetSwitchBudget struct {
+	windowFrom time.Time
+	count      int
+	lastSwitch time.Time
+}
+
+func (a *Vane) mediaTargetBudgetBlocksLocked(targetKey vaneMediaTargetKey, now time.Time) string {
+	budget := a.mediaTargetSwitches[targetKey]
+	if budget.lastSwitch.IsZero() {
+		return ""
+	}
+	if now.Sub(budget.lastSwitch) < vaneSwitchObserveWindow {
+		return "switch-observing"
+	}
+	if now.Sub(budget.windowFrom) < vaneTargetSwitchBudgetWindow && budget.count >= vaneTargetSwitchBudgetMax {
+		return "target-switch-budget"
+	}
+	return ""
+}
+
+func (a *Vane) noteMediaTargetSwitchLocked(targetKey vaneMediaTargetKey, now time.Time) {
+	if a.mediaTargetSwitches == nil {
+		a.mediaTargetSwitches = make(map[vaneMediaTargetKey]vaneTargetSwitchBudget)
+	}
+	budget := a.mediaTargetSwitches[targetKey]
+	if budget.windowFrom.IsZero() || now.Sub(budget.windowFrom) >= vaneTargetSwitchBudgetWindow {
+		budget.windowFrom = now
+		budget.count = 0
+	}
+	budget.count++
+	budget.lastSwitch = now
+	a.mediaTargetSwitches[targetKey] = budget
+}
+
 // mediaCooldownBlocksLocked reports whether the reconnect cooldown still
 // forbids another switch for this target. BREAK-WINDOW: the cooldown exists to
 // stop flapping, not to trap a target on a node that is already starving. When
@@ -1334,6 +1377,11 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 	currentNodeKey := vaneMediaNodeKeyFor(targetKey, current)
 	if !skipReconnectCooldown && a.mediaCooldownBlocksLocked(currentNodeKey, currentBPS, now) {
 		return vaneMediaPlan{}, "reconnect-cooldown"
+	}
+	if !skipReconnectCooldown {
+		if reason := a.mediaTargetBudgetBlocksLocked(targetKey, now); reason != "" {
+			return vaneMediaPlan{}, reason
+		}
 	}
 	budget := a.mediaBudgets[currentNodeKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
@@ -1640,6 +1688,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		handoff:   handoff,
 	}
 	a.mediaReconnects[vaneMediaNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.media.reconnectCooldown)
+	a.noteMediaTargetSwitchLocked(plan.targetKey, now)
 	return ""
 }
 

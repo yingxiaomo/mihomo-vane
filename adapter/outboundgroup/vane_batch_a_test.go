@@ -160,6 +160,9 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 	underlying := &vaneConnTestConn{readFunc: func(p []byte) (int, error) { return len(p), nil }}
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	alpha.dialConn = underlying
+	// bandwidth-first scoring picks the node with throughput evidence (beta,
+	// seeded below), so both need a dialable connection for this shadow test.
+	beta.dialConn = underlying
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
