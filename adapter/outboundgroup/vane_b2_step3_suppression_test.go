@@ -35,7 +35,7 @@ func TestVaneB2Step3EmptySnapshotInstallsSuppression(t *testing.T) {
 		})
 	}
 
-	scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {
+	scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) {
 		t.Error("an all-degraded snapshot must not produce a winner")
 	})
 	require.True(t, scheduled, reason)
@@ -44,13 +44,13 @@ func TestVaneB2Step3EmptySnapshotInstallsSuppression(t *testing.T) {
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
 
 	// The suppression window rejects the next race for the same target.
-	scheduled, reason = group.scheduleMediaRace(request, func(vaneRaceResult) {})
+	scheduled, reason = group.scheduleReconnectRace(request, func(vaneRaceResult) {})
 	require.False(t, scheduled, "a repeat race inside the suppression window must be refused")
 	require.Equal(t, "no-winner-cooldown", reason)
 
 	// Once the window expires the target may race again.
 	clock.Advance(vaneRacingNoWinnerCooldown + time.Second)
-	scheduled, reason = group.scheduleMediaRace(request, func(vaneRaceResult) {})
+	scheduled, reason = group.scheduleReconnectRace(request, func(vaneRaceResult) {})
 	require.True(t, scheduled, reason)
 	waitVaneRaceIdle(t, group)
 }

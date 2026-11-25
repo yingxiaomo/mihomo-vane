@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// latency-cap: nodes whose media-window RTT EMA exceeds vaneLatencyHardCapMs
+// latency-cap: nodes whose throughput-window RTT EMA exceeds vaneLatencyHardCapMs
 // are not ranked, unless that would empty the pool.
 
 func newLatencyCapGroup(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestProxy, *vaneTestProxy, *C.Metadata) {
@@ -18,7 +18,7 @@ func newLatencyCapGroup(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestProxy
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	metadata := &C.Metadata{Host: "rr-latency.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	return group, clock, alpha, beta, metadata

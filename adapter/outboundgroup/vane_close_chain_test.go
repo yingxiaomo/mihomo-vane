@@ -25,21 +25,21 @@ func TestVaneCommitRejectsExpiredEvidenceForKnownGoodPlan(t *testing.T) {
 	group.nodeControls["beta"] = &vaneNodeControlState{
 		recentTCPThroughput: vaneRecentThroughput{
 			bitsPerSecond: 6_000_000,
-			observedAt:    now.Add(-vaneMediaEvidenceMaxAge - time.Second),
+			observedAt:    now.Add(-vaneEvidenceMaxAge - time.Second),
 		},
 	}
 	group.mu.Unlock()
 
-	require.Equal(t, "challenger-no-evidence", group.commitMediaReconnectDetailed(plan))
+	require.Equal(t, "challenger-no-evidence", group.commitReconnectDetailed(plan))
 	group.mu.Lock()
-	require.Empty(t, group.mediaBudgets, "a rejected commit must not consume budget")
-	require.Empty(t, group.mediaHints)
+	require.Empty(t, group.budgets, "a rejected commit must not consume budget")
+	require.Empty(t, group.hints)
 	group.mu.Unlock()
 
 	group.mu.Lock()
 	delete(group.nodeControls, "beta")
 	group.mu.Unlock()
-	require.Equal(t, "challenger-no-evidence", group.commitMediaReconnectDetailed(plan),
+	require.Equal(t, "challenger-no-evidence", group.commitReconnectDetailed(plan),
 		"missing control state is also missing evidence")
 }
 
@@ -49,7 +49,7 @@ func TestVaneCommitRejectsExpiredEvidenceForKnownGoodPlan(t *testing.T) {
 // decides whether the current flow is good enough, not what a rescue must hit.
 func TestVaneCommitRejectsChallengerBelowRatioForFastPlan(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
-	group.media.demandBPS = 8_000_000
+	group.flow.demandBPS = 8_000_000
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	plan.knownGood = true
 	plan.currentBPS = 20_000_000
@@ -64,10 +64,10 @@ func TestVaneCommitRejectsChallengerBelowRatioForFastPlan(t *testing.T) {
 	}
 	group.mu.Unlock()
 
-	require.Equal(t, "challenger-evidence-degraded", group.commitMediaReconnectDetailed(plan))
+	require.Equal(t, "challenger-evidence-degraded", group.commitReconnectDetailed(plan))
 	group.mu.Lock()
-	require.Empty(t, group.mediaBudgets)
-	require.Empty(t, group.mediaHints)
+	require.Empty(t, group.budgets)
+	require.Empty(t, group.hints)
 	group.mu.Unlock()
 }
 
@@ -92,7 +92,7 @@ func TestVaneTargetCommitRejectsFreshTargetEvidenceBelowRequired(t *testing.T) {
 
 	require.Equal(t, "challenger-evidence-degraded", group.commitTargetHandoff(plan))
 	group.mu.Lock()
-	require.Empty(t, group.mediaBudgets, "a rejected target commit must not consume budget")
+	require.Empty(t, group.budgets, "a rejected target commit must not consume budget")
 	require.Empty(t, group.targetHandoffs)
 	group.mu.Unlock()
 }
@@ -106,7 +106,7 @@ func TestVaneTargetCommitSynthesizesTokenWhenDiagnosticsUnavailable(t *testing.T
 
 	require.Empty(t, group.commitTargetHandoff(plan))
 
-	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	targetKey, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	group.mu.Lock()
 	lease, ok := group.targetHandoffs[targetKey]
@@ -119,11 +119,11 @@ func TestVaneTargetCommitSynthesizesTokenWhenDiagnosticsUnavailable(t *testing.T
 	require.Equal(t, plan.current, lease.token.from)
 	require.Equal(t, plan.challenger, lease.token.to)
 	require.Equal(t, plan.currentBPS, lease.token.previousBPS)
-	require.Equal(t, 1, group.mediaBudgets[vaneMediaNodeKeyFor(plan.targetKey, plan.current)].count)
-	_, slow := group.mediaSlowCooldowns[vaneMediaCandidateKey{
-		vaneMediaTargetKey: plan.targetKey,
-		candidate:          plan.current,
-		identity:           plan.identity,
+	require.Equal(t, 1, group.budgets[vaneNodeKeyFor(plan.targetKey, plan.current)].count)
+	_, slow := group.slowCooldowns[vaneCandidateKey{
+		vaneFlowKey: plan.targetKey,
+		candidate:   plan.current,
+		identity:    plan.identity,
 	}]
 	require.True(t, slow)
 	group.mu.Unlock()
@@ -137,7 +137,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	probeEntered := make(chan struct{})
@@ -160,7 +160,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	// COLD-PICK: the probes below belong to the race under test.
 	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	actions := make(chan vanePolicyAction, 1)
@@ -186,7 +186,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	}))
 	// P1 grace: lows within 30s of the recovery are graced; advance past it so
 	// the second round actually re-arms (RACE-06's premise).
-	clock.Advance(vaneMediaFastGrace + time.Second)
+	clock.Advance(vaneFastGrace + time.Second)
 	for i := 0; i < 3; i++ {
 		require.Nil(t, flow.observe(low))
 	}
@@ -219,7 +219,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	}
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
-	require.Empty(t, group.mediaHints)
+	require.Empty(t, group.hints)
 	group.mu.Unlock()
 }
 
@@ -231,7 +231,7 @@ func TestVaneRaceRoundRecoversAfterCleanFinish(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	var probeCalls atomic.Int32
@@ -249,7 +249,7 @@ func TestVaneRaceRoundRecoversAfterCleanFinish(t *testing.T) {
 	// COLD-PICK: the probes below belong to the race under test.
 	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	actions := make(chan vanePolicyAction, 1)
@@ -302,7 +302,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 
 		probeEntered := make(chan struct{})
@@ -325,7 +325,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		// COLD-PICK: the probes below belong to the race under test.
 		suppressColdPickProbeForTest(t, group, metadata)
 		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+		flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 
@@ -368,7 +368,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		require.False(t, action())
 		group.mu.Lock()
 		require.Empty(t, group.targetHandoffs)
-		require.Empty(t, group.mediaBudgets)
+		require.Empty(t, group.budgets)
 		group.mu.Unlock()
 	})
 
@@ -378,17 +378,17 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
-		group.media.lowThroughputBPS = 5_000_000
-		group.media.demandBPS = 2_000_000
-		group.media.maxLowWindows = 3
+		group.flow.lowThroughputBPS = 5_000_000
+		group.flow.demandBPS = 2_000_000
+		group.flow.maxLowWindows = 3
 
 		metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		// COLD-PICK: the probes below belong to the race under test.
 		suppressColdPickProbeForTest(t, group, metadata)
 		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+		flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 
@@ -421,7 +421,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		require.False(t, action())
 		group.mu.Lock()
 		require.Empty(t, group.targetHandoffs)
-		require.Empty(t, group.mediaBudgets)
+		require.Empty(t, group.budgets)
 		group.mu.Unlock()
 	})
 }
@@ -435,7 +435,7 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 
 	probeEntered := make(chan struct{})
@@ -458,7 +458,7 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	// COLD-PICK: the probes below belong to the race under test.
 	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	conn := newVaneControlledConnWithNative(&vaneConnTestConn{}, clock,
@@ -493,8 +493,8 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	}
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
-	require.Empty(t, group.mediaHints)
-	require.Empty(t, group.mediaBudgets)
+	require.Empty(t, group.hints)
+	require.Empty(t, group.budgets)
 	require.Empty(t, group.targetPreferences)
 	group.mu.Unlock()
 }
@@ -554,7 +554,7 @@ func TestVaneConnectionLifecycleArbitration(t *testing.T) {
 	t.Run("closed flow rejects planned handoff", func(t *testing.T) {
 		group, _, _, beta, metadata := newTargetGroupForTest(t)
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)
-		flow := newVaneMediaFlow(group, plan.current, metadata)
+		flow := newVaneFlow(group, plan.current, metadata)
 		require.NotNil(t, flow)
 		flow.markClosed()
 
@@ -564,7 +564,7 @@ func TestVaneConnectionLifecycleArbitration(t *testing.T) {
 		require.False(t, action())
 		group.mu.Lock()
 		require.Empty(t, group.targetHandoffs)
-		require.Empty(t, group.mediaBudgets)
+		require.Empty(t, group.budgets)
 		group.mu.Unlock()
 	})
 }
@@ -578,7 +578,7 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{
@@ -591,7 +591,7 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 	// COLD-PICK: the probes below belong to the race under test.
 	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 
@@ -635,7 +635,7 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
-	require.Empty(t, group.mediaBudgets)
+	require.Empty(t, group.budgets)
 	require.Empty(t, group.targetPreferences)
 	group.mu.Unlock()
 	require.Len(t, observations, 1)
@@ -650,7 +650,7 @@ func TestVaneRaceTokenReleasedWhenEngineHasNoWinner(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	probeEntered := make(chan struct{})
@@ -670,7 +670,7 @@ func TestVaneRaceTokenReleasedWhenEngineHasNoWinner(t *testing.T) {
 	// COLD-PICK: the probes below belong to the race under test.
 	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	flow.scheduleRace(vaneThroughputObservation{
@@ -712,13 +712,13 @@ func TestVaneSyncChainPrepareCommitCloseSettleImproved(t *testing.T) {
 	beta.delay = 10
 	beta.dialConn = betaConn
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	group.media.lowThroughputBPS = 5_000_000
-	group.media.demandBPS = 2_000_000
-	group.media.minAge = 15 * time.Second
-	group.media.minBytes = 2 * 1024 * 1024
-	group.media.bufferGuard = 5 * time.Second
-	group.media.maxLowWindows = 4
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	group.flow.lowThroughputBPS = 5_000_000
+	group.flow.demandBPS = 2_000_000
+	group.flow.minAge = 15 * time.Second
+	group.flow.minBytes = 2 * 1024 * 1024
+	group.flow.bufferGuard = 5 * time.Second
+	group.flow.maxLowWindows = 4
 
 	now := clock.Now()
 	group.mu.Lock()
@@ -758,7 +758,7 @@ func TestVaneSyncChainPrepareCommitCloseSettleImproved(t *testing.T) {
 	require.True(t, closed, "the slow flow must be closed by the synchronous plan")
 	require.Equal(t, 1, alphaConn.closeCalls)
 
-	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	group.mu.Lock()
 	lease, leased := group.targetHandoffs[key]
@@ -782,7 +782,7 @@ func TestVaneSyncChainPrepareCommitCloseSettleImproved(t *testing.T) {
 	}
 	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffImproved)
 	require.Zero(t, group.VaneDiagnostics().Counters.HandoffNoGain)
-	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	targetKey, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	group.mu.Lock()
 	_, preferred := group.targetPreferences[targetKey]
@@ -871,9 +871,9 @@ func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
 			beta := newVaneTestProxy("beta", true, true)
 			gamma := newVaneTestProxy("gamma", true, true)
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-			group.media.lowThroughputBPS = 5_000_000
-			group.media.demandBPS = 2_000_000
+			configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+			group.flow.lowThroughputBPS = 5_000_000
+			group.flow.demandBPS = 2_000_000
 			now := clock.Now()
 			group.mu.Lock()
 			group.learning.mu.Lock()
@@ -883,8 +883,8 @@ func TestVanePrepareCandidateOrderingTieBreaks(t *testing.T) {
 			group.learning.mu.Unlock()
 			group.mu.Unlock()
 
-			key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-			plan, reason := group.prepareMediaReconnectForNodeDetailed(
+			key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+			plan, reason := group.prepareReconnectForNodeDetailed(
 				key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_600_000,
 			)
 			require.Empty(t, reason)
@@ -904,9 +904,9 @@ func TestVaneDemandDoesNotGateRescueCandidate(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	group.media.lowThroughputBPS = 5_000_000
-	group.media.demandBPS = 8_000_000
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	group.flow.lowThroughputBPS = 5_000_000
+	group.flow.demandBPS = 8_000_000
 	now := clock.Now()
 	group.mu.Lock()
 	group.learning.mu.Lock()
@@ -920,14 +920,14 @@ func TestVaneDemandDoesNotGateRescueCandidate(t *testing.T) {
 	group.mu.Unlock()
 
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-	plan, reason := group.prepareMediaReconnectForNodeDetailed(
+	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+	plan, reason := group.prepareReconnectForNodeDetailed(
 		key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_600_000,
 	)
 	require.Empty(t, reason)
 	require.Equal(t, beta.Name(), plan.challenger)
 
-	flow := newVaneMediaFlow(group, "alpha", metadata)
+	flow := newVaneFlow(group, "alpha", metadata)
 	require.NotNil(t, flow)
 	request := flow.raceRequest(vaneThroughputObservation{
 		BitsPerSecond: 1_600_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
@@ -946,7 +946,7 @@ func TestVaneDemandDoesNotGateRescueCandidate(t *testing.T) {
 // challenger-evidence-degraded rejections with lowWindows above 17).
 func TestVaneCommitAcceptsRescueBelowDemand(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
-	group.media.demandBPS = 15_000_000
+	group.flow.demandBPS = 15_000_000
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	plan.knownGood = true
 	plan.currentBPS = 1_000_000
@@ -961,7 +961,7 @@ func TestVaneCommitAcceptsRescueBelowDemand(t *testing.T) {
 	}
 	group.mu.Unlock()
 
-	require.Empty(t, group.commitMediaReconnectDetailed(plan),
+	require.Empty(t, group.commitReconnectDetailed(plan),
 		"a 13.6 Mbps challenger must rescue a 1 bps flow even though demand is 15 Mbps")
 }
 
@@ -969,19 +969,19 @@ func TestVaneCommitAcceptsRescueBelowDemand(t *testing.T) {
 // for the whole reconnect cooldown. Once the replacement flow is starving
 // again and the break window has elapsed, one retry is allowed.
 func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
-	newRig := func(t *testing.T) (*Vane, *vaneConnTestClock, *C.Metadata, vaneMediaTargetKey, *vaneTestProxy) {
+	newRig := func(t *testing.T) (*Vane, *vaneConnTestClock, *C.Metadata, vaneFlowKey, *vaneTestProxy) {
 		t.Helper()
 		clock := newVaneConnTestClock()
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-		group.media.lowThroughputBPS = 5_000_000
-		group.media.demandBPS = 8_000_000
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		group.flow.lowThroughputBPS = 5_000_000
+		group.flow.demandBPS = 8_000_000
 		// Production cooldown is 10 minutes; the break window has to sit well
 		// inside it for the rule to matter.
-		group.media.reconnectCooldown = 10 * time.Minute
+		group.flow.reconnectCooldown = 10 * time.Minute
 		now := clock.Now()
 		group.mu.Lock()
 		group.learning.mu.Lock()
@@ -991,8 +991,8 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 			bitsPerSecond: 6_000_000, observedAt: now,
 		}
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-		key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-		group.mediaReconnects[vaneMediaNodeKeyFor(key, alpha.Name())] = now.Add(group.media.reconnectCooldown)
+		key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+		group.reconnects[vaneNodeKeyFor(key, alpha.Name())] = now.Add(group.flow.reconnectCooldown)
 		group.learning.mu.Unlock()
 		group.mu.Unlock()
 		return group, clock, metadata, key, beta
@@ -1005,14 +1005,14 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 		group.mu.Unlock()
 		require.NotNil(t, alphaState)
 
-		_, reason := group.prepareMediaReconnectForNodeDetailed(
+		_, reason := group.prepareReconnectForNodeDetailed(
 			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_000_000,
 		)
 		require.Equal(t, "reconnect-cooldown", reason,
 			"inside the break window the cooldown still holds")
 
-		clock.Advance(vaneMediaBreakWindow + time.Second)
-		plan, reason := group.prepareMediaReconnectForNodeDetailed(
+		clock.Advance(vaneBreakWindow + time.Second)
+		plan, reason := group.prepareReconnectForNodeDetailed(
 			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_000_000,
 		)
 		require.Empty(t, reason, "a starving flow must be able to retry after the break window")
@@ -1033,8 +1033,8 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 		group.mu.Unlock()
 		require.NotNil(t, alphaState)
 
-		clock.Advance(vaneMediaBreakWindow + time.Second)
-		_, reason := group.prepareMediaReconnectForNodeDetailed(
+		clock.Advance(vaneBreakWindow + time.Second)
+		_, reason := group.prepareReconnectForNodeDetailed(
 			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 20_000_000,
 		)
 		require.Equal(t, "reconnect-cooldown", reason,
@@ -1052,12 +1052,12 @@ func TestVaneRaceRescueFloorIgnoresDemandInflatedSlowLine(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	group.media.lowThroughputBPS = 15_000_000
-	group.media.demandBPS = 15_000_000
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	group.flow.lowThroughputBPS = 15_000_000
+	group.flow.demandBPS = 15_000_000
 
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	flow := newVaneMediaFlow(group, "alpha", metadata)
+	flow := newVaneFlow(group, "alpha", metadata)
 	require.NotNil(t, flow)
 	request := flow.raceRequest(vaneThroughputObservation{
 		BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,

@@ -33,7 +33,7 @@ func newVaneRacingEvidenceGroup(t *testing.T) (*Vane, *vaneConnTestClock, *vaneT
 	beta := newVaneTestProxy("beta", true, true)
 	gamma := newVaneTestProxy("gamma", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	return group, clock, alpha, beta, gamma
 }
@@ -65,7 +65,7 @@ func TestVaneRacingTargetEvidenceOutranksCapabilityAndProbing(t *testing.T) {
 	seedVaneCapability(group, clock, gamma, 50_000_000)
 
 	resultCh := make(chan vaneRaceResult, 1)
-	scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+	scheduled, reason := group.scheduleReconnectRace(request, func(result vaneRaceResult) { resultCh <- result })
 	require.True(t, scheduled, reason)
 	result := <-resultCh
 	require.Equal(t, "beta", result.winner.name, "fresh real-target evidence must win before any probe")
@@ -86,7 +86,7 @@ func TestVaneRacingCapabilityCacheSkipsProbing(t *testing.T) {
 	seedVaneCapability(group, clock, gamma, 50_000_000)
 
 	resultCh := make(chan vaneRaceResult, 1)
-	scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+	scheduled, reason := group.scheduleReconnectRace(request, func(result vaneRaceResult) { resultCh <- result })
 	require.True(t, scheduled, reason)
 	result := <-resultCh
 	require.Equal(t, "gamma", result.winner.name)
@@ -107,7 +107,7 @@ func TestVaneRacingCachedBelowRequiredSuppressesProbe(t *testing.T) {
 	seedVaneCapability(group, clock, beta, 1_000)
 	seedVaneCapability(group, clock, gamma, 1_000)
 
-	scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("a cached slow challenger must not win") })
+	scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) { t.Fatal("a cached slow challenger must not win") })
 	require.True(t, scheduled, reason)
 	waitVaneRaceIdle(t, group)
 	require.Zero(t, probes.Load(), "fresh cache entries must short-circuit probing")

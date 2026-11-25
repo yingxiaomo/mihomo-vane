@@ -15,14 +15,14 @@ import (
 	"github.com/metacubex/mihomo/log"
 )
 
-func checkVaneRemovedMediaKeys(config map[string]any) error {
+func checkVaneRemovedFlowKeys(config map[string]any) error {
 	for supplied := range config {
 		if strings.EqualFold(supplied, "racing") {
 			return fmt.Errorf("vane group: replace removed racing key with vane: true or false")
 		}
 	}
 	var found []string
-	for _, key := range vaneRemovedMediaKeys {
+	for _, key := range vaneRemovedFlowKeys {
 		for supplied := range config {
 			if strings.EqualFold(supplied, key) {
 				found = append(found, key)
@@ -31,12 +31,12 @@ func checkVaneRemovedMediaKeys(config map[string]any) error {
 		}
 	}
 	if len(found) != 0 {
-		return fmt.Errorf("vane media thresholds %s are now hardcoded in the kernel; remove them from the config", strings.Join(found, ", "))
+		return fmt.Errorf("vane flow thresholds %s are now hardcoded in the kernel; remove them from the config", strings.Join(found, ", "))
 	}
 	return nil
 }
 
-var vaneRemovedMediaKeys = []string{
+var vaneRemovedFlowKeys = []string{
 	"media-low-throughput", "media-low-windows", "media-min-age", "media-min-bytes",
 	"media-buffer-guard", "media-reconnect-cooldown", "media-slow-cooldown", "media-hint-ttl",
 	"media-challenger-ratio", "media-reconnect-budget", "media-budget-window",
@@ -87,7 +87,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		return nil, errFormat
 	}
 	if groupOption.Type == "vane" {
-		if err := checkVaneRemovedMediaKeys(config); err != nil {
+		if err := checkVaneRemovedFlowKeys(config); err != nil {
 			return nil, err
 		}
 	}

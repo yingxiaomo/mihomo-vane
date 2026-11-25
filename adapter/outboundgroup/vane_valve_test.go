@@ -20,7 +20,7 @@ import (
 // newValveRig commits a baseline handoff alpha→beta and builds the switched-to
 // flow on beta with a real connection wired for policy submission — the same
 // wiring DialContext uses, driven by hand for deterministic windows.
-func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *vaneTestProxy, *vaneTestProxy, *vaneTestProxy, *vaneMediaFlow, *vaneObservedConn, *vaneConnTestConn, *C.Metadata, vaneMediaTargetKey) {
+func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *vaneTestProxy, *vaneTestProxy, *vaneTestProxy, *vaneFlow, *vaneObservedConn, *vaneConnTestConn, *C.Metadata, vaneFlowKey) {
 	t.Helper()
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -30,19 +30,19 @@ func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *v
 	gamma := newVaneTestProxy("gamma", true, true)
 	gamma.delay = 30
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, demandBPS)
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	metadata := &C.Metadata{Host: "rr-valve.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	suppressColdPickProbeForTest(t, group, metadata)
-	mediaKey := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+	scopeKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
 
 	// The original switch: alpha→beta, beta holds fresh node evidence.
 	seedChain01Traffic(t, group, beta.Name(), clock.Now(), 12_000_000)
 	plan, reason := chain01Prepare(t, group, metadata, alpha, 1_600_000)
 	require.Empty(t, reason)
 	require.Equal(t, beta.Name(), plan.challenger)
-	require.Empty(t, group.commitMediaReconnectDetailed(plan))
+	require.Empty(t, group.commitReconnectDetailed(plan))
 
 	// The switched-to flow claims the handoff token on its own connection.
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
@@ -50,12 +50,12 @@ func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *v
 	require.Equal(t, beta.Name(), decision.proxy.Name())
 	underlying := &vaneConnTestConn{}
 	observed := newVaneObservedConn(underlying, clock, nil, nil).(*vaneObservedConn)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata, decision.handoff)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata, decision.handoff)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	flow.setPolicySubmitter(observed.submitPolicyAction)
 	observed.setOnEmptyWindow(flow.noteEmptyWindow)
-	return group, clock, alpha, beta, gamma, flow, observed, underlying, metadata, mediaKey
+	return group, clock, alpha, beta, gamma, flow, observed, underlying, metadata, scopeKey
 }
 
 // valveEventCount counts reconnect-valve diagnostics records.
@@ -68,11 +68,11 @@ func valveEventCount(t *testing.T, group *Vane) int {
 // better-evidenced candidate and the early close commits WITHOUT hitting the
 // reconnect cooldown the original commit wrote.
 func TestVaneValveClosesToBetterEvidence(t *testing.T) {
-	group, clock, alpha, beta, gamma, flow, observed, _, _, mediaKey := newValveRig(t, 2_000_000)
+	group, clock, alpha, beta, gamma, flow, observed, _, _, scopeKey := newValveRig(t, 2_000_000)
 	seedChain01Traffic(t, group, gamma.Name(), clock.Now(), 12_000_000)
 
 	group.mu.Lock()
-	require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(mediaKey, alpha.Name())].After(clock.Now()), "the original commit wrote the cooldown")
+	require.True(t, group.reconnects[vaneNodeKeyFor(scopeKey, alpha.Name())].After(clock.Now()), "the original commit wrote the cooldown")
 	group.mu.Unlock()
 
 	flow.noteEmptyWindow()
@@ -82,7 +82,7 @@ func TestVaneValveClosesToBetterEvidence(t *testing.T) {
 	// flow through the normal policy path.
 	require.True(t, observed.policyClosed, "the early close must close the switched-to connection")
 	group.mu.Lock()
-	hint := group.mediaHints[mediaKey]
+	hint := group.hints[scopeKey]
 	group.mu.Unlock()
 	require.Equal(t, gamma.Name(), hint.candidate, "the valve must land on the better-evidenced candidate")
 	require.Positive(t, group.VaneDiagnostics().Counters.ReconnectCommitted)

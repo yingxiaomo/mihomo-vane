@@ -8,7 +8,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
-// Cold-pick probe (COLD-PICK): when a media flow's first pick falls through to
+// Cold-pick probe (COLD-PICK): when a flow's first pick falls through to
 // the ranking path on a cold target, the top two candidates are probed through
 // the racing endpoint so the initial node is measured, not just well-ranked by
 // delay. Results write the node-level capability cache and nothing else —
@@ -41,7 +41,7 @@ type pickProbeOutcome struct {
 // eligible reports whether a probe result may be trusted as cold-pick
 // evidence. A read timeout returns valid with a burst average, which says
 // nothing about sustained throughput, so it loses the cold-pick contract but
-// still counts for a running media race.
+// still counts for a running reconnect race.
 func (o pickProbeOutcome) eligible() bool {
 	return o.result.valid && o.result.reason != "read-timeout"
 }
@@ -122,7 +122,7 @@ func (a *Vane) runColdPickProbe(ctx context.Context, probe coldPickProbe) (outco
 	// limits than requested when the hourly budget's remainder drops below
 	// the minimum reservation — index limits[i] for i >= len(limits) panics
 	// on the dial goroutine (no recover up the tunnel stack). Probe only the
-	// candidates we actually reserved for, mirroring runMediaRace.
+	// candidates we actually reserved for, mirroring runReconnectRace.
 	probe.candidates = probe.candidates[:len(limits)]
 	type entry struct {
 		outcome  pickProbeOutcome

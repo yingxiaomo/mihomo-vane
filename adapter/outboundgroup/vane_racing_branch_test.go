@@ -44,70 +44,70 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 	cases := []struct {
 		name      string
 		committed bool
-		mutate    func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy)
-		prepare   func(t *testing.T, group *Vane, plan vaneMediaPlan)
+		mutate    func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy)
+		prepare   func(t *testing.T, group *Vane, plan vaneReconnectPlan)
 		want      string
 	}{
 		{
 			name: "challenger unhealthy",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				beta.alive = false
 			},
 			want: "challenger-unhealthy",
 		},
 		{
 			name: "stale current identity",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				plan.identity = "test:alpha-old"
 			},
 			want: "stale-node-identity",
 		},
 		{
 			name: "stale generation",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				plan.generation = group.learningGeneration - 1
 			},
 			want: "stale-generation",
 		},
 		{
 			name: "stale current epoch",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				plan.nodeEpoch = plan.nodeEpoch + 7
 			},
 			want: "stale-node-identity",
 		},
 		{
 			name: "stale challenger epoch",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				plan.challengerEpoch = 9
 			},
 			want: "stale-node-identity",
 		},
 		{
 			name: "invalid target",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				plan.targetStateKey = vaneTargetKey{}
 			},
 			want: "invalid-target",
 		},
 		{
 			name: "expired plan",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
-				clock.Advance(group.media.hintTTL + time.Second)
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
+				clock.Advance(group.flow.hintTTL + time.Second)
 			},
 			want: "plan-expired",
 		},
 		{
 			name:      "reconnect cooldown",
 			committed: true,
-			prepare: func(t *testing.T, group *Vane, plan vaneMediaPlan) {
+			prepare: func(t *testing.T, group *Vane, plan vaneReconnectPlan) {
 				require.Empty(t, group.commitTargetHandoff(plan))
 			},
 			want: "reconnect-cooldown",
 		},
 		{
 			name: "target candidate cooldown",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				group.mu.Lock()
 				node := group.ensureProxyNodeLocked(beta, clock.Now())
 				lease := vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: node.epoch}
@@ -118,7 +118,7 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 		},
 		{
 			name: "dial cooldown",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				group.mu.Lock()
 				group.cooldowns[vaneCooldownKey{
 					transport: vaneTransportTCP, target: plan.target, port: plan.port,
@@ -130,10 +130,10 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 		},
 		{
 			name: "challenger slow cooldown",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				group.mu.Lock()
-				group.mediaSlowCooldowns[vaneMediaCandidateKey{
-					vaneMediaTargetKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity,
+				group.slowCooldowns[vaneCandidateKey{
+					vaneFlowKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity,
 				}] = clock.Now().Add(time.Minute)
 				group.mu.Unlock()
 			},
@@ -141,8 +141,8 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 		},
 		{
 			name: "budget exhausted",
-			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneMediaPlan, alpha, beta *vaneTestProxy) {
-				group.media.budgetMax = 0
+			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
+				group.flow.budgetMax = 0
 			},
 			want: "budget-exhausted",
 		},
@@ -188,12 +188,12 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 			},
 		},
 		{
-			name: "media slow cooldown blocks preference",
+			name: "slow cooldown blocks preference",
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease) {
-				group.mediaSlowCooldowns[vaneMediaCandidateKey{
-					vaneMediaTargetKey: vaneMediaTargetKey{target: key.targetScope, port: key.port},
-					candidate:          lease.name,
-					identity:           lease.identity,
+				group.slowCooldowns[vaneCandidateKey{
+					vaneFlowKey: vaneFlowKey{target: key.targetScope, port: key.port},
+					candidate:   lease.name,
+					identity:    lease.identity,
 				}] = clock.Now().Add(time.Minute)
 			},
 		},
@@ -201,7 +201,7 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			group, clock, _, beta, metadata := newTargetGroupForTest(t)
-			key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+			key, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 			require.True(t, ok)
 			group.mu.Lock()
 			node := group.ensureProxyNodeLocked(beta, clock.Now())
@@ -228,7 +228,7 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 
 	t.Run("missing member proxy", func(t *testing.T) {
 		group, clock, _, beta, metadata := newTargetGroupForTest(t)
-		key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+		key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 		group.mu.Lock()
 		lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 		group.targetPreferences[key] = vaneTargetPreference{to: lease, expiresAt: clock.Now().Add(time.Hour), updatedAt: clock.Now()}
@@ -245,7 +245,7 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 // TARGET-FEEDBACK-001 + TARGET-COOLDOWN-001: evidence and failure guards on the target path.
 func TestVaneTargetEvidenceAndFailureGuards(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
 	lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.mu.Unlock()
@@ -370,7 +370,7 @@ func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	request.generation = group.learningGeneration - 1
 	called := false
-	scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) { called = true })
+	scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) { called = true })
 	require.True(t, scheduled, reason)
 	waitVaneRaceIdle(t, group)
 	require.False(t, called)
@@ -380,7 +380,7 @@ func TestVaneRaceRejectsStaleGenerationBeforeProbing(t *testing.T) {
 	// A stale race must not suppress the next race for this target: the very
 	// next schedule with a current generation goes through.
 	fresh := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
-	scheduled, reason = group.scheduleMediaRace(fresh, func(vaneRaceResult) {})
+	scheduled, reason = group.scheduleReconnectRace(fresh, func(vaneRaceResult) {})
 	require.True(t, scheduled, reason)
 	waitVaneRaceIdle(t, group)
 }
@@ -394,7 +394,7 @@ func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
 		return vaneProbeResult{reason: "tls-error"}
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
-	scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {
+	scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) {
 		t.Fatal("a race without a qualified challenger must not produce a winner")
 	})
 	require.True(t, scheduled, reason)
@@ -403,7 +403,7 @@ func TestVaneRaceNoWinnerStillSuppresses(t *testing.T) {
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
 
 	// A genuine no-winner result still installs the suppression window.
-	scheduled, reason = group.scheduleMediaRace(request, func(vaneRaceResult) {})
+	scheduled, reason = group.scheduleReconnectRace(request, func(vaneRaceResult) {})
 	require.False(t, scheduled)
 	require.Equal(t, "no-winner-cooldown", reason)
 }
@@ -430,10 +430,10 @@ func TestVaneRaceRecoveredFlowIsNotClosed(t *testing.T) {
 	}
 	alphaLease := group.memberLeaseLocked(alpha.Name(), alpha.identity)
 	group.mu.Unlock()
-	flow := newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	flow := newVaneFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, flow)
 	// Production stamps the dialing member's identity and epoch onto the flow
-	// right after newVaneMediaFlow; without them the race sees a stale lease.
+	// right after newVaneFlow; without them the race sees a stale lease.
 	flow.identity = alphaLease.identity
 	flow.nodeEpoch = alphaLease.epoch
 	sample := vaneThroughputObservation{BitsPerSecond: 500_000, TotalBytes: 4 * 1024 * 1024, Age: 30 * time.Second}
@@ -487,7 +487,7 @@ func TestVaneRaceLifecycleSharesOneIDAcrossHandoff(t *testing.T) {
 	alphaLease := group.memberLeaseLocked(alpha.Name(), alpha.identity)
 	generation := group.learningGeneration
 	group.mu.Unlock()
-	flow := newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	flow := newVaneFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, flow)
 	flow.identity = alphaLease.identity
 	flow.nodeEpoch = alphaLease.epoch
@@ -550,7 +550,7 @@ func TestVaneRaceSnapshotWithoutChallengers(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	candidates, reason := group.snapshotRaceCandidates(request)
@@ -560,20 +560,20 @@ func TestVaneRaceSnapshotWithoutChallengers(t *testing.T) {
 
 // RACE-ENGINE-001 + TARGET-COOLDOWN-001: blocked candidates race only when nothing else is available.
 func TestVaneRaceSnapshotBlockedCandidates(t *testing.T) {
-	t.Run("media slow cooldown extends the block deadline", func(t *testing.T) {
+	t.Run("slow cooldown extends the block deadline", func(t *testing.T) {
 		clock := newVaneConnTestClock()
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 		group.mu.Lock()
 		lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 		failure := group.recordTargetFailureLocked(request.targetKey, lease, clock.Now())
 		cooldown := clock.Now().Add(2 * time.Hour)
-		group.mediaSlowCooldowns[vaneMediaCandidateKey{
-			vaneMediaTargetKey: request.mediaKey, candidate: beta.Name(), identity: beta.identity,
+		group.slowCooldowns[vaneCandidateKey{
+			vaneFlowKey: request.scopeKey, candidate: beta.Name(), identity: beta.identity,
 		}] = cooldown
 		group.mu.Unlock()
 
@@ -672,7 +672,7 @@ func TestVaneRaceSnapshotExcludesLowValueCandidates(t *testing.T) {
 		require.Empty(t, candidates)
 		require.Equal(t, "no-challenger", reason)
 
-		scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("no race may run without candidates") })
+		scheduled, _ := group.scheduleReconnectRace(request, func(vaneRaceResult) { t.Fatal("no race may run without candidates") })
 		require.True(t, scheduled, "scheduling succeeds and the race ends without a winner")
 		waitVaneRaceIdle(t, group)
 		require.Zero(t, probes.Load(), "an empty candidate pool must not start probes")
@@ -695,7 +695,7 @@ func TestVaneRaceSnapshotExcludesLowValueCandidates(t *testing.T) {
 		group.recordTargetEvidence(request.targetKey, betaLease, 1_000, false)
 
 		resultCh := make(chan vaneRaceResult, 1)
-		scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+		scheduled, reason := group.scheduleReconnectRace(request, func(result vaneRaceResult) { resultCh <- result })
 		require.True(t, scheduled, reason)
 		require.Eventually(t, func() bool { return probes.Load() == 1 }, 2*time.Second, time.Millisecond,
 			"only the surviving candidate may be probed")
@@ -731,7 +731,7 @@ func TestVaneRaceCandidateOrderingTieBreaks(t *testing.T) {
 	group.racingRuntime.mu.Unlock()
 	otherKey := request
 	otherKey.targetKey = vaneTargetKey{transport: vaneTransportTCP, targetScope: "googlevideo.com", port: 8443}
-	otherKey.mediaKey = vaneMediaTargetKey{target: "googlevideo.com", port: 8443}
+	otherKey.scopeKey = vaneFlowKey{target: "googlevideo.com", port: 8443}
 	candidates, reason = group.snapshotRaceCandidates(otherKey)
 	require.Empty(t, reason)
 	require.Equal(t, "gamma", candidates[0].member.name)
@@ -768,7 +768,7 @@ func TestVaneRaceBudgetDeniedStopsProbing(t *testing.T) {
 		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
-	scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("a denied budget must not produce a winner") })
+	scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) { t.Fatal("a denied budget must not produce a winner") })
 	require.True(t, scheduled, reason)
 	waitVaneRaceIdle(t, group)
 	require.Zero(t, probes)

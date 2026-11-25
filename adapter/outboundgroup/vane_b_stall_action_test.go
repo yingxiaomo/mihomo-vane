@@ -34,13 +34,13 @@ func TestVaneStalledFlowSubmitsItsPlan(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	t.Cleanup(func() { _ = group.Close() })
 	seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)
 
 	metadata := &C.Metadata{Host: "rr-stall.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	flow := newVaneMediaFlow(group, alpha.Name(), metadata)
+	flow := newVaneFlow(group, alpha.Name(), metadata)
 	require.NotNil(t, flow)
 	var delivered []bool
 	flow.setPolicySubmitter(func(_ vanePolicyAction, immediate bool) { delivered = append(delivered, immediate) })

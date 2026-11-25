@@ -22,7 +22,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 			LossRate: lossRate, LossSupported: supported,
 		}
 	}
-	b2Flow := func(t *testing.T, withRacing bool) (*Vane, *vaneMediaFlow, *vaneConnTestClock) {
+	b2Flow := func(t *testing.T, withRacing bool) (*Vane, *vaneFlow, *vaneConnTestClock) {
 		t.Helper()
 		group, clock, alpha, _, _ := newVaneRacingEvidenceGroup(t)
 		if !withRacing {
@@ -32,13 +32,13 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 		group.ensureProxyNodeLocked(alpha, clock.Now())
 		lease := group.memberLeaseLocked(alpha.Name(), alpha.identity)
 		group.mu.Unlock()
-		flow := newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+		flow := newVaneFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 		require.NotNil(t, flow)
 		flow.identity = lease.identity
 		flow.nodeEpoch = lease.epoch
 		return group, flow, clock
 	}
-	b2Key := func(flow *vaneMediaFlow) vaneTargetFailureKey {
+	b2Key := func(flow *vaneFlow) vaneTargetFailureKey {
 		return vaneTargetFailureKey{
 			target: flow.targetStateKey,
 			member: vaneMemberLease{name: flow.candidate, identity: flow.identity, epoch: flow.nodeEpoch},
@@ -73,7 +73,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 
 	t.Run("big transfer records, small transfer does not", func(t *testing.T) {
 		group, flow, clock := b2Flow(t, true)
-		group.recordB2MediaLoss(flow, observation(0.01, true, 4*1024*1024), clock.Now())
+		group.recordB2Loss(flow, observation(0.01, true, 4*1024*1024), clock.Now())
 		group.mu.Lock()
 		state := group.targetFailures[b2Key(flow)]
 		group.mu.Unlock()
@@ -82,7 +82,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 		require.Zero(t, state.streak, "observation must not touch the failure fields")
 		require.True(t, state.lastFailureAt.IsZero())
 
-		group.recordB2MediaLoss(flow, observation(0.01, true, 1024), clock.Now())
+		group.recordB2Loss(flow, observation(0.01, true, 1024), clock.Now())
 		group.mu.Lock()
 		state = group.targetFailures[b2Key(flow)]
 		group.mu.Unlock()
@@ -91,7 +91,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 
 	t.Run("unsupported read counts unsupported, no sample", func(t *testing.T) {
 		group, flow, clock := b2Flow(t, true)
-		group.recordB2MediaLoss(flow, observation(0, false, 4*1024*1024), clock.Now())
+		group.recordB2Loss(flow, observation(0, false, 4*1024*1024), clock.Now())
 		group.mu.Lock()
 		state := group.targetFailures[b2Key(flow)]
 		group.mu.Unlock()
@@ -102,7 +102,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 
 	t.Run("observation never acts as failure", func(t *testing.T) {
 		group, flow, clock := b2Flow(t, true)
-		group.recordB2MediaLoss(flow, observation(0.01, true, 4*1024*1024), clock.Now())
+		group.recordB2Loss(flow, observation(0.01, true, 4*1024*1024), clock.Now())
 		group.mu.Lock()
 		_, blocked := group.targetMemberBlockedLocked(flow.targetStateKey, b2Key(flow).member, clock.Now())
 		group.mu.Unlock()
@@ -112,7 +112,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 
 	t.Run("racing off does not stop recording", func(t *testing.T) {
 		group, flow, clock := b2Flow(t, false)
-		group.recordB2MediaLoss(flow, observation(0.02, true, 4*1024*1024), clock.Now())
+		group.recordB2Loss(flow, observation(0.02, true, 4*1024*1024), clock.Now())
 		group.mu.Lock()
 		state := group.targetFailures[b2Key(flow)]
 		group.mu.Unlock()
@@ -125,7 +125,7 @@ func TestVaneB2LossTelemetry(t *testing.T) {
 		now := clock.Now()
 		old := now.Add(-2 * time.Hour)
 		late := now.Add(time.Hour)
-		group.recordB2MediaLoss(flow, observation(0.01, true, 4*1024*1024), late)
+		group.recordB2Loss(flow, observation(0.01, true, 4*1024*1024), late)
 
 		group.mu.Lock()
 		base := flow.targetStateKey

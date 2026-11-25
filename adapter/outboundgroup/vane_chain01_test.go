@@ -12,17 +12,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// chain01ProductionValues restores the values configureVaneMediaForTest
+// chain01ProductionValues restores the values configureVaneFlowForTest
 // quietly changed. CHAIN-01 assertions depend on them; a test that passes on
 // the helper's weakened values is hollow.
 func chain01ProductionValues(t *testing.T, group *Vane, demandBPS float64) {
 	t.Helper()
-	group.media.lowThroughputBPS = 5_000_000
-	group.media.demandBPS = demandBPS
-	group.media.maxLowWindows = 4
-	group.media.minAge = 15 * time.Second
-	group.media.minBytes = 2 * 1024 * 1024
-	group.media.bufferGuard = 5 * time.Second
+	group.flow.lowThroughputBPS = 5_000_000
+	group.flow.demandBPS = demandBPS
+	group.flow.maxLowWindows = 4
+	group.flow.minAge = 15 * time.Second
+	group.flow.minBytes = 2 * 1024 * 1024
+	group.flow.bufferGuard = 5 * time.Second
 }
 
 func seedChain01Traffic(t *testing.T, group *Vane, name string, now time.Time, bps float64) {
@@ -46,7 +46,7 @@ func seedChain01Capability(t *testing.T, group *Vane, member vaneMemberLease, bp
 	group.racingRuntime.mu.Unlock()
 }
 
-func chain01Prepare(t *testing.T, group *Vane, metadata *C.Metadata, current *vaneTestProxy, currentBPS float64) (vaneMediaPlan, string) {
+func chain01Prepare(t *testing.T, group *Vane, metadata *C.Metadata, current *vaneTestProxy, currentBPS float64) (vaneReconnectPlan, string) {
 	t.Helper()
 	group.mu.Lock()
 	group.learning.mu.Lock()
@@ -55,8 +55,8 @@ func chain01Prepare(t *testing.T, group *Vane, metadata *C.Metadata, current *va
 	identity, epoch := state.identity, state.epoch
 	group.learning.mu.Unlock()
 	group.mu.Unlock()
-	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-	return group.prepareMediaReconnectForNodeDetailed(key, metadata.Host, metadata.DstPort, current.Name(), identity, epoch, currentBPS)
+	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+	return group.prepareReconnectForNodeDetailed(key, metadata.Host, metadata.DstPort, current.Name(), identity, epoch, currentBPS)
 }
 
 // CHAIN-01-01: cold start with delay-only challengers must not close the flow.
@@ -68,7 +68,7 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			beta := newVaneTestProxy("beta", true, true)
 			beta.delay = 10
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+			configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 			chain01ProductionValues(t, group, 2_000_000)
 			configureVaneRacingForTest(t, group, mode)
 			var probeCalls atomic.Int64
@@ -82,10 +82,10 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			// not write capability evidence; this test is about the gate on
 			// the slow-flow path, not about the pick probe.
 			group.mu.Lock()
-			group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target] = clock.Now()
+			group.lastPickProbeAt[group.targetScopeKey(metadata.Host, metadata.DstPort).target] = clock.Now()
 			group.mu.Unlock()
 			decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-			flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+			flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 			require.NotNil(t, flow)
 			flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 			low := vaneThroughputObservation{BitsPerSecond: 1_480_000, TotalBytes: 8 * 1024 * 1024, Age: 30 * time.Second, Delivered: true}
@@ -97,12 +97,12 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			require.GreaterOrEqual(t, snapshot.Counters.ReconnectSuppressed, uint64(1))
 			require.GreaterOrEqual(t, snapshot.Suppressions["no-evidence-candidate"], uint64(1))
 			require.Zero(t, snapshot.Counters.ReconnectCommitted)
-			key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+			key := group.targetScopeKey(metadata.Host, metadata.DstPort)
 			group.mu.Lock()
-			require.Zero(t, group.mediaBudgets[vaneMediaNodeKeyFor(key, alpha.Name())].count)
-			_, hinted := group.mediaHints[key]
-			_, cooled := group.mediaSlowCooldowns[vaneMediaCandidateKey{
-				vaneMediaTargetKey: key, candidate: alpha.Name(), identity: alpha.identity,
+			require.Zero(t, group.budgets[vaneNodeKeyFor(key, alpha.Name())].count)
+			_, hinted := group.hints[key]
+			_, cooled := group.slowCooldowns[vaneCandidateKey{
+				vaneFlowKey: key, candidate: alpha.Name(), identity: alpha.identity,
 			}]
 			group.mu.Unlock()
 			require.False(t, hinted)
@@ -124,7 +124,7 @@ func TestVaneChain01CapabilityEvidenceAdmitsChallenger(t *testing.T) {
 	gamma := newVaneTestProxy("gamma", true, true)
 	gamma.delay = 20
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 10_000_000)
 
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
@@ -161,7 +161,7 @@ func TestVaneChain01FreshEvidenceBelowBarDoesNotClose(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 2_000_000)
 	seedChain01Traffic(t, group, beta.Name(), clock.Now(), 3_000_000)
 
@@ -181,7 +181,7 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		seedChain01Traffic(t, group, beta.Name(), clock.Now(), 12_000_000)
 
@@ -194,7 +194,7 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 		// The close is only half of the story: the committed handoff must also
 		// settle and build the target preference (CHAIN-03's full chain, pinned
 		// at the unit level for the knownGood path).
-		require.Empty(t, group.commitMediaReconnectDetailed(plan))
+		require.Empty(t, group.commitReconnectDetailed(plan))
 		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.NotNil(t, decision.handoff)
 		// The settle member is what the reconnected flow would carry: the
@@ -216,7 +216,7 @@ func TestVaneChain01DemandInclusiveBar(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		seedChain01Traffic(t, group, beta.Name(), clock.Now(), 6_000_000)
 
@@ -238,7 +238,7 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		seedChain01Capability(t, group, vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}, 12_060_000, clock.Now())
@@ -250,10 +250,10 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		plan, _ := chain01Prepare(t, group, metadata, alpha, 1_480_000)
 		require.NotEmpty(t, plan.challenger)
 		seedChain01Capability(t, group, vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}, 12_060_000, clock.Now().Add(-11*time.Minute))
-		require.Equal(t, "challenger-no-evidence", group.commitMediaReconnectDetailed(plan))
+		require.Equal(t, "challenger-no-evidence", group.commitReconnectDetailed(plan))
 		group.mu.Lock()
-		key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-		require.Zero(t, group.mediaBudgets[vaneMediaNodeKeyFor(key, alpha.Name())].count)
+		key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+		require.Zero(t, group.budgets[vaneNodeKeyFor(key, alpha.Name())].count)
 		group.mu.Unlock()
 	})
 
@@ -263,7 +263,7 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 10_000_000)
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		seedChain01Capability(t, group, vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}, 12_060_000, clock.Now())
@@ -279,7 +279,7 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		delete(group.racingRuntime.capabilities, vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1})
 		group.racingRuntime.mu.Unlock()
 		seedChain01Traffic(t, group, beta.Name(), clock.Now(), 3_000_000)
-		require.Equal(t, "challenger-evidence-degraded", group.commitMediaReconnectDetailed(plan))
+		require.Equal(t, "challenger-evidence-degraded", group.commitReconnectDetailed(plan))
 	})
 }
 
@@ -312,7 +312,7 @@ func TestVaneChain01TargetEvidenceWinnerCommits(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 2_000_000)
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -321,7 +321,7 @@ func TestVaneChain01TargetEvidenceWinnerCommits(t *testing.T) {
 
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+		flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 		now := clock.Now()
@@ -375,7 +375,7 @@ func TestVaneChain01TargetEvidenceWinnerCommits(t *testing.T) {
 
 // CHAIN-01-08: target-level evidence outranks node-level evidence by tier.
 func TestVaneChain01TargetEvidencePriority(t *testing.T) {
-	newCase := func(t *testing.T) (*Vane, *vaneTestProxy, vaneMediaPlan, *C.Metadata) {
+	newCase := func(t *testing.T) (*Vane, *vaneTestProxy, vaneReconnectPlan, *C.Metadata) {
 		group, _, _, beta, metadata := newTargetGroupForTest(t)
 		chain01ProductionValues(t, group, 2_000_000)
 		plan := prepareTargetHandoffForTest(t, group, metadata, beta)

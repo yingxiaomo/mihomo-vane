@@ -136,7 +136,7 @@ func TestVaneCumulDecayDilutesLossyHistory(t *testing.T) {
 	group.mu.Unlock()
 	require.True(t, ok)
 	require.InDelta(t, 0.04633, rate, 2e-3)
-	require.Less(t, rate, vaneDefaultMediaHighLossRate)
+	require.Less(t, rate, vaneDefaultHighLossRate)
 }
 
 // FRESH-FUTURE-01: a future timestamp is not fresh.

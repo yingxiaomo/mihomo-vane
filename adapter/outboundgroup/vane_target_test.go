@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata, challenger C.Proxy) vaneMediaPlan {
+func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata, challenger C.Proxy) vaneReconnectPlan {
 	t.Helper()
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
-	mediaKey := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	scopeKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
+	targetKey, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	// CHAIN-01: commit now requires fresh challenger evidence. Seed the
 	// challenger's node evidence so tests that exercise other commit paths
@@ -31,8 +31,8 @@ func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata
 	}
 	group.learning.mu.Unlock()
 	group.mu.Unlock()
-	return vaneMediaPlan{
-		targetKey:          mediaKey,
+	return vaneReconnectPlan{
+		targetKey:          scopeKey,
 		targetStateKey:     targetKey,
 		target:             metadata.Host,
 		port:               metadata.DstPort,
@@ -56,7 +56,7 @@ func newTargetGroupForTest(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestPr
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com", "DOMAIN-SUFFIX,interactive.example")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com", "DOMAIN-SUFFIX,interactive.example")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	return group, clock, alpha, beta, metadata
@@ -106,7 +106,7 @@ func TestVaneBaselineTokenIDNeverCollidesWithRaceTaskID(t *testing.T) {
 		group.settleTargetHandoff(&stale, decision.handoff.toLease, vaneThroughputObservation{
 			BitsPerSecond: 40_000_000, TotalBytes: 24 * 1024 * 1024, Age: 3 * time.Second,
 		})
-		targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+		targetKey, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 		require.True(t, ok)
 		group.mu.Lock()
 		lease, alive := group.targetHandoffs[targetKey]
@@ -173,12 +173,12 @@ func TestVaneTargetFeedbackCreatesPreferenceOnlyAfterImprovement(t *testing.T) {
 	require.Empty(t, group.commitTargetHandoff(plan))
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata, decision.handoff)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata, decision.handoff)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	sample := vaneThroughputObservation{BitsPerSecond: 5_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second}
 	require.Nil(t, flow.observe(sample))
 
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
 	preference, preferred := group.targetPreferences[key]
 	_, leaseStillPresent := group.targetHandoffs[key]
@@ -196,11 +196,11 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata, decision.handoff)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata, decision.handoff)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	flow.observe(vaneThroughputObservation{BitsPerSecond: 500_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second})
 
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	member := vaneMemberLease{name: decision.proxy.Name(), identity: decision.identity, epoch: decision.nodeEpoch}
 	group.mu.Lock()
 	_, preferred := group.targetPreferences[key]
@@ -209,8 +209,8 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	// observation fields.
 	state, hasRecord := group.targetFailures[vaneTargetFailureKey{target: key, member: member}]
 	hardFailed := hasRecord && (state.streak > 0 || state.blockUntil.After(group.clock.Now()))
-	slowUntil := group.mediaSlowCooldowns[vaneMediaCandidateKey{
-		vaneMediaTargetKey: group.mediaTargetKey(metadata.Host, metadata.DstPort), candidate: member.name, identity: member.identity,
+	slowUntil := group.slowCooldowns[vaneCandidateKey{
+		vaneFlowKey: group.targetScopeKey(metadata.Host, metadata.DstPort), candidate: member.name, identity: member.identity,
 	}]
 	group.mu.Unlock()
 	require.False(t, preferred)
@@ -222,7 +222,7 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 // TARGET-FEEDBACK-001: ordinary success only refreshes an existing preference.
 func TestVaneTargetOrdinarySuccessOnlyRefreshesExistingPreference(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
 	betaLease := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.mu.Unlock()
@@ -244,7 +244,7 @@ func TestVaneTargetOrdinarySuccessOnlyRefreshesExistingPreference(t *testing.T) 
 // TARGET-COOLDOWN-001 + TARGET-COOLDOWN-002: progression plus expiry-vs-success reset.
 func TestVaneTargetCooldownProgressionExpiryAndSuccessReset(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
 	member := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.mu.Unlock()
@@ -277,7 +277,7 @@ func TestVaneTargetFailureRejectsReplacementAndBoundsState(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	_, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	_ = provider
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
 	oldLease := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.targetPreferences[key] = vaneTargetPreference{to: oldLease, expiresAt: clock.Now().Add(time.Hour), updatedAt: clock.Now()}

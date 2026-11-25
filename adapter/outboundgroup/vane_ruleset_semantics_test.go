@@ -33,7 +33,7 @@ func TestVaneRuleSetDomainSetSemantics(t *testing.T) {
 	}{
 		{"example.com", true, "a leading +. covers the apex domain"},
 		{"media.example.com", true, "a leading +. covers subdomains"},
-		{"deep.media.example.com", true, "subdomains of any depth are covered"},
+		{"deep.flow.example.com", true, "subdomains of any depth are covered"},
 		{"other.test", false, "an unrelated host never matches"},
 		{"example.com.evil.test", false, "the suffix must land on a label boundary"},
 		{"notexample.com", false, "a longer label sharing the tail is not a subdomain"},
@@ -59,18 +59,18 @@ func TestVaneRuleSetSceneRuleRejectsLookalikeHost(t *testing.T) {
 
 	clock := newVaneConnTestClock()
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.rules = []vaneFamilyRule{{kind: vaneRuleRuleSet, value: providerName}}
-	group.media.domains = nil
-	group.media.ruleSets = nil
-	group.media.geoSites = nil
+	group.flow.domains = nil
+	group.flow.ruleSets = nil
+	group.flow.geoSites = nil
 
-	require.Equal(t, providerName, group.mediaTargetKey("media.example.com", 443).target,
+	require.Equal(t, providerName, group.targetScopeKey("media.example.com", 443).target,
 		"a subdomain inside the provider is gate-eligible with the provider name as scope")
-	require.Empty(t, group.mediaTargetKey("example.com.evil.test", 443).target,
+	require.Empty(t, group.targetScopeKey("example.com.evil.test", 443).target,
 		"a lookalike host must not open the gate")
-	lookalike := newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "example.com.evil.test", DstPort: 443, NetWork: C.TCP})
+	lookalike := newVaneFlow(group, "alpha", &C.Metadata{Host: "example.com.evil.test", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, lookalike, "PHASE1: every TCP flow is watched")
-	require.False(t, lookalike.flowMedia, "a lookalike host is not a media flow")
+	require.False(t, lookalike.targetScoped, "a lookalike host is not a flow")
 	lookalike.releaseActiveFlowCount()
 }

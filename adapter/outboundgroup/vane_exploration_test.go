@@ -154,18 +154,18 @@ func TestVaneExplorationMediaHandoffAlwaysWinsWithoutAdvancingCadence(t *testing
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 16, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	enableVaneExplorationForTest(group, 2)
 	metadata := vaneExplorationMetadata("rr1.googlevideo.com", C.TCP)
 
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
-	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-	group.mediaHints[key] = vaneMediaHint{candidate: "beta", expiresAt: clock.Now().Add(time.Minute)}
+	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+	group.hints[key] = vaneHint{candidate: "beta", expiresAt: clock.Now().Add(time.Minute)}
 	require.Equal(t, "beta", group.pick(metadata, vaneTransportTCP, false, true).Name())
 
 	scopeIndex := vaneExplorationScopeIndex(vaneTransportTCP)
 	require.Zero(t, group.explorationScopes[scopeIndex].eligibleSelections)
-	delete(group.mediaHints, key)
+	delete(group.hints, key)
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 	require.Equal(t, "beta", group.pick(metadata, vaneTransportTCP, false, true).Name())
 }
@@ -433,23 +433,23 @@ func TestVaneReadOnlySelectorsDoNotPruneExpiredCooldowns(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 16, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	metadata := vaneExplorationMetadata("rr1.googlevideo.com", C.TCP)
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 
 	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: "rr1.googlevideo.com", port: 443, candidate: "beta"}
-	mediaKey := vaneMediaCandidateKey{vaneMediaTargetKey: group.mediaTargetKey(metadata.Host, metadata.DstPort), candidate: "beta"}
+	scopeKey := vaneCandidateKey{vaneFlowKey: group.targetScopeKey(metadata.Host, metadata.DstPort), candidate: "beta"}
 	group.cooldowns[dialKey] = clock.Now().Add(-time.Second)
-	group.mediaSlowCooldowns[mediaKey] = clock.Now().Add(-time.Second)
+	group.slowCooldowns[scopeKey] = clock.Now().Add(-time.Second)
 
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, false).Name())
 	require.Contains(t, group.cooldowns, dialKey)
-	require.Contains(t, group.mediaSlowCooldowns, mediaKey)
+	require.Contains(t, group.slowCooldowns, scopeKey)
 
 	// A committed selection may perform the normal lazy cleanup.
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 	require.NotContains(t, group.cooldowns, dialKey)
-	require.NotContains(t, group.mediaSlowCooldowns, mediaKey)
+	require.NotContains(t, group.slowCooldowns, scopeKey)
 }
 
 func TestVaneExplorationConcurrentQuotaIsExact(t *testing.T) {

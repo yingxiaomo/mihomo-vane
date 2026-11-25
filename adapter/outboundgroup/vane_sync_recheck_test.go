@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newSyncRecheckFlow(t *testing.T) (*Vane, *vaneConnTestClock, *vaneMediaFlow, vaneMediaPlan) {
+func newSyncRecheckFlow(t *testing.T) (*Vane, *vaneConnTestClock, *vaneFlow, vaneReconnectPlan) {
 	t.Helper()
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -24,14 +24,14 @@ func newSyncRecheckFlow(t *testing.T) (*Vane, *vaneConnTestClock, *vaneMediaFlow
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 2_000_000)
 	metadata := &C.Metadata{Host: "rr-recheck.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	suppressColdPickProbeForTest(t, group, metadata)
 
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
-	flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 	// CHAIN-01: the challenger needs fresh throughput evidence above the
@@ -46,8 +46,8 @@ func newSyncRecheckFlow(t *testing.T) (*Vane, *vaneConnTestClock, *vaneMediaFlow
 	group.learning.mu.Unlock()
 	group.mu.Unlock()
 
-	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-	plan, reason := group.prepareMediaReconnectForNodeDetailed(
+	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+	plan, reason := group.prepareReconnectForNodeDetailed(
 		key, metadata.Host, metadata.DstPort, decision.proxy.Name(), decision.identity, decision.nodeEpoch, 629_146)
 	require.Empty(t, reason)
 	plan.totalBytes = 8 * 1024 * 1024
@@ -87,8 +87,8 @@ func TestVaneSyncRecheckRecoveredVetoesClose(t *testing.T) {
 
 	require.False(t, action(), "a recovered flow must not be closed")
 	group.mu.Lock()
-	_, hinted := group.mediaHints[plan.targetKey]
-	budget := group.mediaBudgets[vaneMediaNodeKeyFor(plan.targetKey, plan.current)]
+	_, hinted := group.hints[plan.targetKey]
+	budget := group.budgets[vaneNodeKeyFor(plan.targetKey, plan.current)]
 	group.mu.Unlock()
 	require.False(t, hinted, "a rejected close must not leave a handoff hint")
 	require.Zero(t, budget.count, "a rejected close must not consume budget")
@@ -112,7 +112,7 @@ func TestVaneSyncRecheckStillSlowExecutes(t *testing.T) {
 	snapshot := group.VaneDiagnostics()
 	require.Zero(t, snapshot.Counters.ReconnectRejected)
 	group.mu.Lock()
-	hint := group.mediaHints[plan.targetKey]
+	hint := group.hints[plan.targetKey]
 	group.mu.Unlock()
 	require.Equal(t, plan.challenger, hint.candidate)
 }

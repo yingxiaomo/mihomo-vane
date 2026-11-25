@@ -23,7 +23,7 @@ import (
 func suppressColdPickProbeForTest(t *testing.T, group *Vane, metadata *C.Metadata) {
 	t.Helper()
 	group.mu.Lock()
-	group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target] = group.clock.Now()
+	group.lastPickProbeAt[group.targetScopeKey(metadata.Host, metadata.DstPort).target] = group.clock.Now()
 	group.mu.Unlock()
 }
 
@@ -35,7 +35,7 @@ func newColdPickGroupForTest(t *testing.T, mode vaneRacingMode) (*Vane, *vaneCon
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 2_000_000)
 	configureVaneRacingForTest(t, group, mode)
 	metadata := &C.Metadata{Host: "rr-coldpick.googlevideo.com", DstPort: 443, NetWork: C.TCP}
@@ -133,7 +133,7 @@ func TestVaneColdPickBudgetDeniedFallsBack(t *testing.T) {
 	// A budget-denied probe never ran, so the per-scope timestamp must stay
 	// unset: the next pick is still allowed to probe once budget recovers.
 	group.mu.Lock()
-	_, timestampSet := group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target]
+	_, timestampSet := group.lastPickProbeAt[group.targetScopeKey(metadata.Host, metadata.DstPort).target]
 	group.mu.Unlock()
 	require.False(t, timestampSet)
 	budgetDeniedSeen := false
@@ -272,7 +272,7 @@ func TestVaneColdPickExplorationPreempts(t *testing.T) {
 	// Clear the throttle timestamp: without the exploration preemption the
 	// second pick would probe again.
 	group.mu.Lock()
-	group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target] = time.Time{}
+	group.lastPickProbeAt[group.targetScopeKey(metadata.Host, metadata.DstPort).target] = time.Time{}
 	group.mu.Unlock()
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.exploration, "exploration must own this pick")
@@ -301,7 +301,7 @@ func TestVaneColdPickDryRunThrottleRegression(t *testing.T) {
 // pick on the same scope probes again.
 func TestVaneColdPickPanickingProbeClearsInflight(t *testing.T) {
 	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
-	scope := group.mediaTargetKey(metadata.Host, metadata.DstPort).target
+	scope := group.targetScopeKey(metadata.Host, metadata.DstPort).target
 	probeCalls := atomic.Int32{}
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		probeCalls.Add(1)
@@ -334,7 +334,7 @@ func TestVaneColdPickPanickingProbeClearsInflight(t *testing.T) {
 // freeze cold-pick for this scope until restart.
 func TestVaneColdPickBudgetDeniedClearsInflight(t *testing.T) {
 	group, clock, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
-	scope := group.mediaTargetKey(metadata.Host, metadata.DstPort).target
+	scope := group.targetScopeKey(metadata.Host, metadata.DstPort).target
 	group.racingRuntime.mu.Lock()
 	group.racingRuntime.budget = vaneRacingBudget{startedAt: clock.Now(), used: 120 * 1024 * 1024}
 	group.racingRuntime.mu.Unlock()
@@ -463,7 +463,7 @@ func TestVaneColdPickCanceledProbeWritesNothing(t *testing.T) {
 	// Give the still-blocked worker (released by close(block)) a beat.
 	time.Sleep(20 * time.Millisecond)
 
-	scope := group.mediaTargetKey(metadata.Host, metadata.DstPort).target
+	scope := group.targetScopeKey(metadata.Host, metadata.DstPort).target
 	group.mu.Lock()
 	_, stamped := group.lastPickProbeAt[scope]
 	group.mu.Unlock()
@@ -490,7 +490,7 @@ func TestVaneColdPickInflightPrefersMeasuredBandwidth(t *testing.T) {
 	now := group.clock.Now()
 	group.mu.Lock()
 	group.learning.mu.Lock()
-	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	targetKey, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	group.ensureProxyNodeLocked(alpha, now)
 	group.ensureProxyNodeLocked(beta, now)

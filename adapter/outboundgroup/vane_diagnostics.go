@@ -25,7 +25,7 @@ const (
 // Counters survive config reloads and process restarts when the profile cache is
 // available. They are observations only and never participate in selection.
 type VaneDiagnosticCounters struct {
-	MediaFlows            uint64 `json:"mediaFlows"`
+	Flows                 uint64 `json:"flows"`
 	ThroughputSamples     uint64 `json:"throughputSamples"`
 	LowThroughputSamples  uint64 `json:"lowThroughputSamples"`
 	LowWindowsByLoss      uint64 `json:"lowWindowsByLoss"`
@@ -82,8 +82,8 @@ type VaneDiagnosticPersistence struct {
 }
 
 type VaneDiagnosticConfig struct {
-	MediaEnabled                  bool     `json:"mediaEnabled"`
-	MediaDomains                  []string `json:"mediaDomains"`
+	FlowEnabled                   bool     `json:"flowEnabled"`
+	FlowDomains                   []string `json:"flowDomains"`
 	LowThroughputBPS              float64  `json:"lowThroughputBps"`
 	LowWindows                    int      `json:"lowWindows"`
 	MaxLowWindows                 int      `json:"maxLowWindows"`
@@ -142,7 +142,7 @@ type VaneDiagnosticRuntime struct {
 	// Samples is the total count. Record-only — no selection path reads them.
 	TargetCapabilities      int                             `json:"targetCapabilities"`
 	TargetCapabilitySamples int64                           `json:"targetCapabilitySamples"`
-	B2ActiveMediaFlows      map[string]int                  `json:"b2ActiveMediaFlows,omitempty"`
+	B2ActiveFlows           map[string]int                  `json:"b2ActiveFlows,omitempty"`
 	P5Nodes                 map[string]VaneDiagnosticP5Node `json:"p5Nodes,omitempty"`
 }
 
@@ -198,7 +198,7 @@ type vaneHandoffToken struct {
 	fromLease   vaneMemberLease
 	toLease     vaneMemberLease
 	// baseline marks a token created by the synchronous hint path. It has no
-	// targetHandoffs lease; settlement validates it through the media hint.
+	// targetHandoffs lease; settlement validates it through the hint.
 	baseline bool
 }
 
@@ -384,7 +384,7 @@ func (d *vaneDiagnostics) recordReconnectCommit(record vaneDiagnosticRecord) *va
 	return &vaneHandoffToken{
 		id:          record.handoffID,
 		leaseID:     record.leaseID,
-		target:      normalizeVaneMediaTarget(record.target),
+		target:      normalizeVaneTarget(record.target),
 		bucket:      record.bucket,
 		port:        record.port,
 		from:        record.from,
@@ -443,8 +443,8 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) {
 	d.snapshotData.UpdatedAt = now
 
 	switch record.kind {
-	case "media-flow-started":
-		d.snapshotData.Counters.MediaFlows++
+	case "flow-started":
+		d.snapshotData.Counters.Flows++
 	case "throughput-sample":
 		d.snapshotData.Counters.ThroughputSamples++
 		if record.low {
@@ -625,7 +625,7 @@ func cloneVaneDiagnosticsSnapshot(source VaneDiagnosticsSnapshot) VaneDiagnostic
 	for index := range cloned.GrayFailure.Series {
 		cloned.GrayFailure.Series[index].Reasons = append([]string(nil), source.GrayFailure.Series[index].Reasons...)
 	}
-	cloned.Config.MediaDomains = append([]string(nil), source.Config.MediaDomains...)
+	cloned.Config.FlowDomains = append([]string(nil), source.Config.FlowDomains...)
 	cloned.Runtime.ExplorationScopes = append([]VaneDiagnosticExplorationScope(nil), source.Runtime.ExplorationScopes...)
 	return cloned
 }

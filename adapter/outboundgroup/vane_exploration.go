@@ -128,7 +128,7 @@ func vaneEstimateConfidence(estimate vaneMetricEstimate) float64 {
 
 // maybeSelectExplorationLocked allocates a bounded exploration slot after the
 // ordinary selector has produced a stable anchor choice. It never changes the
-// score, anchor, cooldown, media hint or reconnect budget.
+// score, anchor, cooldown, hint or reconnect budget.
 func (a *Vane) maybeSelectExplorationLocked(
 	metadata *C.Metadata,
 	transport vaneTransport,

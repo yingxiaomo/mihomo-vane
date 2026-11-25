@@ -121,8 +121,8 @@ func (k vaneTargetKey) String() string {
 	return fmt.Sprintf("%s|%s|%d", k.transport.String(), k.targetScope, k.port)
 }
 
-func (a *Vane) targetKeyForMedia(target string, port uint16) (vaneTargetKey, bool) {
-	key := a.mediaTargetKey(target, port)
+func (a *Vane) targetScopeForKey(target string, port uint16) (vaneTargetKey, bool) {
+	key := a.targetScopeKey(target, port)
 	if key.target == "" {
 		return vaneTargetKey{}, false
 	}
@@ -139,8 +139,8 @@ const vaneStickyTTL = 60 * time.Second
 // vaneStickySwitchWindow is the sliding window that bounds switchCount.
 const vaneStickySwitchWindow = 30 * time.Minute
 
-// vaneStickyKeyFor builds the per-host stickiness key. Unlike targetKeyForMedia
-// it does not require a media rule: every TCP host gets its own 60s slot, which
+// vaneStickyKeyFor builds the per-host stickiness key. Unlike targetScopeForKey
+// it does not require a family rule: every TCP host gets its own 60s slot, which
 // is the whole point of replacing the per-scene anchor.
 func vaneStickyKeyFor(target string, port uint16) vaneTargetKey {
 	return vaneTargetKey{transport: vaneTransportTCP, targetScope: target, port: port}
@@ -148,15 +148,15 @@ func vaneStickyKeyFor(target string, port uint16) vaneTargetKey {
 
 // stickyChoiceLocked reports the live sticky node for this host, if any.
 // The caller must hold a.mu.
-// stickyKeyFor scopes the sticky choice by the media rule set that claims the
+// stickyKeyFor scopes the sticky choice by the family rule set that claims the
 // host, not by the host itself. A page and its CDN are different hostnames but
 // the same service, and the user's rule set already says so: "GEOSITE,youtube"
 // covers www.youtube.com and every rr*.googlevideo.com. Keying the sticky on
 // the raw host gave each of them its own choice, so a switch could leave the
 // page on one exit and the video on another — two IPs for one account.
 func (a *Vane) stickyKeyFor(target string, port uint16) vaneTargetKey {
-	if mediaKey := a.mediaTargetKey(target, port); mediaKey.target != "" {
-		return vaneTargetKey{transport: vaneTransportTCP, targetScope: mediaKey.target, port: port}
+	if scopeKey := a.targetScopeKey(target, port); scopeKey.target != "" {
+		return vaneTargetKey{transport: vaneTransportTCP, targetScope: scopeKey.target, port: port}
 	}
 	return vaneStickyKeyFor(target, port)
 }
@@ -272,15 +272,15 @@ func (s *vaneTargetFailureState) b2FeedLoss(sample float64, now time.Time) {
 	s.lastObservedAt = now
 }
 
-// recordB2MediaLoss folds one media flow's cumulative loss observation into
+// recordB2Loss folds one flow's cumulative loss observation into
 // the flow's target record (round5 B2 item 2). Observation only: the failure
 // fields (streak, blockUntil, lastFailureAt) are never touched, so an
 // observation record can never block or suppress a member. Small transfers
 // stay out (a few kilobytes of loss ratio is noise), unsupported reads count
 // as unsupported instead of fabricating a sample, and the recording runs
 // regardless of the racing mode — the shadow data must not stop with it.
-func (a *Vane) recordB2MediaLoss(flow *vaneMediaFlow, observation vaneConnectionCloseObservation, now time.Time) {
-	if flow == nil || observation.TotalReadBytes < a.media.minBytes {
+func (a *Vane) recordB2Loss(flow *vaneFlow, observation vaneConnectionCloseObservation, now time.Time) {
+	if flow == nil || observation.TotalReadBytes < a.flow.minBytes {
 		return
 	}
 	if !observation.LossSupported {
@@ -354,11 +354,11 @@ func (s *vaneTargetFailureState) stallFrequent() bool {
 	return s.b2StallRate() > vaneStallFrequentThreshold
 }
 
-// recordB2MediaStall counts one media-flow settlement (round5 B2 item 3):
+// recordB2Stall counts one flow settlement (round5 B2 item 3):
 // AttemptCount always, SuspectedStallCount when the header-stall signature
 // matched. Observation only, same record as the loss EMA, same racing-mode
 // independence.
-func (a *Vane) recordB2MediaStall(flow *vaneMediaFlow, observation vaneConnectionCloseObservation, now time.Time) {
+func (a *Vane) recordB2Stall(flow *vaneFlow, observation vaneConnectionCloseObservation, now time.Time) {
 	if flow == nil {
 		return
 	}
@@ -394,7 +394,7 @@ func (a *Vane) recordB2MediaStall(flow *vaneMediaFlow, observation vaneConnectio
 // b2TargetSnapshot renders the live record's B2 telemetry for the learning
 // mirror (round6 item 3). Only observation fields — never streak, blockUntil
 // or lastFailureAt.
-func (a *Vane) b2TargetSnapshot(flow *vaneMediaFlow, state vaneTargetFailureState) vanePersistedB2Target {
+func (a *Vane) b2TargetSnapshot(flow *vaneFlow, state vaneTargetFailureState) vanePersistedB2Target {
 	return vanePersistedB2Target{
 		Transport:           flow.targetStateKey.transport.String(),
 		TargetScope:         flow.targetStateKey.targetScope,
@@ -412,7 +412,7 @@ func (a *Vane) b2TargetSnapshot(flow *vaneMediaFlow, state vaneTargetFailureStat
 // seedB2StateFromLearning starts a B2-empty live record from the restored
 // learning copy (round6 item 3). A record holding any B2 data — even a single
 // attempt — is never overwritten. Called with a.mu held.
-func (a *Vane) seedB2StateFromLearning(flow *vaneMediaFlow, state vaneTargetFailureState) vaneTargetFailureState {
+func (a *Vane) seedB2StateFromLearning(flow *vaneFlow, state vaneTargetFailureState) vaneTargetFailureState {
 	if state.lossSamples != 0 || state.attemptCount != 0 {
 		return state
 	}
@@ -491,12 +491,12 @@ func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, n
 			if proxy.Name() != member.name || vaneProxyPersistentIdentity(proxy) != member.identity {
 				continue
 			}
-			legacyKey := vaneMediaCandidateKey{
-				vaneMediaTargetKey: vaneMediaTargetKey{target: key.targetScope, port: key.port},
-				candidate:          member.name,
-				identity:           member.identity,
+			legacyKey := vaneCandidateKey{
+				vaneFlowKey: vaneFlowKey{target: key.targetScope, port: key.port},
+				candidate:   member.name,
+				identity:    member.identity,
 			}
-			if a.mediaSlowCooldowns[legacyKey].After(now) {
+			if a.slowCooldowns[legacyKey].After(now) {
 				return nil
 			}
 			return proxy
@@ -529,7 +529,7 @@ func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, n
 	return nil, nil, ""
 }
 
-func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
+func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	memberHealthy := false
 	var challengerProxy C.Proxy
 	for _, proxy := range a.GetProxies(false) {
@@ -542,7 +542,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if !memberHealthy {
 		return "challenger-unhealthy"
 	}
-	release, current := a.lockVaneMediaIdentities(map[string]string{
+	release, current := a.lockVaneIdentities(map[string]string{
 		plan.current:    plan.identity,
 		plan.challenger: plan.challengerIdentity,
 	})
@@ -579,18 +579,18 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if key.targetScope == "" {
 		return "invalid-target"
 	}
-	a.pruneMediaLocked(now)
+	a.pruneFlowStateLocked(now)
 	a.pruneTargetStateLocked(now)
-	if now.Sub(plan.preparedAt) > a.media.hintTTL {
+	if now.Sub(plan.preparedAt) > a.flow.hintTTL {
 		return "plan-expired"
 	}
 	// §E: valve plans skip the cooldown they are re-evaluating (no valve plan
 	// reaches the target commit today, but the flag rides the shared plan).
-	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(vaneMediaNodeKeyFor(plan.targetKey, plan.current), plan.currentBPS, now) {
+	if !plan.skipReconnectCooldown && a.cooldownBlocksLocked(vaneNodeKeyFor(plan.targetKey, plan.current), plan.currentBPS, now) {
 		return "reconnect-cooldown"
 	}
 	if !plan.skipReconnectCooldown {
-		if reason := a.mediaTargetBudgetBlocksLocked(plan.targetKey, now); reason != "" {
+		if reason := a.targetBudgetBlocksLocked(plan.targetKey, now); reason != "" {
 			return reason
 		}
 	}
@@ -600,7 +600,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	// evidence below the original bar, refuse before touching budget/cooldown.
 	// RESCUE: same rule as the media commit — demand gates the current flow,
 	// not the challenger that rescues it.
-	requiredBPS := plan.currentBPS * a.media.challengerRatio
+	requiredBPS := plan.currentBPS * a.flow.challengerRatio
 	if targetBPS, fresh, degraded := a.targetEvidenceLocked(key, to, now); fresh && (degraded || targetBPS < requiredBPS) {
 		return "challenger-evidence-degraded"
 	}
@@ -613,8 +613,8 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if a.cooldownUntilLocked(dialKey, now, false).After(now) {
 		return "candidate-cooldown"
 	}
-	challengerKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity}
-	if a.mediaSlowCooldowns[challengerKey].After(now) {
+	challengerKey := vaneCandidateKey{vaneFlowKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity}
+	if a.slowCooldowns[challengerKey].After(now) {
 		return "challenger-slow-cooldown"
 	}
 	// CHAIN-01: the challenger must still have fresh evidence above the close
@@ -624,19 +624,19 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if reason := a.checkChallengerEvidenceLocked(plan, capSnapshot, now); reason != "" {
 		return reason
 	}
-	budgetKey := vaneMediaNodeKeyFor(plan.targetKey, plan.current)
-	budget := a.mediaBudgets[budgetKey]
-	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
-		budget = vaneMediaBudget{startedAt: now}
+	budgetKey := vaneNodeKeyFor(plan.targetKey, plan.current)
+	budget := a.budgets[budgetKey]
+	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.flow.budgetWindow).After(now) {
+		budget = vaneBudget{startedAt: now}
 	}
-	if budget.count >= a.media.budgetMax {
+	if budget.count >= a.flow.budgetMax {
 		return "budget-exhausted"
 	}
 	budget.count++
-	a.mediaBudgets[budgetKey] = budget
+	a.budgets[budgetKey] = budget
 	from := vaneMemberLease{name: plan.current, identity: plan.identity, epoch: plan.nodeEpoch}
-	currentKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.current, identity: plan.identity}
-	a.mediaSlowCooldowns[currentKey] = now.Add(a.media.slowCooldown)
+	currentKey := vaneCandidateKey{vaneFlowKey: plan.targetKey, candidate: plan.current, identity: plan.identity}
+	a.slowCooldowns[currentKey] = now.Add(a.flow.slowCooldown)
 	token := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
 		kind:       "handoff-committed",
 		handoffID:  plan.raceID,
@@ -675,12 +675,12 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		key:       key,
 		from:      from,
 		to:        to,
-		expiresAt: now.Add(a.media.hintTTL),
+		expiresAt: now.Add(a.flow.hintTTL),
 		updatedAt: now,
 		token:     token,
 	}
-	a.mediaReconnects[vaneMediaNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.media.reconnectCooldown)
-	a.noteMediaTargetSwitchLocked(plan.targetKey, plan.challenger, now)
+	a.reconnects[vaneNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.flow.reconnectCooldown)
+	a.noteTargetSwitchLocked(plan.targetKey, plan.challenger, now)
 	return ""
 }
 
@@ -691,9 +691,9 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	now := a.clock.Now()
 	// RESCUE: a handoff counts as a gain when it beats the flow it replaced,
 	// not when it already reaches demand.
-	required := token.previousBPS * a.media.challengerRatio
+	required := token.previousBPS * a.flow.challengerRatio
 	// RESCUE-FLOOR: 5M slow line, not the demand-inflated lowThroughputBPS.
-	if floor := float64(vaneDefaultMediaLowThroughputBPS); required < floor {
+	if floor := float64(vaneDefaultLowThroughputBPS); required < floor {
 		required = floor
 	}
 	kind := "handoff-no-gain"
@@ -711,7 +711,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		delete(a.targetHandoffs, token.targetKey)
 	} else if !token.baseline || !current {
 		// A target handoff must still own its lease. A baseline token has no
-		// target lease; the media hint that carried it is its validation.
+		// target lease; the hint that carried it is its validation.
 		a.mu.Unlock()
 		return
 	}
@@ -722,11 +722,11 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	// only once the first window has enough delivered bytes: a fresh socket's
 	// cumulative retransmission ratio is noise, and no-gain writes a 30-minute
 	// slow cooldown for the very node we just switched to.
-	signalOK := sample.TotalBytes >= a.media.minBytes && sample.Delivered
+	signalOK := sample.TotalBytes >= a.flow.minBytes && sample.Delivered
 	improved := sample.BitsPerSecond >= required &&
-		sample.BitsPerSecond >= a.media.lowThroughputBPS &&
-		(!signalOK || !sample.LossSupported || sample.LossRate <= vaneDefaultMediaHighLossRate) &&
-		(!signalOK || !sample.LatencySupported || sample.Latency <= vaneDefaultMediaHighLatency)
+		sample.BitsPerSecond >= a.flow.lowThroughputBPS &&
+		(!signalOK || !sample.LossSupported || sample.LossRate <= vaneDefaultHighLossRate) &&
+		(!signalOK || !sample.LatencySupported || sample.Latency <= vaneDefaultHighLatency)
 	if improved {
 		a.targetPreferences[token.targetKey] = vaneTargetPreference{
 			to: member, expiresAt: now.Add(vaneTargetPreferenceTTL), updatedAt: now,
@@ -735,18 +735,18 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		kind = "handoff-improved"
 	} else {
 		delete(a.targetPreferences, token.targetKey)
-		legacyKey := vaneMediaCandidateKey{
-			vaneMediaTargetKey: vaneMediaTargetKey{target: token.targetKey.targetScope, port: token.targetKey.port},
-			candidate:          member.name,
-			identity:           member.identity,
+		legacyKey := vaneCandidateKey{
+			vaneFlowKey: vaneFlowKey{target: token.targetKey.targetScope, port: token.targetKey.port},
+			candidate:   member.name,
+			identity:    member.identity,
 		}
-		a.mediaSlowCooldowns[legacyKey] = now.Add(a.media.slowCooldown)
+		a.slowCooldowns[legacyKey] = now.Add(a.flow.slowCooldown)
 		// §D: the handoff did not help — the reconnect cooldown written at
 		// commit must not keep blocking re-evaluation for this target. The 30
 		// minute slow cooldown above still stops this same candidate from
 		// being picked again; the two cooldowns guard different things.
-		delete(a.mediaReconnects, vaneMediaNodeKeyFor(legacyKey.vaneMediaTargetKey, token.from))
-		delete(a.mediaTargetSwitches, legacyKey.vaneMediaTargetKey)
+		delete(a.reconnects, vaneNodeKeyFor(legacyKey.vaneFlowKey, token.from))
+		delete(a.targetSwitches, legacyKey.vaneFlowKey)
 	}
 	// §A: fold the settlement's real-traffic sample into the (target, member)
 	// record — the per-target capability observation, record-only for now.
@@ -757,7 +757,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	// observation-only if it does not exist, which can never block (zero
 	// streak/blockUntil), and lastObservedAt keeps the LRU eviction from
 	// treating a cap-only record as the oldest.
-	if sample.TotalBytes >= a.media.minBytes {
+	if sample.TotalBytes >= a.flow.minBytes {
 		state := a.targetFailures[capKey]
 		state.capBPS = sample.BitsPerSecond
 		state.capAt = now

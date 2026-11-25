@@ -138,8 +138,8 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 				require.Zero(t, group.VaneDiagnostics().Counters.ReconnectCommitted)
 				group.mu.Lock()
 				require.Empty(t, group.targetHandoffs)
-				require.Empty(t, group.mediaHints)
-				require.Empty(t, group.mediaSlowCooldowns)
+				require.Empty(t, group.hints)
+				require.Empty(t, group.slowCooldowns)
 				group.mu.Unlock()
 				_, err = conn.Read(make([]byte, 1024))
 				require.NoError(t, err, "dry-run connection remains readable")
@@ -147,7 +147,7 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 				require.Equal(t, 1, closes, "async callback closes without another low window")
 				group.mu.Lock()
 				require.Len(t, group.targetHandoffs, 1)
-				require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(group.mediaTargetKey(metadata.Host, metadata.DstPort), alpha.Name())].After(clock.Now()))
+				require.True(t, group.reconnects[vaneNodeKeyFor(group.targetScopeKey(metadata.Host, metadata.DstPort), alpha.Name())].After(clock.Now()))
 				group.mu.Unlock()
 			}
 		})
@@ -164,7 +164,7 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 	// seeded below), so both need a dialable connection for this shadow test.
 	beta.dialConn = underlying
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 	t.Cleanup(func() { _ = group.Close() })
 	seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)
@@ -181,10 +181,10 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 	require.Equal(t, 1, countVaneEvents(group, "handoff-would-commit", "baseline"))
 	require.Zero(t, group.VaneDiagnostics().Counters.ReconnectCommitted)
 	group.mu.Lock()
-	require.Empty(t, group.mediaHints)
+	require.Empty(t, group.hints)
 	require.Empty(t, group.targetHandoffs)
-	require.Empty(t, group.mediaReconnects)
-	require.Empty(t, group.mediaSlowCooldowns)
+	require.Empty(t, group.reconnects)
+	require.Empty(t, group.slowCooldowns)
 	group.mu.Unlock()
 }
 
@@ -194,8 +194,8 @@ func TestVaneOffValveNeverSubmitsKnownGoodAction(t *testing.T) {
 	t.Cleanup(func() { _ = group.Close() })
 	configureVaneRacingForTest(t, group, vaneRacingShadow)
 	seedChain01Traffic(t, group, gamma.Name(), clock.Now(), 40_000_000)
-	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-	plan, reason := group.prepareMediaReconnectForNodeDetailedSkipCooldown(key, metadata.Host, metadata.DstPort, flow.candidate, flow.identity, flow.nodeEpoch, flow.valveCurrentBPS, true)
+	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
+	plan, reason := group.prepareReconnectForNodeDetailedSkipCooldown(key, metadata.Host, metadata.DstPort, flow.candidate, flow.identity, flow.nodeEpoch, flow.valveCurrentBPS, true)
 	require.Empty(t, reason)
 	require.True(t, plan.knownGood)
 	require.Equal(t, gamma.Name(), plan.challenger)
@@ -236,7 +236,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.Empty(t, group.commitTargetHandoff(plan))
 				decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 				require.NotNil(t, decision.handoff)
-				flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+				flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 				flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 				fast := vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}
 				if source == "watchdog" {
@@ -260,9 +260,9 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				// keep the lease alive so the "still valid" assertion holds.
 				lease.expiresAt = clock.Now().Add(10 * time.Minute)
 				group.targetHandoffs[key] = lease
-				cooldown := group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)]
-				slowKey := vaneMediaCandidateKey{vaneMediaTargetKey: flow.targetKey, candidate: member.name, identity: member.identity}
-				slowCount := len(group.mediaSlowCooldowns)
+				cooldown := group.reconnects[vaneNodeKeyFor(flow.targetKey, flow.candidate)]
+				slowKey := vaneCandidateKey{vaneFlowKey: flow.targetKey, candidate: member.name, identity: member.identity}
+				slowCount := len(group.slowCooldowns)
 				group.mu.Unlock()
 				b2Before := group.VaneDiagnostics().Counters
 				if source == "grace" {
@@ -270,7 +270,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 					require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 2_000_000, TotalBytes: fast.TotalBytes, Age: 25 * time.Second}))
 				} else {
 					clock.Advance(stallToleranceForTest(t, flow) + time.Second)
-					group.runMediaWatchdogTick(clock.Now())
+					group.runFlowWatchdogTick(clock.Now())
 				}
 				flow.mu.Lock()
 				if source == "grace" {
@@ -290,12 +290,12 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.Equal(t, failure, group.targetFailures[failureKey], "capBPS and B2 telemetry unchanged")
 				require.Equal(t, lease, group.targetHandoffs[key])
 				require.True(t, lease.expiresAt.After(clock.Now()), "the untrusted window arrives while the claimed lease is still valid")
-				require.Equal(t, cooldown, group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)])
-				require.Equal(t, slowCount, len(group.mediaSlowCooldowns))
+				require.Equal(t, cooldown, group.reconnects[vaneNodeKeyFor(flow.targetKey, flow.candidate)])
+				require.Equal(t, slowCount, len(group.slowCooldowns))
 				if mode == vaneRacingShadow {
 					// A tolerated stall only observes in shadow mode; in "on"
 					// mode it is a real switch and legitimately cools the node.
-					require.Zero(t, group.mediaSlowCooldowns[slowKey])
+					require.Zero(t, group.slowCooldowns[slowKey])
 				}
 				group.mu.Unlock()
 				b2After := group.VaneDiagnostics().Counters
@@ -328,7 +328,7 @@ func TestVaneOffProbeDeletedSourceContract(t *testing.T) {
 		require.NoError(t, err)
 		ast.Inspect(file, func(n ast.Node) bool {
 			if id, ok := n.(*ast.Ident); ok {
-				require.NotContains(t, []string{"vaneRacingOff", "scheduleEvidenceProbe", "runEvidenceProbe", "clearEvidenceProbeInflight", "evidenceProbeUntil", "evidenceProbeInflight", "vaneMediaEvidenceProbeThrottle"}, id.Name, path)
+				require.NotContains(t, []string{"vaneRacingOff", "scheduleEvidenceProbe", "runEvidenceProbe", "clearEvidenceProbeInflight", "evidenceProbeUntil", "evidenceProbeInflight", "vaneEvidenceProbeThrottle"}, id.Name, path)
 			}
 			return true
 		})
@@ -340,7 +340,7 @@ func TestVaneOffObserveCapabilityPlanStaysDryRun(t *testing.T) {
 	group, clock, flow := newVaneObservationRig(t, vaneRacingShadow)
 	member := vaneMemberLease{name: "beta", identity: group.nodeIdentities["beta"]}
 	seedChain01Capability(t, group, member, 40_000_000, clock.Now())
-	plan, reason := group.prepareMediaReconnectForNodeDetailed(flow.targetKey, flow.target, flow.port, flow.candidate, flow.identity, flow.nodeEpoch, 1_000_000)
+	plan, reason := group.prepareReconnectForNodeDetailed(flow.targetKey, flow.target, flow.port, flow.candidate, flow.identity, flow.nodeEpoch, 1_000_000)
 	require.Empty(t, reason)
 	require.False(t, plan.knownGood)
 	var submitted atomic.Int32
@@ -353,8 +353,8 @@ func TestVaneOffObserveCapabilityPlanStaysDryRun(t *testing.T) {
 	require.Zero(t, submitted.Load())
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
-	require.Empty(t, group.mediaHints)
-	require.Empty(t, group.mediaReconnects)
+	require.Empty(t, group.hints)
+	require.Empty(t, group.reconnects)
 	group.mu.Unlock()
 }
 

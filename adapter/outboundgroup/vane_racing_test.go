@@ -319,7 +319,7 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		gamma := newVaneTestProxy("gamma", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
 			if proxy.Name() == "beta" {
@@ -329,7 +329,7 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 		}
 		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr-partial.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 		resultCh := make(chan vaneRaceResult, 1)
-		scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+		scheduled, reason := group.scheduleReconnectRace(request, func(result vaneRaceResult) { resultCh <- result })
 		require.True(t, scheduled, reason)
 		result := <-resultCh
 		require.Equal(t, "beta", result.winner.name, "a partial bound above requiredBPS must win")
@@ -340,13 +340,13 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 			return vaneProbeResult{valid: true, reason: "read-timeout", bytes: 64 * 1024, duration: 400 * time.Millisecond, lowerBoundBPS: 1_500_000}
 		}
 		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr-partial-low.googlevideo.com", DstPort: 443, NetWork: C.TCP})
-		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {
+		scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) {
 			t.Error("a bound below requiredBPS must not produce a winner")
 		})
 		require.True(t, scheduled, reason)
@@ -360,16 +360,16 @@ func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) 
 	// COLD-PICK: suppress the cold-pick probe so the pick does not consume
 	// budget or write capability evidence; race tests measure the race probe.
 	group.mu.Lock()
-	group.lastPickProbeAt[group.mediaTargetKey(metadata.Host, metadata.DstPort).target] = group.clock.Now()
+	group.lastPickProbeAt[group.targetScopeKey(metadata.Host, metadata.DstPort).target] = group.clock.Now()
 	group.mu.Unlock()
 	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
-	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	return vaneRaceRequest{
 		targetKey: key,
-		mediaKey:  group.mediaTargetKey(metadata.Host, metadata.DstPort),
+		scopeKey:  group.targetScopeKey(metadata.Host, metadata.DstPort),
 		target:    metadata.Host,
 		port:      metadata.DstPort,
 		current: vaneMemberLease{
@@ -392,7 +392,7 @@ func TestVaneRacingEngineFirstQualifiedWinsAndCancelsPeer(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	gamma := newVaneTestProxy("gamma", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	betaCanceled := make(chan struct{})
@@ -406,7 +406,7 @@ func TestVaneRacingEngineFirstQualifiedWinsAndCancelsPeer(t *testing.T) {
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	resultCh := make(chan vaneRaceResult, 1)
-	scheduled, reason := group.scheduleMediaRace(request, func(result vaneRaceResult) { resultCh <- result })
+	scheduled, reason := group.scheduleReconnectRace(request, func(result vaneRaceResult) { resultCh <- result })
 	require.True(t, scheduled, reason)
 	result := <-resultCh
 	require.Equal(t, "gamma", result.winner.name)
@@ -429,7 +429,7 @@ func TestVaneRacingIdentityRejectsSameNameReplacement(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.identity = "beta-old"
 	group, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -440,7 +440,7 @@ func TestVaneRacingIdentityRejectsSameNameReplacement(t *testing.T) {
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	called := atomic.Bool{}
-	scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { called.Store(true) })
+	scheduled, _ := group.scheduleReconnectRace(request, func(vaneRaceResult) { called.Store(true) })
 	require.True(t, scheduled)
 	<-started
 	newBeta := newVaneTestProxy("beta", true, true)
@@ -470,7 +470,7 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		gamma := newVaneTestProxy("gamma", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		group.racing.budgetBytesHour = vaneRacingProbeByteCap
 		var calls atomic.Int32
@@ -479,7 +479,7 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 			return vaneProbeResult{valid: false, reason: "early-eof", bytes: vaneRacingProbeByteCap / 2, duration: time.Second}
 		}
 		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
-		scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		scheduled, _ := group.scheduleReconnectRace(request, func(vaneRaceResult) {})
 		require.True(t, scheduled)
 		require.Eventually(t, func() bool {
 			group.racingRuntime.mu.Lock()
@@ -497,7 +497,7 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-		configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		configureVaneRacingForTest(t, group, vaneRacingOn)
 		started := make(chan struct{})
 		var once sync.Once
@@ -508,7 +508,7 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 		}
 		request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 		called := atomic.Bool{}
-		scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { called.Store(true) })
+		scheduled, _ := group.scheduleReconnectRace(request, func(vaneRaceResult) { called.Store(true) })
 		require.True(t, scheduled)
 		<-started
 		require.NoError(t, group.Close())
@@ -530,7 +530,7 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 			beta := newVaneTestProxy("beta", true, true)
 			beta.delay = 10
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-			configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+			configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 			configureVaneRacingForTest(t, group, mode)
 			// CHAIN-01: the shadow baseline close needs challenger evidence. The
 			// helper's demand=1/low=3M with a 1 Mbps sample makes any evidence
@@ -549,7 +549,7 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 			metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 			suppressColdPickProbeForTest(t, group, metadata)
 			decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-			flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+			flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 			flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 			actions := make(chan vanePolicyAction, 1)
 			flow.setPolicySubmitter(func(action vanePolicyAction, _ bool) { actions <- action })
@@ -567,7 +567,7 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 				suppressions := group.VaneDiagnostics().Suppressions
 				require.Greater(t, suppressions["no-evidence-candidate"], uint64(0))
 				group.mu.Lock()
-				require.Empty(t, group.mediaHints)
+				require.Empty(t, group.hints)
 				require.Empty(t, group.targetHandoffs)
 				require.Empty(t, group.targetPreferences)
 				group.mu.Unlock()
@@ -588,7 +588,7 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 				}
 				require.True(t, action())
 				group.mu.Lock()
-				require.Empty(t, group.mediaHints)
+				require.Empty(t, group.hints)
 				require.Len(t, group.targetHandoffs, 1)
 				group.mu.Unlock()
 			}
@@ -602,13 +602,13 @@ func TestVaneRacingProbeCancellationChargesReadBytes(t *testing.T) {
 	// when the probe is canceled or invalid.
 	clock := newVaneConnTestClock()
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{reason: "canceled", bytes: 12345, duration: time.Millisecond}
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
-	scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("unexpected winner") })
+	scheduled, _ := group.scheduleReconnectRace(request, func(vaneRaceResult) { t.Fatal("unexpected winner") })
 	require.True(t, scheduled)
 	require.Eventually(t, func() bool {
 		group.racingRuntime.mu.Lock()
@@ -625,13 +625,13 @@ func TestVaneRacingProbeCancellationChargesReadBytes(t *testing.T) {
 func TestVaneRacingNoWinnerDoesNotCommitPolicyState(t *testing.T) {
 	clock := newVaneConnTestClock()
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 1, capHit: true}
 	}
 	request := newVaneRaceRequestForTest(t, group, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
-	scheduled, _ := group.scheduleMediaRace(request, func(vaneRaceResult) { t.Fatal("unexpected winner") })
+	scheduled, _ := group.scheduleReconnectRace(request, func(vaneRaceResult) { t.Fatal("unexpected winner") })
 	require.True(t, scheduled)
 	require.Eventually(t, func() bool {
 		group.racingRuntime.mu.Lock()
@@ -641,8 +641,8 @@ func TestVaneRacingNoWinnerDoesNotCommitPolicyState(t *testing.T) {
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
 	require.Empty(t, group.targetPreferences)
-	require.Empty(t, group.mediaSlowCooldowns)
-	require.Empty(t, group.mediaBudgets)
+	require.Empty(t, group.slowCooldowns)
+	require.Empty(t, group.budgets)
 	group.mu.Unlock()
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
 }
@@ -655,7 +655,7 @@ func TestVaneRacingCapabilityPrune(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
 	t.Run("ttl expiry removes stale capability", func(t *testing.T) {
@@ -724,7 +724,7 @@ func TestVaneRacingBudgetSettle(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.budgetBytesHour = vaneRacingProbeByteCap * 4
 
@@ -784,7 +784,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	metadata := &C.Metadata{Host: "rr.guard.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 
 	for _, invalid := range []string{"nil-callback", "empty-scope"} {
@@ -796,7 +796,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 			} else {
 				request.targetKey.targetScope = ""
 			}
-			scheduled, reason := group.scheduleMediaRace(request, callback)
+			scheduled, reason := group.scheduleReconnectRace(request, callback)
 			require.False(t, scheduled)
 			require.Equal(t, "invalid-race-request", reason)
 		})
@@ -808,7 +808,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 		group.racingRuntime.closed = true
 		group.racingRuntime.mu.Unlock()
 		request := newVaneRaceRequestForTest(t, group, metadata)
-		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) {})
 		require.False(t, scheduled)
 		require.Equal(t, "group-closed", reason)
 		group.racingRuntime.mu.Lock()
@@ -822,7 +822,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 		group.racingRuntime.inFlight = true
 		group.racingRuntime.mu.Unlock()
 		request := newVaneRaceRequestForTest(t, group, metadata)
-		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) {})
 		require.False(t, scheduled)
 		require.Equal(t, "race-in-flight", reason)
 		group.racingRuntime.mu.Lock()
@@ -837,7 +837,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 		group.racingRuntime.noWinnerUntil[key] = clock.Now().Add(time.Minute)
 		group.racingRuntime.mu.Unlock()
 		request := newVaneRaceRequestForTest(t, group, metadata)
-		scheduled, reason := group.scheduleMediaRace(request, func(vaneRaceResult) {})
+		scheduled, reason := group.scheduleReconnectRace(request, func(vaneRaceResult) {})
 		require.False(t, scheduled)
 		require.Contains(t, reason, "no-winner")
 		group.racingRuntime.mu.Lock()

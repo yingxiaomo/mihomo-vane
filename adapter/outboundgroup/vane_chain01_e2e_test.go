@@ -57,7 +57,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	beta.dialHook = func() { betaDials.Add(1) }
 
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, demand)
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 
@@ -185,7 +185,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	require.Positive(t, snapshot.Counters.HandoffMeasured)
 	require.Positive(t, snapshot.Counters.HandoffImproved,
 		"~5.6 Mbps real throughput must settle as an improvement over 0.5 Mbps")
-	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	group.mu.Lock()
 	preference, preferred := group.targetPreferences[key]
@@ -222,7 +222,7 @@ func TestVaneChain01E2ERescueBeatsDemand(t *testing.T) {
 	beta := newVaneTestProxy("beta", true, true)
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, demand)
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {

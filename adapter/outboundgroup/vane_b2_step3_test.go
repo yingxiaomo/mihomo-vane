@@ -19,7 +19,7 @@ func seedVaneB2CandidateEvidence(t *testing.T, group *Vane, proxy *vaneTestProxy
 	member := group.memberLeaseLocked(proxy.Name(), proxy.identity)
 	group.mu.Unlock()
 	require.NotZero(t, member.epoch)
-	key, ok := group.targetKeyForMedia("rr.googlevideo.com", 443)
+	key, ok := group.targetScopeForKey("rr.googlevideo.com", 443)
 	require.True(t, ok)
 	group.recordTargetEvidence(key, member, bps, false)
 	return member
@@ -102,10 +102,10 @@ func TestVaneB2Step3LossExclusion(t *testing.T) {
 		require.Empty(t, reason)
 		require.Equal(t, []string{"gamma"}, raceCandidateNames(before), "just-over-the-line is excluded first")
 
-		flow := newVaneMediaFlow(group, betaMember.name, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+		flow := newVaneFlow(group, betaMember.name, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = betaMember.identity, betaMember.epoch
-		group.recordB2MediaLoss(flow, vaneConnectionCloseObservation{
+		group.recordB2Loss(flow, vaneConnectionCloseObservation{
 			TotalReadBytes: 8 << 20, LossSupported: true, LossRate: 0,
 		}, group.clock.Now())
 
@@ -216,11 +216,11 @@ func TestVaneB2Step3StallCooldown(t *testing.T) {
 		seedStall(t, group, *request, betaMember, 3, 10)
 		require.Equal(t, []string{"gamma"}, raceCandidateNames(mustVaneRaceCandidates(t, group, *request)))
 
-		flow := newVaneMediaFlow(group, betaMember.name, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+		flow := newVaneFlow(group, betaMember.name, &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = betaMember.identity, betaMember.epoch
 		for i := 0; i < 6; i++ {
-			group.recordB2MediaStall(flow, vaneConnectionCloseObservation{WrotePayload: true, TotalReadBytes: 4 << 20}, group.clock.Now())
+			group.recordB2Stall(flow, vaneConnectionCloseObservation{WrotePayload: true, TotalReadBytes: 4 << 20}, group.clock.Now())
 		}
 		candidates, reason := group.snapshotRaceCandidates(*request)
 		require.Empty(t, reason)
@@ -268,7 +268,7 @@ func TestVaneB2Step3DiagnosticTallies(t *testing.T) {
 	gammaMember := group.memberLeaseLocked(gamma.Name(), gamma.identity)
 	group.mu.Unlock()
 
-	key, ok := group.targetKeyForMedia("rr.googlevideo.com", 443)
+	key, ok := group.targetScopeForKey("rr.googlevideo.com", 443)
 	require.True(t, ok)
 	group.mu.Lock()
 	group.targetFailures[vaneTargetFailureKey{target: key, member: betaMember}] = vaneTargetFailureState{lossEMA: 0.4, lossSamples: 6, attemptCount: 10, suspectedStallCount: 5}

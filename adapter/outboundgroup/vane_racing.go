@@ -81,7 +81,7 @@ type vaneCapabilityRecord struct {
 
 type vaneRaceRequest struct {
 	targetKey   vaneTargetKey
-	mediaKey    vaneMediaTargetKey
+	scopeKey    vaneFlowKey
 	target      string
 	port        uint16
 	current     vaneMemberLease
@@ -207,7 +207,7 @@ func (a *Vane) racingGenerationCurrent(generation uint64) bool {
 	return current && !closed
 }
 
-func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRaceResult), done ...func()) (bool, string) {
+func (a *Vane) scheduleReconnectRace(request vaneRaceRequest, callback func(vaneRaceResult), done ...func()) (bool, string) {
 	// done releases the caller's per-flow race round even when the engine
 	// returns without invoking the callback. It is variadic so existing test
 	// callers that do not own a flow round stay unchanged.
@@ -255,7 +255,7 @@ func (a *Vane) scheduleMediaRace(request vaneRaceRequest, callback func(vaneRace
 		age:        request.age,
 		lowWindows: request.lowWindows,
 	})
-	go a.runMediaRace(ctx, cancel, taskID, request, callback, finished)
+	go a.runReconnectRace(ctx, cancel, taskID, request, callback, finished)
 	return true, ""
 }
 
@@ -272,7 +272,7 @@ func (a *Vane) finishRaceTask(taskID uint64, request vaneRaceRequest, noWinner, 
 	a.racingRuntime.mu.Unlock()
 }
 
-func (a *Vane) runMediaRace(ctx context.Context, cancel context.CancelFunc, taskID uint64, request vaneRaceRequest, callback func(vaneRaceResult), done func()) {
+func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, taskID uint64, request vaneRaceRequest, callback func(vaneRaceResult), done func()) {
 	defer cancel()
 	noWinner := true
 	stale := false
@@ -492,8 +492,8 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 			continue
 		}
 		blockUntil, _ := a.targetMemberBlockedLocked(request.targetKey, member, now)
-		legacyKey := vaneMediaCandidateKey{vaneMediaTargetKey: request.mediaKey, candidate: member.name, identity: member.identity}
-		if until := a.mediaSlowCooldowns[legacyKey]; until.After(blockUntil) {
+		legacyKey := vaneCandidateKey{vaneFlowKey: request.scopeKey, candidate: member.name, identity: member.identity}
+		if until := a.slowCooldowns[legacyKey]; until.After(blockUntil) {
 			blockUntil = until
 		}
 		// B2 Step 3: the loss and stall records stay observations — they only
@@ -612,7 +612,7 @@ func (a *Vane) validateRaceWinner(request vaneRaceRequest, member vaneMemberLeas
 	if !a.racingGenerationCurrent(request.generation) {
 		return false
 	}
-	release, ok := a.lockVaneMediaIdentities(map[string]string{
+	release, ok := a.lockVaneIdentities(map[string]string{
 		request.current.name: request.current.identity,
 		member.name:          member.identity,
 	})

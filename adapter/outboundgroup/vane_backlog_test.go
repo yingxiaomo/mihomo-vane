@@ -82,7 +82,7 @@ func TestVaneBacklogStampExpires(t *testing.T) {
 	}
 	flow.mu.Lock()
 	require.Zero(t, flow.lowWindows)
-	flow.backloggedAt = clock.Now().Add(-vaneMediaBacklogGrace - time.Second)
+	flow.backloggedAt = clock.Now().Add(-vaneBacklogGrace - time.Second)
 	flow.mu.Unlock()
 
 	require.Nil(t, flow.observe(vaneObservationLowSample()))
@@ -130,8 +130,8 @@ func TestVaneBacklogUnwiredFlow(t *testing.T) {
 	require.Nil(t, flow.backlogFunc, "the rig never wires a connection")
 	flow.mu.Unlock()
 
-	clock.Advance(vaneMediaWatchdogTick)
-	group.runMediaWatchdogTick(clock.Now())
+	clock.Advance(vaneWatchdogTick)
+	group.runFlowWatchdogTick(clock.Now())
 	require.Nil(t, flow.observe(vaneObservationLowSample()))
 	flow.mu.Lock()
 	require.Equal(t, 1, flow.lowWindows)
@@ -147,7 +147,7 @@ func TestVaneBacklogWiredThroughDialContext(t *testing.T) {
 		readFunc: func(payload []byte) (int, error) { return copy(payload, make([]byte, 4096)), nil },
 	}
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	chain01ProductionValues(t, group, 1_000_000)
 	t.Cleanup(func() { _ = group.Close() })
@@ -165,17 +165,17 @@ func TestVaneBacklogWiredThroughDialContext(t *testing.T) {
 	require.Positive(t, n)
 	require.Positive(t, observed.pendingBacklog(), "bytes read by the relay but never delivered")
 
-	group.mediaFlowsMu.Lock()
-	require.Len(t, group.mediaFlowSet, 1, "the rig must expose exactly the flow this test dialled")
-	var flow *vaneMediaFlow
-	for candidate := range group.mediaFlowSet {
+	group.flowsMu.Lock()
+	require.Len(t, group.flowSet, 1, "the rig must expose exactly the flow this test dialled")
+	var flow *vaneFlow
+	for candidate := range group.flowSet {
 		flow = candidate
 	}
-	group.mediaFlowsMu.Unlock()
+	group.flowsMu.Unlock()
 	require.NotNil(t, flow)
 
 	now := clock.Now()
-	group.runMediaWatchdogTick(now)
+	group.runFlowWatchdogTick(now)
 	flow.mu.Lock()
 	stamped := flow.backloggedAt
 	flow.mu.Unlock()
@@ -190,7 +190,7 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 		readFunc: func(payload []byte) (int, error) { return copy(payload, make([]byte, 4096)), nil },
 	}
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	chain01ProductionValues(t, group, 1_000_000)
 	t.Cleanup(func() { _ = group.Close() })
@@ -203,13 +203,13 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	observed := conn.(*vaneObservedConn)
 	reader, counters := observed.UnwrapReader()
-	group.mediaFlowsMu.Lock()
-	require.Len(t, group.mediaFlowSet, 1, "the rig must expose exactly the flow this test dialled")
-	var flow *vaneMediaFlow
-	for candidate := range group.mediaFlowSet {
+	group.flowsMu.Lock()
+	require.Len(t, group.flowSet, 1, "the rig must expose exactly the flow this test dialled")
+	var flow *vaneFlow
+	for candidate := range group.flowSet {
 		flow = candidate
 	}
-	group.mediaFlowsMu.Unlock()
+	group.flowsMu.Unlock()
 	require.NotNil(t, flow)
 
 	for i := 0; i < 3; i++ {
@@ -250,7 +250,7 @@ func TestVaneBacklogExcusesBackgroundBursts(t *testing.T) {
 
 	// The throttled reader unwrites nothing for a while, so the probe stops
 	// refreshing the stamp; the excuse must still hold across the gap.
-	clock.Advance(2 * vaneMediaWatchdogTick)
+	clock.Advance(2 * vaneWatchdogTick)
 	require.Nil(t, flow.observe(vaneObservationLowSample()))
 	flow.mu.Lock()
 	require.Zero(t, flow.lowWindows, "the excuse outlives the probe gap")

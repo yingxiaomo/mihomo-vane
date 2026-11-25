@@ -93,7 +93,7 @@ func TestVaneB2StallTelemetry(t *testing.T) {
 	group.ensureProxyNodeLocked(alpha, clock.Now())
 	lease := group.memberLeaseLocked(alpha.Name(), alpha.identity)
 	group.mu.Unlock()
-	flow := newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	flow := newVaneFlow(group, alpha.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, flow)
 	flow.identity = lease.identity
 	flow.nodeEpoch = lease.epoch
@@ -114,10 +114,10 @@ func TestVaneB2StallTelemetry(t *testing.T) {
 
 	// Three stalls and one client abort: the signature must distinguish them.
 	for step := 0; step < 3; step++ {
-		group.recordB2MediaStall(flow, stallObservation, clock.Now())
+		group.recordB2Stall(flow, stallObservation, clock.Now())
 		clock.Advance(time.Second)
 	}
-	group.recordB2MediaStall(flow, abortObservation, clock.Now())
+	group.recordB2Stall(flow, abortObservation, clock.Now())
 	clock.Advance(time.Second)
 
 	group.mu.Lock()
@@ -138,7 +138,7 @@ func TestVaneB2StallTelemetry(t *testing.T) {
 	require.Equal(t, 1, group.VaneDiagnostics().Runtime.B2StallTargets)
 
 	// The fifth settle crosses the minimum: the rate becomes meaningful.
-	group.recordB2MediaStall(flow, stallObservation, clock.Now())
+	group.recordB2Stall(flow, stallObservation, clock.Now())
 	group.mu.Lock()
 	state = group.targetFailures[key]
 	group.mu.Unlock()
@@ -146,7 +146,7 @@ func TestVaneB2StallTelemetry(t *testing.T) {
 	require.InDelta(t, 0.8, state.b2StallRate(), 1e-12)
 
 	// One more abort, and the rate tracks the new ratio.
-	group.recordB2MediaStall(flow, abortObservation, clock.Now())
+	group.recordB2Stall(flow, abortObservation, clock.Now())
 	group.mu.Lock()
 	state = group.targetFailures[key]
 	group.mu.Unlock()
@@ -154,7 +154,7 @@ func TestVaneB2StallTelemetry(t *testing.T) {
 	require.InDelta(t, 4.0/6.0, state.b2StallRate(), 1e-12)
 
 	// Loss and stall share one record without disturbing each other.
-	group.recordB2MediaLoss(flow, vaneConnectionCloseObservation{
+	group.recordB2Loss(flow, vaneConnectionCloseObservation{
 		WrotePayload: true, TotalReadBytes: 4 * 1024 * 1024, LossRate: 0.01, LossSupported: true,
 	}, clock.Now())
 	group.mu.Lock()

@@ -90,7 +90,7 @@ func TestVaneB2TargetSeedAndPush(t *testing.T) {
 	group.mu.Unlock()
 	// The flow settles on beta: candidate and identity must agree, or the
 	// prune would eat the live record after every settle.
-	flow := newVaneMediaFlow(group, beta.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
+	flow := newVaneFlow(group, beta.Name(), &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, flow)
 	flow.identity = lease.identity
 	flow.nodeEpoch = lease.epoch
@@ -112,7 +112,7 @@ func TestVaneB2TargetSeedAndPush(t *testing.T) {
 		flow.targetStateKey.targetScope, flow.targetStateKey.port, flow.candidate, flow.identity,
 	)] = vaneB2SampleTarget(clock.Now(), 0.07, 8, 30, 5)
 
-	group.recordB2MediaStall(flow, vaneConnectionCloseObservation{
+	group.recordB2Stall(flow, vaneConnectionCloseObservation{
 		WrotePayload: true, TotalReadBytes: 4 * 1024 * 1024,
 		ResponseRecorded: true, ResponseBytes: 4 * 1024 * 1024,
 		ResponseAt: clock.Now().Add(-30 * time.Second),
@@ -140,7 +140,7 @@ func TestVaneB2TargetSeedAndPush(t *testing.T) {
 		flow.targetStateKey.transport,
 		flow.targetStateKey.targetScope, flow.targetStateKey.port, flow.candidate, flow.identity,
 	)] = vaneB2SampleTarget(clock.Now(), 0.9, 100, 500, 400)
-	group.recordB2MediaLoss(flow, vaneConnectionCloseObservation{
+	group.recordB2Loss(flow, vaneConnectionCloseObservation{
 		WrotePayload: true, TotalReadBytes: 4 * 1024 * 1024, LossRate: 0.02, LossSupported: true,
 	}, clock.Now())
 	group.mu.Lock()

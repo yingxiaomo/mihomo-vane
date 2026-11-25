@@ -9,17 +9,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// LATENCY-01: a real media window's RTT feeds the node's latency EMA.
+// LATENCY-01: a real throughput window's RTT feeds the node's latency EMA.
 func TestVaneLatencyIdentityFeedsEstimate(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	defer group.Close()
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 
 	metadata := &C.Metadata{Host: "rr-lat.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	group.pick(metadata, vaneTransportTCP, true, true)
-	flow := newVaneMediaFlow(group, alpha.Name(), metadata)
+	flow := newVaneFlow(group, alpha.Name(), metadata)
 	require.NotNil(t, flow)
 	flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 20_000_000, TotalBytes: 8 << 20, Age: 20 * time.Second, Delivered: true,
@@ -49,11 +49,11 @@ func TestVaneLatencyUnsupportedNeverFeeds(t *testing.T) {
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	defer group.Close()
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 
 	metadata := &C.Metadata{Host: "rr-lat-nosupport.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	group.pick(metadata, vaneTransportTCP, true, true)
-	flow := newVaneMediaFlow(group, alpha.Name(), metadata)
+	flow := newVaneFlow(group, alpha.Name(), metadata)
 	require.NotNil(t, flow)
 	for i := 0; i < 3; i++ {
 		flow.observe(vaneThroughputObservation{

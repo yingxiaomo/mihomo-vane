@@ -41,7 +41,7 @@ func techdebtSettleTargetHandoff(t *testing.T, group *Vane, metadata *C.Metadata
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
 	group.settleTargetHandoff(decision.handoff, decision.handoff.toLease, sample)
-	key, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	return key
 }
@@ -116,7 +116,7 @@ func TestVaneTargetCapabilityRecordsLatestSample(t *testing.T) {
 		BitsPerSecond: 50_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
 	})
 
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
 	lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 	state := group.targetFailures[vaneTargetFailureKey{target: key, member: lease}]
@@ -146,7 +146,7 @@ func TestVanePrepareAdmitsTargetTierEvidence(t *testing.T) {
 	seedChain01Traffic(t, group, beta.Name(), clock.Now().Add(-11*time.Minute), 8_000_000)
 
 	group.mu.Lock()
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	member := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.mu.Unlock()
 
@@ -224,14 +224,14 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 	suppressColdPickProbeForTest(t, group, metadata)
 	seedChain01Traffic(t, group, beta.Name(), clock.Now(), 12_000_000)
 
-	metadataKey := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+	metadataKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
 	plan, reason := chain01Prepare(t, group, metadata, alpha, 1_600_000)
 	require.Empty(t, reason)
 	require.Equal(t, beta.Name(), plan.challenger)
-	require.Empty(t, group.commitMediaReconnectDetailed(plan))
+	require.Empty(t, group.commitReconnectDetailed(plan))
 
 	group.mu.Lock()
-	require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "commit writes the reconnect cooldown")
+	require.True(t, group.reconnects[vaneNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "commit writes the reconnect cooldown")
 	group.mu.Unlock()
 
 	// NOGAIN-01: the settle lands on the switched-to flow (member = beta);
@@ -244,10 +244,10 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 		BitsPerSecond: 1_500_000, TotalBytes: 8 * 1024 * 1024, Age: 30 * time.Second,
 	})
 	group.mu.Lock()
-	_, reconnected := group.mediaReconnects[vaneMediaNodeKeyFor(metadataKey, plan.current)]
+	_, reconnected := group.reconnects[vaneNodeKeyFor(metadataKey, plan.current)]
 	require.False(t, reconnected, "no-gain must release the reconnect cooldown")
-	slowUntil := group.mediaSlowCooldowns[vaneMediaCandidateKey{
-		vaneMediaTargetKey: metadataKey, candidate: beta.Name(), identity: beta.identity,
+	slowUntil := group.slowCooldowns[vaneCandidateKey{
+		vaneFlowKey: metadataKey, candidate: beta.Name(), identity: beta.identity,
 	}]
 	group.mu.Unlock()
 	require.True(t, slowUntil.After(clock.Now()), "the slow cooldown on the no-gain candidate stays")
@@ -265,7 +265,7 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 func TestVaneImprovedKeepsReconnectCooldown(t *testing.T) {
 	group, clock, _, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
-	metadataKey := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+	metadataKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
 
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
@@ -276,7 +276,7 @@ func TestVaneImprovedKeepsReconnectCooldown(t *testing.T) {
 	})
 
 	group.mu.Lock()
-	require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "improved keeps the reconnect cooldown")
+	require.True(t, group.reconnects[vaneNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "improved keeps the reconnect cooldown")
 	group.mu.Unlock()
 	require.Positive(t, group.VaneDiagnostics().Counters.HandoffImproved)
 }
@@ -316,7 +316,7 @@ func TestVaneImprovedSettlementNeedsAbsoluteLine(t *testing.T) {
 	// already ≥ 10M).
 	group, _, _, beta, metadata = newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 10_000_000)
-	group.media.lowThroughputBPS = 10_000_000 // §L: the line follows demand
+	group.flow.lowThroughputBPS = 10_000_000 // §L: the line follows demand
 	key = techdebtSettleTargetHandoff(t, group, metadata, beta, vaneThroughputObservation{
 		BitsPerSecond: 13_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second,
 	})
@@ -340,10 +340,10 @@ func TestVaneImprovedSettlementNeedsAbsoluteLine(t *testing.T) {
 }
 
 // §L: the low-window trigger line follows demand (floored at 5M). The config
-// is built through newVaneMediaConfig — the production path that applies the
+// is built through newVaneFlowConfig — the production path that applies the
 // raise — so mutating the raise breaks these tests.
 func TestVaneTriggerLineIgnoresDemand(t *testing.T) {
-	newFlow := func(t *testing.T, demandBPS, lowBPS int64) (*Vane, *vaneMediaFlow) {
+	newFlow := func(t *testing.T, demandBPS, lowBPS int64) (*Vane, *vaneFlow) {
 		t.Helper()
 		clock := newVaneConnTestClock()
 		alpha := newVaneTestProxy("alpha", true, true)
@@ -360,21 +360,21 @@ func TestVaneTriggerLineIgnoresDemand(t *testing.T) {
 		if lowBPS > 0 {
 			option.LowThroughputBPS = vaneBandwidth(lowBPS)
 		}
-		config, err := newVaneMediaConfig(option)
+		config, err := newVaneFlowConfig(option)
 		require.NoError(t, err)
 		config.enabled = true
-		group.media = config
-		require.Equal(t, demandBPS, int64(group.media.demandBPS))
+		group.flow = config
+		require.Equal(t, demandBPS, int64(group.flow.demandBPS))
 
 		metadata := &C.Metadata{Host: "rr-trigger.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		require.Equal(t, "alpha", decision.proxy.Name())
-		flow := newVaneMediaFlow(group, decision.proxy.Name(), metadata)
+		flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
 		flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch
 		return group, flow
 	}
-	lowOf := func(flow *vaneMediaFlow) int {
+	lowOf := func(flow *vaneFlow) int {
 		flow.mu.Lock()
 		defer flow.mu.Unlock()
 		return flow.lowWindows
@@ -403,7 +403,7 @@ func TestVaneTriggerLineIgnoresDemand(t *testing.T) {
 func TestVaneCommitTargetTierSurvivesNodeFloor(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 10_000_000)
-	group.media.lowThroughputBPS = 10_000_000 // §L: the line follows demand
+	group.flow.lowThroughputBPS = 10_000_000 // §L: the line follows demand
 	suppressColdPickProbeForTest(t, group, metadata)
 	group.mu.Lock()
 	group.learning.mu.Lock()
@@ -414,7 +414,7 @@ func TestVaneCommitTargetTierSurvivesNodeFloor(t *testing.T) {
 	// Fresh node traffic inside the 5–10M band the raised floor now vetoes.
 	seedChain01Traffic(t, group, beta.Name(), clock.Now(), 8_000_000)
 	group.mu.Lock()
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	member := group.memberLeaseLocked(beta.Name(), beta.identity)
 	group.mu.Unlock()
 	techdebtSeedTargetEvidence(t, group, key, member, 12_000_000, clock.Now())
@@ -423,10 +423,10 @@ func TestVaneCommitTargetTierSurvivesNodeFloor(t *testing.T) {
 	require.Empty(t, reason, "the 12M target evidence admits over the 8M node sample")
 	require.Equal(t, beta.Name(), plan.challenger)
 	require.False(t, plan.knownGood)
-	require.Empty(t, group.commitMediaReconnectDetailed(plan),
+	require.Empty(t, group.commitReconnectDetailed(plan),
 		"the target tier must survive the CHAIN-04 node floor at commit")
 	group.mu.Lock()
-	hint := group.mediaHints[plan.targetKey]
+	hint := group.hints[plan.targetKey]
 	group.mu.Unlock()
 	require.Equal(t, beta.Name(), hint.candidate)
 }
@@ -457,7 +457,7 @@ func newTargetGroupForTest3(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestP
 	beta := newVaneTestProxy("beta", true, true)
 	gamma := newVaneTestProxy("gamma", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com", "DOMAIN-SUFFIX,interactive.example")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com", "DOMAIN-SUFFIX,interactive.example")
 	configureVaneRacingForTest(t, group, vaneRacingOn)
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	return group, clock, alpha, beta, gamma, metadata
@@ -586,7 +586,7 @@ func TestVaneLearningRegistryKeepsVictimOnFlushFailure(t *testing.T) {
 func TestVaneHandoffFailureKeepsForeignPreference(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
-	key, _ := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	seedPreference := func() {
 		t.Helper()
 		group.mu.Lock()
@@ -684,7 +684,7 @@ func TestVaneRaceQualifiesNodeWithoutLiveState(t *testing.T) {
 	plan := prepareTargetHandoffForTest(t, group, metadata, alpha)
 	request := vaneRaceRequest{
 		targetKey:   plan.targetStateKey,
-		mediaKey:    plan.targetKey,
+		scopeKey:    plan.targetKey,
 		target:      plan.target,
 		port:        plan.port,
 		current:     vaneMemberLease{name: alpha.Name(), identity: alpha.identity, epoch: plan.nodeEpoch},
@@ -824,12 +824,12 @@ func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
 func TestVaneStarvedFlowBypassesReconnectCooldown(t *testing.T) {
 	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
 	group.mu.Lock()
-	group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)] = clock.Now().Add(time.Minute)
+	group.reconnects[vaneNodeKeyFor(flow.targetKey, flow.candidate)] = clock.Now().Add(time.Minute)
 	group.mu.Unlock()
 
 	// Credit stays above the guard: the streak reaches the line, and the armed
 	// cooldown still refuses the close.
-	for i := 0; i < vaneDefaultMediaLowWindows; i++ {
+	for i := 0; i < vaneDefaultLowWindows; i++ {
 		clock.Advance(5 * time.Second)
 		require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
 	}

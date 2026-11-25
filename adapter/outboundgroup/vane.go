@@ -89,13 +89,13 @@ type vaneNodeState struct {
 	durationCount   uint64
 	downloadTotal   uint64
 	totalsAt        time.Time
-	// D batch: node-level RTT EMA fed by media windows only (non-media scenes
+	// D batch: node-level RTT EMA fed by throughput windows only (non-scenes
 	// have no observe(), so their latency estimate stays invalid -> neutral).
 	latencyMs      float64
 	latencySamples uint64
 	latencyAt      time.Time
 	// cooldown is the single node-level penalty of the simplified kernel (v3).
-	// It replaces mediaSlowCooldowns and the per-target mediaReconnects: when a
+	// It replaces slowCooldowns and the per-target reconnects: when a
 	// flow is switched away from this node, the node rests for 30 minutes.
 	cooldown time.Time
 }
@@ -198,8 +198,8 @@ func (s vaneNodeState) lossEstimate(now time.Time) vaneMetricEstimate {
 	}
 }
 
-// latencyEstimate is the node's media-window RTT (log milliseconds). Only
-// media flows feed it, so a node that was never a media target stays invalid
+// latencyEstimate is the node's throughput-window RTT (log milliseconds). Only
+// flows feed it, so a node that was never a target scope stays invalid
 // and scores the neutral missing cost instead of "zero latency".
 func (s vaneNodeState) latencyEstimate(now time.Time) vaneMetricEstimate {
 	if !s.profileFresh(now, s.latencyAt) || s.latencySamples == 0 || s.latencyMs <= 0 {
@@ -318,7 +318,7 @@ type Vane struct {
 	stateTTL           time.Duration
 	maxStates          int
 	clock              vaneClock
-	media              vaneMediaConfig
+	flow               vaneFlowConfig
 	racing             vaneRacingConfig
 	racingRuntime      vaneRacingRuntime
 	exploration        vaneExplorationConfig
@@ -333,46 +333,46 @@ type Vane struct {
 	activationMu       sync.Mutex
 	learningActivated  bool
 
-	mu                  sync.Mutex
-	nodes               map[string]*vaneNodeState
-	stickiness          map[vaneTargetKey]vaneStickyChoice
-	nodeControls        map[string]*vaneNodeControlState
-	nodeIdentities      map[string]string
-	anchors             map[vaneAnchorKey]vaneAnchor
-	cooldowns           map[vaneCooldownKey]time.Time
-	mediaHints          map[vaneMediaTargetKey]vaneMediaHint
-	mediaReconnects     map[vaneMediaNodeKey]time.Time
-	mediaTargetSwitches map[vaneMediaTargetKey]vaneTargetSwitchBudget
-	mediaSlowCooldowns  map[vaneMediaCandidateKey]time.Time
-	mediaBudgets        map[vaneMediaNodeKey]vaneMediaBudget
-	targetHandoffs      map[vaneTargetKey]vaneHandoffLease
-	targetPreferences   map[vaneTargetKey]vaneTargetPreference
-	targetEvidence      map[vaneTargetEvidenceKey]vaneTargetEvidence
-	targetFailures      map[vaneTargetFailureKey]vaneTargetFailureState
+	mu                sync.Mutex
+	nodes             map[string]*vaneNodeState
+	stickiness        map[vaneTargetKey]vaneStickyChoice
+	nodeControls      map[string]*vaneNodeControlState
+	nodeIdentities    map[string]string
+	anchors           map[vaneAnchorKey]vaneAnchor
+	cooldowns         map[vaneCooldownKey]time.Time
+	hints             map[vaneFlowKey]vaneHint
+	reconnects        map[vaneNodeKey]time.Time
+	targetSwitches    map[vaneFlowKey]vaneTargetSwitchBudget
+	slowCooldowns     map[vaneCandidateKey]time.Time
+	budgets           map[vaneNodeKey]vaneBudget
+	targetHandoffs    map[vaneTargetKey]vaneHandoffLease
+	targetPreferences map[vaneTargetKey]vaneTargetPreference
+	targetEvidence    map[vaneTargetEvidenceKey]vaneTargetEvidence
+	targetFailures    map[vaneTargetFailureKey]vaneTargetFailureState
 	// Cold-pick probe throttle (COLD-PICK): per target scope. Both maps are
 	// guarded by a.mu and only touched in pickInternalDecision's (a)/(c)
 	// stages — never inside racingRuntime.mu (see snapshotFreshCapabilities).
 	pickProbeInflight map[string]bool
 	lastPickProbeAt   map[string]time.Time
 	// §E: the per-target valve throttle — a target re-runs its prepare at most
-	// once per vaneMediaValveThrottle, regardless of how many flows ask.
+	// once per vaneValveThrottle, regardless of how many flows ask.
 	// Guarded by a.mu.
-	mediaValveLastRun  map[vaneTargetKey]time.Time
+	valveLastRun       map[vaneTargetKey]time.Time
 	explorationScopes  [vaneExplorationScopeCount]vaneExplorationScopeState
 	explorationOrdinal uint64
 
 	churnMu sync.Mutex
 	churn   map[vaneChurnKey]*vaneChurnState
 
-	// B2 item 4 (round5): per-node live media-flow counts on their own lock —
+	// B2 item 4 (round5): per-node live flow counts on their own lock —
 	// the counter churns per connection while a.mu guards selection state.
-	mediaFlowsMu     sync.Mutex
-	mediaActiveFlows map[string]int
-	// §2.4: the live media flows (for the stall watchdog) and the once-guard
-	// for its single ticker goroutine. Guarded by mediaFlowsMu; the goroutine
+	flowsMu     sync.Mutex
+	activeFlows map[string]int
+	// §2.4: the live flows (for the stall watchdog) and the once-guard
+	// for its single ticker goroutine. Guarded by flowsMu; the goroutine
 	// stops with racingRuntime.ctx on Close.
-	mediaFlowSet      map[*vaneMediaFlow]struct{}
-	mediaWatchdogOnce sync.Once
+	flowSet      map[*vaneFlow]struct{}
+	watchdogOnce sync.Once
 }
 
 func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (*Vane, error) {
@@ -416,7 +416,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 	if err != nil {
 		return nil, err
 	}
-	media, err := newVaneMediaConfig(vaneOption)
+	flowCfg, err := newVaneFlowConfig(vaneOption)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +437,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 	}
 	group := newVaneWithClock(option, emptyFallback, providers, rules, switchMargin, targetCooldown, stateTTL, maxStates, vaneSystemClock{})
 	group.hashRules = hashRules
-	group.media = media
+	group.flow = flowCfg
 	group.racing = racing
 	group.exploration = exploration
 	group.collectorSpec = collectorSpec
@@ -473,41 +473,41 @@ func newVaneWithClock(
 			EmptyFallback:  emptyFallback,
 			Providers:      providers,
 		}),
-		disableUDP:          option.DisableUDP,
-		testURL:             option.URL,
-		expectedStatus:      option.ExpectedStatus,
-		rules:               rules,
-		switchMargin:        int64(switchMargin*1_000_000 + 0.5),
-		targetCooldown:      targetCooldown,
-		stateTTL:            stateTTL,
-		maxStates:           maxStates,
-		clock:               clock,
-		media:               defaultVaneMediaConfig(),
-		racing:              vaneRacingConfig{mode: vaneRacingOn},
-		racingRuntime:       newVaneRacingRuntime(),
-		explorationSince:    clock.Now().UTC(),
-		diagnostics:         newVaneDiagnostics(option.Name, clock),
-		anchors:             make(map[vaneAnchorKey]vaneAnchor),
-		stickiness:          make(map[vaneTargetKey]vaneStickyChoice),
-		cooldowns:           make(map[vaneCooldownKey]time.Time),
-		mediaHints:          make(map[vaneMediaTargetKey]vaneMediaHint),
-		mediaReconnects:     make(map[vaneMediaNodeKey]time.Time),
-		mediaTargetSwitches: make(map[vaneMediaTargetKey]vaneTargetSwitchBudget),
-		mediaSlowCooldowns:  make(map[vaneMediaCandidateKey]time.Time),
-		mediaBudgets:        make(map[vaneMediaNodeKey]vaneMediaBudget),
-		targetHandoffs:      make(map[vaneTargetKey]vaneHandoffLease),
-		targetPreferences:   make(map[vaneTargetKey]vaneTargetPreference),
-		targetEvidence:      make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
-		targetFailures:      make(map[vaneTargetFailureKey]vaneTargetFailureState),
-		pickProbeInflight:   make(map[string]bool),
-		lastPickProbeAt:     make(map[string]time.Time),
-		mediaValveLastRun:   make(map[vaneTargetKey]time.Time),
-		nodes:               make(map[string]*vaneNodeState),
-		nodeControls:        make(map[string]*vaneNodeControlState),
-		nodeIdentities:      make(map[string]string),
-		churn:               make(map[vaneChurnKey]*vaneChurnState),
-		mediaActiveFlows:    make(map[string]int),
-		mediaFlowSet:        make(map[*vaneMediaFlow]struct{}),
+		disableUDP:        option.DisableUDP,
+		testURL:           option.URL,
+		expectedStatus:    option.ExpectedStatus,
+		rules:             rules,
+		switchMargin:      int64(switchMargin*1_000_000 + 0.5),
+		targetCooldown:    targetCooldown,
+		stateTTL:          stateTTL,
+		maxStates:         maxStates,
+		clock:             clock,
+		flow:              defaultVaneFlowConfig(),
+		racing:            vaneRacingConfig{mode: vaneRacingOn},
+		racingRuntime:     newVaneRacingRuntime(),
+		explorationSince:  clock.Now().UTC(),
+		diagnostics:       newVaneDiagnostics(option.Name, clock),
+		anchors:           make(map[vaneAnchorKey]vaneAnchor),
+		stickiness:        make(map[vaneTargetKey]vaneStickyChoice),
+		cooldowns:         make(map[vaneCooldownKey]time.Time),
+		hints:             make(map[vaneFlowKey]vaneHint),
+		reconnects:        make(map[vaneNodeKey]time.Time),
+		targetSwitches:    make(map[vaneFlowKey]vaneTargetSwitchBudget),
+		slowCooldowns:     make(map[vaneCandidateKey]time.Time),
+		budgets:           make(map[vaneNodeKey]vaneBudget),
+		targetHandoffs:    make(map[vaneTargetKey]vaneHandoffLease),
+		targetPreferences: make(map[vaneTargetKey]vaneTargetPreference),
+		targetEvidence:    make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
+		targetFailures:    make(map[vaneTargetFailureKey]vaneTargetFailureState),
+		pickProbeInflight: make(map[string]bool),
+		lastPickProbeAt:   make(map[string]time.Time),
+		valveLastRun:      make(map[vaneTargetKey]time.Time),
+		nodes:             make(map[string]*vaneNodeState),
+		nodeControls:      make(map[string]*vaneNodeControlState),
+		nodeIdentities:    make(map[string]string),
+		churn:             make(map[vaneChurnKey]*vaneChurnState),
+		activeFlows:       make(map[string]int),
+		flowSet:           make(map[*vaneFlow]struct{}),
 	}
 	group.gray = newVaneGrayObserver(false, clock, group.diagnostics)
 	learning := newVaneLearningState(option.Name, clock, nil, stateTTL, maxStates)
@@ -673,10 +673,10 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 	attempt.setup(finished, vaneElapsed(start, finished), "returned", deferredAvailability)
 	a.observeConnectEpochIdentity(proxy.Name(), identity, nodeEpoch, vaneTransportTCP, finished, vaneElapsed(start, finished))
 	conn.AppendToChains(a)
-	mediaFlow := newVaneMediaFlow(a, proxy.Name(), metadata, handoff)
-	if mediaFlow != nil {
-		mediaFlow.identity = identity
-		mediaFlow.nodeEpoch = nodeEpoch
+	activeFlow := newVaneFlow(a, proxy.Name(), metadata, handoff)
+	if activeFlow != nil {
+		activeFlow.identity = identity
+		activeFlow.nodeEpoch = nodeEpoch
 	}
 
 	if deferredAvailability {
@@ -690,7 +690,7 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 				exploration.settle("exploration-succeeded", "first-write-succeeded")
 				return
 			}
-			if mediaFlow != nil && mediaFlow.policyAborted() {
+			if activeFlow != nil && activeFlow.policyAborted() {
 				attempt.outcome(now, "neutral", "policy_abort", "closed")
 				grayAttempt.settle("neutral")
 				exploration.settle("exploration-neutral", "policy-aborted")
@@ -700,13 +700,13 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 				attempt.outcome(now, "neutral", "first_positive_write", vaneNativeErrorClass(writeErr))
 				grayAttempt.settle("neutral")
 				exploration.settle("exploration-neutral", "first-write-neutral")
-				if mediaFlow != nil {
-					mediaFlow.discardHandoff()
+				if activeFlow != nil {
+					activeFlow.discardHandoff()
 				}
 				return
 			}
-			if mediaFlow != nil {
-				mediaFlow.failHandoff("first-write-failed")
+			if activeFlow != nil {
+				activeFlow.failHandoff("first-write-failed")
 			}
 			exploration.settle("exploration-failed", "first-write-failed")
 			attempt.outcome(now, "failure", "first_positive_write", vaneNativeErrorClass(writeErr))
@@ -722,8 +722,8 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 	}
 
 	var onWindow func(vaneThroughputObservation) vanePolicyAction
-	if mediaFlow != nil {
-		onWindow = mediaFlow.observe
+	if activeFlow != nil {
+		onWindow = activeFlow.observe
 	}
 	var churnMetadata *C.Metadata
 	if metadata != nil {
@@ -762,22 +762,22 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 			// lifetime loss ratio. Unsupported reads book nothing.
 			a.recordCumulativeLossIdentity(proxy.Name(), identity, nodeEpoch, observation)
 			a.recordCloseProfileIdentity(proxy.Name(), identity, nodeEpoch, observation)
-			if mediaFlow != nil {
+			if activeFlow != nil {
 				// B2 items 2+3: passive loss and stall telemetry ride on
-				// media-flow settlement regardless of the racing mode.
+				// flow settlement regardless of the racing mode.
 				now := a.clock.Now()
-				a.recordB2MediaLoss(mediaFlow, observation, now)
-				a.recordB2MediaStall(mediaFlow, observation, now)
+				a.recordB2Loss(activeFlow, observation, now)
+				a.recordB2Stall(activeFlow, observation, now)
 				// B2 item 4: release the flow's per-node count once.
-				mediaFlow.releaseActiveFlowCount()
+				activeFlow.releaseActiveFlowCount()
 			}
 		},
 		func(observation vaneThroughputObservation, reason string) {
 			attempt.throughput(a.clock.Now(), observation, reason)
 		},
 		func() {
-			if mediaFlow != nil {
-				mediaFlow.markClosed()
+			if activeFlow != nil {
+				activeFlow.markClosed()
 			}
 		})
 	if observed, ok := controlled.(*vaneObservedConn); ok {
@@ -788,12 +788,12 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		if a.racing.mode == vaneRacingShadow {
 			observed.enableShadowObserve()
 		}
-		if mediaFlow != nil {
-			mediaFlow.setPolicySubmitter(observed.submitPolicyAction)
-			mediaFlow.setBacklogFunc(observed.pendingBacklog)
+		if activeFlow != nil {
+			activeFlow.setPolicySubmitter(observed.submitPolicyAction)
+			activeFlow.setBacklogFunc(observed.pendingBacklog)
 			// §E: the switched-to flow counts empty windows on its own
 			// connection; other connections on the same hint never arm it.
-			observed.setOnEmptyWindow(mediaFlow.noteEmptyWindow)
+			observed.setOnEmptyWindow(activeFlow.noteEmptyWindow)
 		}
 	}
 	return controlled, nil
@@ -915,20 +915,20 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		racingURL = a.racing.url.String()
 	}
 	snapshot.Config = VaneDiagnosticConfig{
-		MediaEnabled:                  a.media.enabled,
-		MediaDomains:                  append([]string(nil), a.media.domains...),
-		LowThroughputBPS:              a.media.lowThroughputBPS,
-		LowWindows:                    a.media.lowWindows,
-		MaxLowWindows:                 a.media.maxLowWindows,
-		MinAgeMS:                      a.media.minAge.Milliseconds(),
-		MinBytes:                      a.media.minBytes,
-		DemandBPS:                     a.media.demandBPS,
-		BufferGuardMS:                 a.media.bufferGuard.Milliseconds(),
-		ReconnectCooldownMS:           a.media.reconnectCooldown.Milliseconds(),
-		SlowCooldownMS:                a.media.slowCooldown.Milliseconds(),
-		HintTTLMS:                     a.media.hintTTL.Milliseconds(),
-		ReconnectBudget:               a.media.budgetMax,
-		BudgetWindowMS:                a.media.budgetWindow.Milliseconds(),
+		FlowEnabled:                   a.flow.enabled,
+		FlowDomains:                   append([]string(nil), a.flow.domains...),
+		LowThroughputBPS:              a.flow.lowThroughputBPS,
+		LowWindows:                    a.flow.lowWindows,
+		MaxLowWindows:                 a.flow.maxLowWindows,
+		MinAgeMS:                      a.flow.minAge.Milliseconds(),
+		MinBytes:                      a.flow.minBytes,
+		DemandBPS:                     a.flow.demandBPS,
+		BufferGuardMS:                 a.flow.bufferGuard.Milliseconds(),
+		ReconnectCooldownMS:           a.flow.reconnectCooldown.Milliseconds(),
+		SlowCooldownMS:                a.flow.slowCooldown.Milliseconds(),
+		HintTTLMS:                     a.flow.hintTTL.Milliseconds(),
+		ReconnectBudget:               a.flow.budgetMax,
+		BudgetWindowMS:                a.flow.budgetWindow.Milliseconds(),
 		ChurnShadowEnabled:            true,
 		ChurnWindowMS:                 vaneChurnWindow.Milliseconds(),
 		ChurnLimit:                    vaneChurnLimit,
@@ -944,23 +944,23 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 
 	now := a.clock.Now()
 	a.mu.Lock()
-	for _, hint := range a.mediaHints {
+	for _, hint := range a.hints {
 		if hint.expiresAt.After(now) {
 			snapshot.Runtime.ActiveHints++
 		}
 	}
-	for _, until := range a.mediaReconnects {
+	for _, until := range a.reconnects {
 		if until.After(now) {
 			snapshot.Runtime.ActiveReconnectCooldowns++
 		}
 	}
-	for _, until := range a.mediaSlowCooldowns {
+	for _, until := range a.slowCooldowns {
 		if until.After(now) {
 			snapshot.Runtime.ActiveSlowCooldowns++
 		}
 	}
-	for _, budget := range a.mediaBudgets {
-		if budget.startedAt.Add(a.media.budgetWindow).After(now) {
+	for _, budget := range a.budgets {
+		if budget.startedAt.Add(a.flow.budgetWindow).After(now) {
 			snapshot.Runtime.ActiveBudgets++
 		}
 	}
@@ -1000,14 +1000,14 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 	// B2 item 4: copy the live per-node flow counts — never expose the
 	// internal map's reference. An empty counter set keeps the zero Runtime
 	// value (nil map), matching the diagnostics read contract.
-	a.mediaFlowsMu.Lock()
-	if len(a.mediaActiveFlows) > 0 {
-		snapshot.Runtime.B2ActiveMediaFlows = make(map[string]int, len(a.mediaActiveFlows))
-		for name, count := range a.mediaActiveFlows {
-			snapshot.Runtime.B2ActiveMediaFlows[name] = count
+	a.flowsMu.Lock()
+	if len(a.activeFlows) > 0 {
+		snapshot.Runtime.B2ActiveFlows = make(map[string]int, len(a.activeFlows))
+		for name, count := range a.activeFlows {
+			snapshot.Runtime.B2ActiveFlows[name] = count
 		}
 	}
-	a.mediaFlowsMu.Unlock()
+	a.flowsMu.Unlock()
 	// Round6 item 1: the passive P5 profile per node. Reads are pure — the
 	// ring is copied, never trimmed. Only nodes with throughput samples appear.
 	p5Nodes := make(map[string]VaneDiagnosticP5Node)
@@ -1171,8 +1171,8 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		key := vaneCooldownKey{transport: transport, target: target, port: port, candidate: proxy.Name(), identity: identity}
 		until := a.cooldownUntilLocked(key, now, commit)
 		if transport == vaneTransportTCP {
-			if mediaUntil := a.mediaCooldownUntilLockedWithCleanup(target, port, proxy.Name(), vaneProxyPersistentIdentity(proxy), now, commit); mediaUntil.After(until) {
-				until = mediaUntil
+			if flowUntil := a.cooldownUntilLockedWithCleanup(target, port, proxy.Name(), vaneProxyPersistentIdentity(proxy), now, commit); flowUntil.After(until) {
+				until = flowUntil
 			}
 		}
 		parts := scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot)
@@ -1235,7 +1235,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				identity := vaneProxyPersistentIdentity(candidate.proxy)
 				anchorCoolingAnywhere = a.candidateCoolingLocked(transport, anchor.name, identity, now, commit)
 				if transport == vaneTransportTCP {
-					anchorCoolingAnywhere = anchorCoolingAnywhere || a.mediaCandidateCoolingLockedWithCleanup(anchor.name, vaneProxyPersistentIdentity(candidate.proxy), now, commit)
+					anchorCoolingAnywhere = anchorCoolingAnywhere || a.candidateCoolingLockedWithCleanup(anchor.name, vaneProxyPersistentIdentity(candidate.proxy), now, commit)
 				}
 				break
 			}
@@ -1280,12 +1280,12 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		}
 	}
 
-	// HASH-PIN-MEDIA: media target handoff runs after the pin, so an explicit
+	// HASH-PIN-MEDIA: target scope handoff runs after the pin, so an explicit
 	// hash pin wins over it. A handoff token is claimed only when the operator
-	// has not pinned this scope; otherwise the media path would silently
+	// has not pinned this scope; otherwise the flow path would silently
 	// override the pin on every reconnect inside the pinned rule set.
 	if pinned == nil && commit && transport == vaneTransportTCP {
-		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
+		if targetKey, ok := a.targetScopeForKey(target, port); ok {
 			if selected, handoff, source := a.takeTargetSelectionLocked(targetKey, compatible, now, claimHandoff); selected != nil {
 				state := a.ensureProxyNodeLocked(selected, now)
 				a.pruneLocked(now, proxies)
@@ -1312,13 +1312,13 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				return vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 			}
 		}
-		if hinted, handoff := a.takeMediaHintLocked(target, port, compatible, now, claimHandoff); hinted != nil {
+		if hinted, handoff := a.takeHintLocked(target, port, compatible, now, claimHandoff); hinted != nil {
 			state := a.ensureProxyNodeLocked(hinted, now)
 			a.pruneLocked(now, proxies)
 			a.learning.markDirtyLocked(now)
 			a.learning.mu.Unlock()
 			a.mu.Unlock()
-			targetKey := a.mediaTargetKey(target, port)
+			targetKey := a.targetScopeKey(target, port)
 			record := vaneDiagnosticRecord{
 				kind:   "handoff-selected",
 				target: target,
@@ -1333,7 +1333,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				record.previousBPS = handoff.previousBPS
 			}
 			a.diagnostics.record(record)
-			a.recordPickScoredSnapshot("media-hint", transport, target, port, hinted.Name(), state.snapshot(transport, now))
+			a.recordPickScoredSnapshot("hint", transport, target, port, hinted.Name(), state.snapshot(transport, now))
 			return vanePickDecision{proxy: hinted, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 		}
 	}
@@ -1396,10 +1396,10 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	var coldPickTop2 []vaneRankedProxy
 	if commit && transport == vaneTransportTCP &&
 		explorationSelection == nil && pinned == nil && claimHandoff {
-		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
+		if targetKey, ok := a.targetScopeForKey(target, port); ok {
 			coldPickScope = targetKey.targetScope
 		} else {
-			// PHASE2: a non-media target still gets a cold-pick probe; the
+			// PHASE2: a non-target scope still gets a cold-pick probe; the
 			// target string itself is the per-scope throttle key.
 			coldPickScope = target
 		}
@@ -1565,7 +1565,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 }
 
 // recordPickScoredSnapshot covers the sticky early returns that never reach the
-// ranking loop: without it a media flow served from target memory logs nothing.
+// ranking loop: without it a flow served from target memory logs nothing.
 func (a *Vane) recordPickScoredSnapshot(reason string, transport vaneTransport, target string, port uint16, name string, snapshot vaneMetricsSnapshot) {
 	parts := scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot)
 	a.diagnostics.record(vaneDiagnosticRecord{
@@ -1577,7 +1577,7 @@ func (a *Vane) recordPickScoredSnapshot(reason string, transport vaneTransport, 
 
 // recordPickScored explains one committed pick: the winner, its weighted
 // dimension contributions, and the raw best score when the anchor rule or a
-// probe overrode it. Media picks always log; other scenes only when the pick
+// probe overrode it. Target-scoped picks always log; other scenes only when the pick
 // moves away from the scene anchor, so plain browsing stays quiet.
 func (a *Vane) recordPickScored(transport vaneTransport, target string, port uint16, chosen vaneRankedProxy, ranked []vaneRankedProxy, anchor vaneAnchor) {
 	if len(ranked) == 0 || (chosen.name == anchor.name) {
@@ -1629,7 +1629,7 @@ func (a *Vane) hashCandidateUsableLocked(cand *vaneRankedProxy, transport vaneTr
 		return false
 	}
 	if transport == vaneTransportTCP {
-		if a.mediaCandidateCoolingLockedWithCleanup(cand.name, vaneProxyPersistentIdentity(cand.proxy), now, commit) {
+		if a.candidateCoolingLockedWithCleanup(cand.name, vaneProxyPersistentIdentity(cand.proxy), now, commit) {
 			return false
 		}
 	}
@@ -1836,7 +1836,7 @@ func (a *Vane) recordCumulativeLossIdentity(candidate, identity string, nodeEpoc
 	a.mu.Unlock()
 }
 
-// recordLatencyIdentity folds one media window's RTT into the node's EMA
+// recordLatencyIdentity folds one throughput window's RTT into the node's EMA
 // (alpha 0.2, ~5 samples to converge). Unsupported reads never call it: no
 // signal is not zero latency.
 func (a *Vane) recordLatencyIdentity(candidate, identity string, nodeEpoch uint64, latency time.Duration) {
@@ -1847,7 +1847,7 @@ func (a *Vane) recordLatencyIdentity(candidate, identity string, nodeEpoch uint6
 	}
 	a.mu.Lock()
 	a.learning.mu.Lock()
-	// A media flow is bound by name only; resolve the live identity/epoch here so
+	// A flow is bound by name only; resolve the live identity/epoch here so
 	// the sample lands on the current node record instead of a name-keyed ghost
 	// that no selection ever reads.
 	if identity == "" {

@@ -456,24 +456,24 @@ func TestVaneHashPinDoesNotWriteAnchor(t *testing.T) {
 // plain flow too.
 func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
-	key := vaneMediaTargetKey{target: "googlevideo.com", port: 443}
+	key := vaneFlowKey{target: "googlevideo.com", port: 443}
 	group.mu.Lock()
-	group.mediaSlowCooldowns[vaneMediaCandidateKey{
-		vaneMediaTargetKey: key,
-		candidate:          "a",
-		identity:           vaneProxyPersistentIdentity(byName["a"]),
+	group.slowCooldowns[vaneCandidateKey{
+		vaneFlowKey: key,
+		candidate:   "a",
+		identity:    vaneProxyPersistentIdentity(byName["a"]),
 	}] = clock.Now().Add(time.Hour)
 	group.mu.Unlock()
 
 	cand := &vaneRankedProxy{proxy: byName["a"]}
 	cand.name = "a"
 	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, clock.Now(), true),
-		"a media-cooled node must be refused for a media flow")
+		"a media-cooled node must be refused for a flow")
 	require.False(t, group.hashCandidateUsableLocked(cand, vaneTransportTCP, clock.Now(), true),
 		"a demoted node is refused for every scene now that the per-scene gate is gone")
 
 	// The end-to-end path agrees: the pin fails over instead of reusing it.
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
 	metadata := vaneHashMetadata("rr1.googlevideo.com")
 	failedOver := group.pick(metadata, vaneTransportTCP, false, true)
@@ -485,7 +485,7 @@ func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 // every reconnect inside a pinned rule set would silently move the flow.
 func TestVaneHashPinOutranksMediaHint(t *testing.T) {
 	group, clock, _ := newVaneHashPinGroup(t, "alpha", "beta", "gamma")
-	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomainSuffix, value: "googlevideo.com"}}
 	metadata := vaneHashMetadata("rr1.googlevideo.com")
 
@@ -493,12 +493,12 @@ func TestVaneHashPinOutranksMediaHint(t *testing.T) {
 	require.NotNil(t, pinned)
 	require.NotEqual(t, "beta", pinned.Name(), "the pin must not land on beta for this test to mean anything")
 
-	key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
+	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
 	require.NotEmpty(t, key.target)
-	group.mediaHints[key] = vaneMediaHint{candidate: "beta", expiresAt: clock.Now().Add(time.Minute)}
+	group.hints[key] = vaneHint{candidate: "beta", expiresAt: clock.Now().Add(time.Minute)}
 
 	require.Equal(t, pinned.Name(), group.pick(metadata, vaneTransportTCP, false, true).Name(),
-		"the pin outranks the media hint")
+		"the pin outranks the hint")
 
 	// Without a pin the hint still wins, which proves the hint was live.
 	group.hashRules = nil
