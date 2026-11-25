@@ -670,7 +670,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		token:     token,
 	}
 	a.mediaReconnects[vaneMediaNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.media.reconnectCooldown)
-	a.noteMediaTargetSwitchLocked(plan.targetKey, now)
+	a.noteMediaTargetSwitchLocked(plan.targetKey, plan.challenger, now)
 	return ""
 }
 

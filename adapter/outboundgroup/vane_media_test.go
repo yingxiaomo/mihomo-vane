@@ -970,7 +970,7 @@ func TestVaneTargetSwitchBudgetStopsPingPong(t *testing.T) {
 	defer group.mu.Unlock()
 	for i := 0; i < vaneTargetSwitchBudgetMax; i++ {
 		require.Empty(t, group.mediaTargetBudgetBlocksLocked(key, now))
-		group.noteMediaTargetSwitchLocked(key, now)
+		group.noteMediaTargetSwitchLocked(key, "alpha", now)
 		now = now.Add(vaneSwitchObserveWindow + time.Second)
 	}
 	require.Equal(t, "target-switch-budget", group.mediaTargetBudgetBlocksLocked(key, now))
@@ -986,7 +986,7 @@ func TestVaneSwitchObserveWindowBlocksImmediateReswitch(t *testing.T) {
 	now := clock.Now()
 	group.mu.Lock()
 	defer group.mu.Unlock()
-	group.noteMediaTargetSwitchLocked(key, now)
+	group.noteMediaTargetSwitchLocked(key, "alpha", now)
 	require.Equal(t, "switch-observing", group.mediaTargetBudgetBlocksLocked(key, now.Add(10*time.Second)))
 	require.Empty(t, group.mediaTargetBudgetBlocksLocked(key, now.Add(vaneSwitchObserveWindow+time.Second)))
 }
@@ -1004,4 +1004,45 @@ func TestVaneNonMediaFlowHasStateScope(t *testing.T) {
 	require.False(t, flow.flowMedia)
 	require.Equal(t, "api.example.com", flow.targetStateKey.targetScope)
 	flow.releaseActiveFlowCount()
+}
+
+// VERIFY: a landing is judged on the bytes the flow actually moves, not on the
+// probe. A node that keeps tripping the low-window counter right after the
+// switch is put on cooldown; a node we never landed on is untouched, and the
+// same node is excused once the observe window has passed.
+func TestVaneVerifyPenaltyCoolsSlowLanding(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	key := group.mediaTargetKey("rr-verify.googlevideo.com", 443)
+	now := clock.Now()
+
+	group.mu.Lock()
+	group.noteMediaTargetSwitchLocked(key, "beta", now)
+	group.mu.Unlock()
+
+	// A node we did not land on must not be cooled by this target's landing.
+	group.penalizeSlowLanding(key, "alpha", now.Add(10*time.Second))
+	group.mu.Lock()
+	require.Empty(t, group.mediaSlowCooldowns)
+	group.mu.Unlock()
+
+	// The node we did land on is cooled for the penalty duration.
+	group.penalizeSlowLanding(key, "beta", now.Add(10*time.Second))
+	group.mu.Lock()
+	cooled := len(group.mediaSlowCooldowns)
+	group.mu.Unlock()
+	require.Equal(t, 1, cooled)
+
+	// Past the observe window the landing is no longer judged.
+	other := vaneMediaTargetKey{target: "rr-verify2.example", port: 443}
+	group.mu.Lock()
+	group.noteMediaTargetSwitchLocked(other, "beta", now)
+	group.mu.Unlock()
+	group.penalizeSlowLanding(other, "beta", now.Add(vaneSwitchObserveWindow+time.Second))
+	group.mu.Lock()
+	stillOne := len(group.mediaSlowCooldowns)
+	group.mu.Unlock()
+	require.Equal(t, 1, stillOne)
 }

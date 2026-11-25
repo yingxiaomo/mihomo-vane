@@ -711,6 +711,11 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	untrusted := sample.untrusted || graceReason != ""
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
 	if !untrusted && mediaTarget {
+		// VERIFY: real bytes only. A node we just landed on that keeps tripping
+		// the counter is cooled down; synthetic/graced windows never count.
+		if lowWindows >= vaneVerifyPenaltyLowWindows {
+			f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
+		}
 		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond, lowLoss || lowLatency)
 		if low {
 			f.group.invalidateTargetPreference(f.targetStateKey, member)
@@ -1210,12 +1215,22 @@ const (
 	vaneTargetSwitchBudgetWindow = 30 * time.Minute
 	vaneTargetSwitchBudgetMax    = 3
 	vaneSwitchObserveWindow      = 60 * time.Second
+	// VERIFY: a landing is judged on real bytes, not the probe. Two low windows
+	// inside the observe window is enough to conclude the node cannot feed the
+	// flow; it then sits out for ten minutes on every target.
+	vaneVerifyPenaltyLowWindows = 2
+	vaneVerifyPenaltyCooldown   = 10 * time.Minute
 )
 
 type vaneTargetSwitchBudget struct {
 	windowFrom time.Time
 	count      int
 	lastSwitch time.Time
+	// VERIFY: the node we just landed on and when we landed on it. If it keeps
+	// tripping the low-window counter during the observe window the landing was
+	// bad, so the node itself is cooled down instead of trusting the probe.
+	verifyNode string
+	verifyFrom time.Time
 }
 
 func (a *Vane) mediaTargetBudgetBlocksLocked(targetKey vaneMediaTargetKey, now time.Time) string {
@@ -1232,7 +1247,7 @@ func (a *Vane) mediaTargetBudgetBlocksLocked(targetKey vaneMediaTargetKey, now t
 	return ""
 }
 
-func (a *Vane) noteMediaTargetSwitchLocked(targetKey vaneMediaTargetKey, now time.Time) {
+func (a *Vane) noteMediaTargetSwitchLocked(targetKey vaneMediaTargetKey, node string, now time.Time) {
 	if a.mediaTargetSwitches == nil {
 		a.mediaTargetSwitches = make(map[vaneMediaTargetKey]vaneTargetSwitchBudget)
 	}
@@ -1243,7 +1258,42 @@ func (a *Vane) noteMediaTargetSwitchLocked(targetKey vaneMediaTargetKey, now tim
 	}
 	budget.count++
 	budget.lastSwitch = now
+	budget.verifyNode = node
+	budget.verifyFrom = now
 	a.mediaTargetSwitches[targetKey] = budget
+}
+
+// penalizeSlowLanding cools down a node we just switched onto but which is
+// already tripping the low-window counter. VERIFY: the probe can be wildly
+// optimistic (a free node measured 18Mbps to dl.google.com yet delivered only
+// 4Mbps of googlevideo), so a bad landing is judged on real bytes and the node
+// is put on cooldown across every target instead of being re-picked.
+func (a *Vane) penalizeSlowLanding(targetKey vaneMediaTargetKey, candidate string, now time.Time) {
+	a.mu.Lock()
+	budget, ok := a.mediaTargetSwitches[targetKey]
+	if !ok || budget.verifyNode != candidate || now.Sub(budget.verifyFrom) > vaneSwitchObserveWindow {
+		a.mu.Unlock()
+		return
+	}
+	ident := ""
+	if st := a.nodes[candidate]; st != nil {
+		ident = st.identity
+	}
+	key := vaneMediaCandidateKey{vaneMediaTargetKey: targetKey, candidate: candidate, identity: ident}
+	if a.mediaSlowCooldowns[key].After(now) {
+		a.mu.Unlock()
+		return
+	}
+	a.mediaSlowCooldowns[key] = now.Add(vaneVerifyPenaltyCooldown)
+	a.mu.Unlock()
+	a.diagnostics.record(vaneDiagnosticRecord{
+		kind:   "verify-penalty",
+		target: targetKey.target,
+		bucket: targetKey.target,
+		port:   targetKey.port,
+		from:   candidate,
+		reason: "slow-landing",
+	})
 }
 
 // mediaCooldownBlocksLocked reports whether the reconnect cooldown still
@@ -1694,7 +1744,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		handoff:   handoff,
 	}
 	a.mediaReconnects[vaneMediaNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.media.reconnectCooldown)
-	a.noteMediaTargetSwitchLocked(plan.targetKey, now)
+	a.noteMediaTargetSwitchLocked(plan.targetKey, plan.challenger, now)
 	return ""
 }
 
