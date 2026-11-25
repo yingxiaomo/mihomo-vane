@@ -43,6 +43,12 @@ const (
 	// only makes the race more conservative, while erring high can pick the
 	// wrong winner and poison the capability cache.
 	vaneRacingProbeMinDuration = 100 * time.Millisecond
+	// PROBE-WARMUP: the rate skips the first megabyte. TCP slow-start lives
+	// there, and charging it as transmission time cost every node a roughly
+	// fixed second - which made a 24Mbps node report 12Mbps and flattered
+	// nodes whose handshake was quick. The bytes still count toward the cap;
+	// only the measured window starts after the warmup.
+	vaneRacingProbeWarmup = int64(1024 * 1024)
 )
 
 type vaneRacingMode uint8
@@ -754,6 +760,20 @@ func vaneProbeBoundDuration(duration time.Duration) time.Duration {
 	return duration
 }
 
+// vaneProbeSteadyRate turns a body read into a throughput lower bound measured
+// over the post-warmup window. A sample that barely cleared the warmup keeps
+// the whole read instead: subtracting the prefix there would leave too few
+// bytes to time and would overstate the bound.
+func vaneProbeSteadyRate(total, warmupTotal int64, elapsed, warmupElapsed time.Duration) (float64, time.Duration) {
+	window := elapsed - warmupElapsed
+	if warmupTotal <= 0 || total < 2*warmupTotal || window < vaneRacingProbeMinDuration {
+		duration := vaneProbeBoundDuration(elapsed)
+		return 8 * float64(total) / duration.Seconds(), duration
+	}
+	duration := vaneProbeBoundDuration(window)
+	return 8 * float64(total-warmupTotal) / duration.Seconds(), duration
+}
+
 func probeVaneCapability(ctx context.Context, proxy C.Proxy, endpoint *url.URL, byteLimit int64) vaneProbeResult {
 	return probeVaneCapabilityWithTLSConfig(ctx, proxy, endpoint, byteLimit, nil)
 }
@@ -856,6 +876,8 @@ func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoi
 	started := time.Now()
 	buffer := make([]byte, 32*1024)
 	var total int64
+	var warmupAt time.Time
+	var warmupTotal int64
 	for total < byteLimit {
 		want := int64(len(buffer))
 		if remaining := byteLimit - total; remaining < want {
@@ -864,12 +886,15 @@ func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoi
 		n, readErr := response.Body.Read(buffer[:want])
 		if n > 0 {
 			total += int64(n)
+			if warmupTotal == 0 && total >= vaneRacingProbeWarmup {
+				warmupTotal, warmupAt = total, time.Now()
+			}
 		}
 		if total >= byteLimit {
-			duration := vaneProbeBoundDuration(time.Since(started))
+			rate, duration := vaneProbeSteadyRate(total, warmupTotal, time.Since(started), warmupAt.Sub(started))
 			return vaneProbeResult{
 				valid: true, reason: "cap-hit", bytes: total, duration: duration,
-				lowerBoundBPS: 8 * float64(total) / duration.Seconds(), capHit: true,
+				lowerBoundBPS: rate, capHit: true,
 			}
 		}
 		if readErr != nil {
@@ -893,10 +918,10 @@ func probeVaneCapabilityWithTLSConfig(ctx context.Context, proxy C.Proxy, endpoi
 				// header consumed most of the budget the read loop can end almost
 				// immediately, and a tiny duration would inflate the bound.
 				if total > 0 {
-					duration = vaneProbeBoundDuration(duration)
+					rate, bound := vaneProbeSteadyRate(total, warmupTotal, duration, warmupAt.Sub(started))
 					return vaneProbeResult{
-						valid: true, reason: "read-timeout", bytes: total, duration: duration,
-						lowerBoundBPS: 8 * float64(total) / duration.Seconds(),
+						valid: true, reason: "read-timeout", bytes: total, duration: bound,
+						lowerBoundBPS: rate,
 					}
 				}
 				return vaneProbeResult{reason: "read-timeout", bytes: total, duration: duration}

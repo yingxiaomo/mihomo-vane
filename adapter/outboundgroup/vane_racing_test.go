@@ -845,3 +845,38 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 		group.racingRuntime.mu.Unlock()
 	})
 }
+
+// PROBE-WARMUP: the rate must skip the slow-start prefix, otherwise a node
+// that delivers fast after the ramp reports a bound deflated by a fixed
+// second: 4MiB in 2.4s reads as 14Mbps even though the last 3MiB took 1.2s.
+func TestVaneProbeSteadyRateSkipsSlowStart(t *testing.T) {
+	const mib = int64(1024 * 1024)
+	total := 4 * mib
+	elapsed := 2400 * time.Millisecond
+	warmupElapsed := 1200 * time.Millisecond
+
+	rate, duration := vaneProbeSteadyRate(total, vaneRacingProbeWarmup, elapsed, warmupElapsed)
+	require.InDelta(t, 8*float64(3*mib)/1.2, rate, 1, "the rate must come from the post-warmup window")
+	require.Equal(t, 1200*time.Millisecond, duration, "the reported window excludes the warmup")
+
+	whole, _ := vaneProbeSteadyRate(total, 0, elapsed, 0)
+	require.InDelta(t, 8*float64(total)/2.4, whole, 1)
+	require.Less(t, whole, rate, "counting the warmup must read lower")
+}
+
+func TestVaneProbeSteadyRateKeepsShortSamplesWhole(t *testing.T) {
+	const mib = int64(1024 * 1024)
+	// 1.5MiB is below twice the warmup: subtracting the prefix would leave too
+	// few bytes to time, so the whole read is the honest bound.
+	total := mib + mib/2
+	rate, duration := vaneProbeSteadyRate(total, vaneRacingProbeWarmup, 900*time.Millisecond, 600*time.Millisecond)
+	require.InDelta(t, 8*float64(total)/0.9, rate, 1)
+	require.Equal(t, 900*time.Millisecond, duration)
+}
+
+func TestVaneProbeSteadyRateKeepsTinyWindowsWhole(t *testing.T) {
+	const mib = int64(1024 * 1024)
+	total := 4 * mib
+	rate, _ := vaneProbeSteadyRate(total, 2*vaneRacingProbeWarmup, 1100*time.Millisecond, 1050*time.Millisecond)
+	require.InDelta(t, 8*float64(total)/1.1, rate, 1, "a 50ms window is too short to trust")
+}
