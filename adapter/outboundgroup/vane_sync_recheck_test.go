@@ -88,7 +88,7 @@ func TestVaneSyncRecheckRecoveredVetoesClose(t *testing.T) {
 	require.False(t, action(), "a recovered flow must not be closed")
 	group.mu.Lock()
 	_, hinted := group.hints[plan.targetKey]
-	budget := group.budgets[vaneNodeKeyFor(plan.targetKey, plan.current)]
+	budget := group.ledger[plan.targetKey]
 	group.mu.Unlock()
 	require.False(t, hinted, "a rejected close must not leave a handoff hint")
 	require.Zero(t, budget.count, "a rejected close must not consume budget")

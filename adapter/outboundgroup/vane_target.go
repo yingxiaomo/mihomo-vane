@@ -491,12 +491,7 @@ func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, n
 			if proxy.Name() != member.name || vaneProxyPersistentIdentity(proxy) != member.identity {
 				continue
 			}
-			legacyKey := vaneCandidateKey{
-				vaneFlowKey: vaneFlowKey{target: key.targetScope, port: key.port},
-				candidate:   member.name,
-				identity:    member.identity,
-			}
-			if a.slowCooldowns[legacyKey].After(now) {
+			if a.nodeCoolingLocked(member.name, now) {
 				return nil
 			}
 			return proxy
@@ -586,11 +581,8 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	}
 	// §E: valve plans skip the cooldown they are re-evaluating (no valve plan
 	// reaches the target commit today, but the flag rides the shared plan).
-	if !plan.skipReconnectCooldown && a.cooldownBlocksLocked(vaneNodeKeyFor(plan.targetKey, plan.current), plan.currentBPS, now) {
-		return "reconnect-cooldown"
-	}
 	if !plan.skipReconnectCooldown {
-		if reason := a.targetBudgetBlocksLocked(plan.targetKey, now); reason != "" {
+		if reason := a.ledgerThrottleReasonLocked(plan.targetKey, now); reason != "" {
 			return reason
 		}
 	}
@@ -613,8 +605,7 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	if a.cooldownUntilLocked(dialKey, now, false).After(now) {
 		return "candidate-cooldown"
 	}
-	challengerKey := vaneCandidateKey{vaneFlowKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity}
-	if a.slowCooldowns[challengerKey].After(now) {
+	if a.nodeCoolingLocked(plan.challenger, now) {
 		return "challenger-slow-cooldown"
 	}
 	// CHAIN-01: the challenger must still have fresh evidence above the close
@@ -624,19 +615,10 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	if reason := a.checkChallengerEvidenceLocked(plan, capSnapshot, now); reason != "" {
 		return reason
 	}
-	budgetKey := vaneNodeKeyFor(plan.targetKey, plan.current)
-	budget := a.budgets[budgetKey]
-	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.flow.budgetWindow).After(now) {
-		budget = vaneBudget{startedAt: now}
-	}
-	if budget.count >= a.flow.budgetMax {
-		return "budget-exhausted"
-	}
-	budget.count++
-	a.budgets[budgetKey] = budget
 	from := vaneMemberLease{name: plan.current, identity: plan.identity, epoch: plan.nodeEpoch}
-	currentKey := vaneCandidateKey{vaneFlowKey: plan.targetKey, candidate: plan.current, identity: plan.identity}
-	a.slowCooldowns[currentKey] = now.Add(a.flow.slowCooldown)
+	// SWITCH-AWAY: the node we leave is not a candidate for five minutes on
+	// every target, which is what makes A->B->A impossible.
+	a.coolNodeLocked(plan.current, now.Add(vaneSwitchAwayCooldown))
 	token := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
 		kind:       "handoff-committed",
 		handoffID:  plan.raceID,
@@ -679,8 +661,7 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 		updatedAt: now,
 		token:     token,
 	}
-	a.reconnects[vaneNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.flow.reconnectCooldown)
-	a.noteTargetSwitchLocked(plan.targetKey, plan.challenger, now)
+	a.noteSwitchLocked(plan.targetKey, plan.challenger, now)
 	return ""
 }
 
@@ -740,13 +721,11 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 			candidate:   member.name,
 			identity:    member.identity,
 		}
-		a.slowCooldowns[legacyKey] = now.Add(a.flow.slowCooldown)
-		// §D: the handoff did not help — the reconnect cooldown written at
-		// commit must not keep blocking re-evaluation for this target. The 30
-		// minute slow cooldown above still stops this same candidate from
-		// being picked again; the two cooldowns guard different things.
-		delete(a.reconnects, vaneNodeKeyFor(legacyKey.vaneFlowKey, token.from))
-		delete(a.targetSwitches, legacyKey.vaneFlowKey)
+		a.coolNodeLocked(member.name, now.Add(a.flow.slowCooldown))
+		// §D: the handoff did not help — clearing the ledger lets this target be
+		// re-evaluated at once instead of waiting out the throttle. The node
+		// cooldown above still keeps this same candidate out of the pool.
+		delete(a.ledger, legacyKey.vaneFlowKey)
 	}
 	// §A: fold the settlement's real-traffic sample into the (target, member)
 	// record — the per-target capability observation, record-only for now.

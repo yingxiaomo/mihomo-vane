@@ -127,14 +127,9 @@ func TestVaneSettleUsesWindowSignals(t *testing.T) {
 			group, _, _, beta, metadata := newTargetGroupForTest(t)
 			chain01ProductionValues(t, group, 2_000_000)
 			key := techdebtSettleTargetHandoff(t, group, metadata, beta, tc.sample)
-			legacyKey := vaneCandidateKey{
-				vaneFlowKey: vaneFlowKey{target: key.targetScope, port: key.port},
-				candidate:   beta.Name(),
-				identity:    beta.identity,
-			}
 			group.mu.Lock()
 			_, preferred := group.targetPreferences[key]
-			cooled := group.slowCooldowns[legacyKey].After(group.clock.Now())
+			cooled := group.nodeCoolingLocked(beta.Name(), group.clock.Now())
 			group.mu.Unlock()
 			require.Equal(t, tc.improved, preferred, "preference follows the verdict")
 			require.Equal(t, !tc.improved, cooled, "no-gain slow-cools the candidate for 30 minutes")

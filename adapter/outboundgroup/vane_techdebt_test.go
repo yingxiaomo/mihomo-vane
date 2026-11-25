@@ -231,7 +231,8 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 	require.Empty(t, group.commitReconnectDetailed(plan))
 
 	group.mu.Lock()
-	require.True(t, group.reconnects[vaneNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "commit writes the reconnect cooldown")
+	require.NotEmpty(t, group.ledger[metadataKey], "commit arms the switch ledger")
+	require.True(t, group.nodeCoolingLocked(plan.current, clock.Now()), "commit cools the node it left")
 	group.mu.Unlock()
 
 	// NOGAIN-01: the settle lands on the switched-to flow (member = beta);
@@ -244,13 +245,10 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 		BitsPerSecond: 1_500_000, TotalBytes: 8 * 1024 * 1024, Age: 30 * time.Second,
 	})
 	group.mu.Lock()
-	_, reconnected := group.reconnects[vaneNodeKeyFor(metadataKey, plan.current)]
-	require.False(t, reconnected, "no-gain must release the reconnect cooldown")
-	slowUntil := group.slowCooldowns[vaneCandidateKey{
-		vaneFlowKey: metadataKey, candidate: beta.Name(), identity: beta.identity,
-	}]
+	require.Empty(t, group.ledger[metadataKey], "no-gain must clear the ledger for this target")
+	cooled := group.nodeCoolingLocked(beta.Name(), clock.Now())
 	group.mu.Unlock()
-	require.True(t, slowUntil.After(clock.Now()), "the slow cooldown on the no-gain candidate stays")
+	require.True(t, cooled, "the slow cooldown on the no-gain candidate stays")
 
 	// NOGAIN-03 (regression): the next slow window can re-prepare without
 	// hitting reconnect-cooldown. Beta itself is slow-cooled now, so the
@@ -263,7 +261,7 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 // NOGAIN-02: an improved settlement keeps the reconnect cooldown as the
 // guard rail.
 func TestVaneImprovedKeepsReconnectCooldown(t *testing.T) {
-	group, clock, _, beta, metadata := newTargetGroupForTest(t)
+	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
 	metadataKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
 
@@ -276,7 +274,7 @@ func TestVaneImprovedKeepsReconnectCooldown(t *testing.T) {
 	})
 
 	group.mu.Lock()
-	require.True(t, group.reconnects[vaneNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "improved keeps the reconnect cooldown")
+	require.NotEmpty(t, group.ledger[metadataKey], "improved keeps the ledger armed")
 	group.mu.Unlock()
 	require.Positive(t, group.VaneDiagnostics().Counters.HandoffImproved)
 }
@@ -824,7 +822,7 @@ func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
 func TestVaneStarvedFlowBypassesReconnectCooldown(t *testing.T) {
 	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
 	group.mu.Lock()
-	group.reconnects[vaneNodeKeyFor(flow.targetKey, flow.candidate)] = clock.Now().Add(time.Minute)
+	group.noteSwitchLocked(flow.targetKey, flow.candidate, clock.Now())
 	group.mu.Unlock()
 
 	// Credit stays above the guard: the streak reaches the line, and the armed
@@ -833,14 +831,14 @@ func TestVaneStarvedFlowBypassesReconnectCooldown(t *testing.T) {
 		clock.Advance(5 * time.Second)
 		require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
 	}
-	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "reconnect-cooldown"),
+	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "switch-observing"),
 		"only the window that crosses the line is attempted, and the cooldown refuses it")
 
 	// Same bytes, age far past demand*silence: credit is negative and the streak
 	// is past maxLowWindows, so the cooldown no longer applies.
 	clock.Advance(5 * time.Second)
 	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1, TotalBytes: 8 * 1024 * 1024, Age: 90 * time.Second}))
-	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "reconnect-cooldown"),
+	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "switch-observing"),
 		"a starved flow must not be frozen by the reconnect cooldown")
 	require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""), "the starved window reaches the race")
 }

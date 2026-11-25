@@ -2,6 +2,7 @@ package outboundgroup
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -30,4 +31,33 @@ func (a *Vane) observeResponse(candidate string, transport vaneTransport, now ti
 
 func (a *Vane) observeThroughput(candidate string, transport vaneTransport, now time.Time, bitsPerSecond float64) {
 	a.observeThroughputIdentity(candidate, a.nodeIdentity(candidate), transport, now, bitsPerSecond)
+}
+
+// vaneCooledNodes lists the nodes that still sit on their own cooldown. NODE-
+// COOLDOWN: the node is the failing unit, so its cooldown answers for every
+// target it could serve.
+func vaneCooledNodes(group *Vane) []string {
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	return vaneCooledNodesLocked(group)
+}
+
+// vaneCooledNodesLocked is the same list for callers that already hold a.mu.
+func vaneCooledNodesLocked(group *Vane) []string {
+	now := group.clock.Now()
+	var names []string
+	for name, state := range group.nodes {
+		if state != nil && state.cooldown.After(now) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// vaneCoolNodeForTest puts a node on cooldown the way a switch does.
+func vaneCoolNodeForTest(group *Vane, name string, until time.Time) {
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	group.coolNodeLocked(name, until)
 }

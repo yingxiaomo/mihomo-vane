@@ -120,7 +120,7 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 				group.mu.Lock()
 				require.Empty(t, group.targetHandoffs)
 				require.Empty(t, group.hints)
-				require.Empty(t, group.slowCooldowns)
+				require.Empty(t, vaneCooledNodesLocked(group))
 				group.mu.Unlock()
 				_, err = conn.Read(make([]byte, 1024))
 				require.NoError(t, err, "dry-run connection remains readable")
@@ -128,7 +128,7 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 				require.Equal(t, 1, closes, "async callback closes without another low window")
 				group.mu.Lock()
 				require.Len(t, group.targetHandoffs, 1)
-				require.True(t, group.reconnects[vaneNodeKeyFor(group.targetScopeKey(metadata.Host, metadata.DstPort), alpha.Name())].After(clock.Now()))
+				require.True(t, group.nodeCoolingLocked(alpha.Name(), clock.Now()), "the switch cools the node it left")
 				group.mu.Unlock()
 			}
 		})
@@ -164,8 +164,8 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 	group.mu.Lock()
 	require.Empty(t, group.hints)
 	require.Empty(t, group.targetHandoffs)
-	require.Empty(t, group.reconnects)
-	require.Empty(t, group.slowCooldowns)
+	require.Empty(t, group.ledger)
+	require.Empty(t, vaneCooledNodesLocked(group))
 	group.mu.Unlock()
 }
 
@@ -241,9 +241,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				// keep the lease alive so the "still valid" assertion holds.
 				lease.expiresAt = clock.Now().Add(10 * time.Minute)
 				group.targetHandoffs[key] = lease
-				cooldown := group.reconnects[vaneNodeKeyFor(flow.targetKey, flow.candidate)]
-				slowKey := vaneCandidateKey{vaneFlowKey: flow.targetKey, candidate: member.name, identity: member.identity}
-				slowCount := len(group.slowCooldowns)
+				slowCount := len(vaneCooledNodesLocked(group))
 				group.mu.Unlock()
 				b2Before := group.VaneDiagnostics().Counters
 				if source == "grace" {
@@ -271,12 +269,11 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.Equal(t, failure, group.targetFailures[failureKey], "capBPS and B2 telemetry unchanged")
 				require.Equal(t, lease, group.targetHandoffs[key])
 				require.True(t, lease.expiresAt.After(clock.Now()), "the untrusted window arrives while the claimed lease is still valid")
-				require.Equal(t, cooldown, group.reconnects[vaneNodeKeyFor(flow.targetKey, flow.candidate)])
-				require.Equal(t, slowCount, len(group.slowCooldowns))
+				require.Equal(t, slowCount, len(vaneCooledNodesLocked(group)))
 				if mode == vaneRacingShadow {
 					// A tolerated stall only observes in shadow mode; in "on"
 					// mode it is a real switch and legitimately cools the node.
-					require.Zero(t, group.slowCooldowns[slowKey])
+					require.False(t, group.nodeCoolingLocked(flow.candidate, clock.Now()))
 				}
 				group.mu.Unlock()
 				b2After := group.VaneDiagnostics().Counters
@@ -335,7 +332,7 @@ func TestVaneOffObserveCapabilityPlanStaysDryRun(t *testing.T) {
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
 	require.Empty(t, group.hints)
-	require.Empty(t, group.reconnects)
+	require.Empty(t, group.ledger)
 	group.mu.Unlock()
 }
 

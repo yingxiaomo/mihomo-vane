@@ -99,12 +99,11 @@ func TestVaneFlowReconnectClosesOnceAndHandsOffTarget(t *testing.T) {
 	alphaConn.mu.Unlock()
 	require.Equal(t, 1, closeCalls, "the last positive payload must be delivered before one policy close")
 
-	key := vaneFlowKey{target: "googlevideo.com", port: 443}
 	group.mu.Lock()
 	stateKey, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
 	lease := group.targetHandoffs[stateKey]
-	_, slow := group.slowCooldowns[vaneCandidateKey{vaneFlowKey: key, candidate: "alpha", identity: alpha.identity}]
+	slow := group.nodeCoolingLocked("alpha", clock.Now())
 	group.mu.Unlock()
 	require.Equal(t, "beta", lease.to.name)
 	require.True(t, slow)
@@ -156,7 +155,7 @@ func TestVaneFlowOldFlowCannotCoolDownSameNameReplacement(t *testing.T) {
 
 	key := vaneFlowKey{target: "googlevideo.com", port: 443}
 	group.mu.Lock()
-	_, slowed := group.slowCooldowns[vaneCandidateKey{vaneFlowKey: key, candidate: "alpha"}]
+	slowed := group.nodeCoolingLocked("alpha", clock.Now())
 	_, hinted := group.hints[key]
 	group.mu.Unlock()
 	require.False(t, slowed)
@@ -682,8 +681,8 @@ func TestVaneFlowCommitRejectsChallengerThatFailedAfterPrepare(t *testing.T) {
 	require.False(t, group.commitReconnect(plan))
 	group.mu.Lock()
 	_, hinted := group.hints[key]
-	_, slowed := group.slowCooldowns[vaneCandidateKey{vaneFlowKey: key, candidate: "alpha"}]
-	budget := group.budgets[vaneNodeKeyFor(key, "alpha")]
+	slowed := group.nodeCoolingLocked("alpha", clock.Now())
+	budget := group.ledger[key]
 	group.mu.Unlock()
 	require.False(t, hinted)
 	require.False(t, slowed)
@@ -723,12 +722,11 @@ func TestVaneFlowCandidateCooldownPrunesExpiredEntries(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	key := vaneCandidateKey{vaneFlowKey: group.targetScopeKey("rr9.googlevideo.com", 443), candidate: "alpha"}
-	group.slowCooldowns[key] = clock.Now().Add(time.Second)
+	vaneCoolNodeForTest(group, "alpha", clock.Now().Add(time.Second))
 	require.True(t, group.flowCandidateCoolingLocked("alpha", clock.Now()))
 	clock.Advance(2 * time.Second)
 	require.False(t, group.flowCandidateCoolingLocked("alpha", clock.Now()))
-	require.Empty(t, group.slowCooldowns)
+	require.Empty(t, vaneCooledNodes(group))
 }
 
 func TestVaneFlowFixedPolicyBoundaries(t *testing.T) {
@@ -749,14 +747,13 @@ func TestVaneFlowFixedPolicyBoundaries(t *testing.T) {
 	key := group.targetScopeKey(host, 443)
 	require.NotEmpty(t, key.target)
 	group.hints[key] = vaneHint{expiresAt: now}
-	group.budgets[vaneNodeKeyFor(key, "alpha")] = vaneBudget{startedAt: now.Add(-group.flow.budgetWindow), count: group.flow.budgetMax}
-	candidate := vaneCandidateKey{vaneFlowKey: key, candidate: "alpha"}
-	group.slowCooldowns[candidate] = now
+	group.ledger[key] = vaneSwitchLedger{windowFrom: now.Add(-vaneSwitchBudgetWindow), count: vaneSwitchBudgetMax}
+	vaneCoolNodeForTest(group, "alpha", now)
 	require.True(t, group.flowCooldownUntilLocked(host, 443, "alpha", now).IsZero())
-	require.NotContains(t, group.slowCooldowns, candidate)
+	require.False(t, group.nodeCoolingLocked("alpha", now))
 	group.pruneFlowStateLocked(now)
 	require.NotContains(t, group.hints, key)
-	require.NotContains(t, group.budgets, key)
+	require.NotContains(t, group.ledger, key)
 }
 
 func TestVaneFlowConfigValidation(t *testing.T) {
@@ -955,8 +952,8 @@ func (a *Vane) prepareReconnect(targetKey vaneFlowKey, target string, port uint1
 	return plan, reason == ""
 }
 
-// TARGET-BUDGET: a target must not ping-pong across nodes forever. Three
-// switches within the window are allowed; the fourth is refused.
+// SWITCH-BUDGET: a target must not ping-pong across nodes forever. Four
+// switches within the window are allowed; the fifth is refused.
 func TestVaneTargetSwitchBudgetStopsPingPong(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -965,12 +962,12 @@ func TestVaneTargetSwitchBudgetStopsPingPong(t *testing.T) {
 	now := clock.Now()
 	group.mu.Lock()
 	defer group.mu.Unlock()
-	for i := 0; i < vaneTargetSwitchBudgetMax; i++ {
-		require.Empty(t, group.targetBudgetBlocksLocked(key, now))
-		group.noteTargetSwitchLocked(key, "alpha", now)
-		now = now.Add(vaneSwitchObserveWindow + time.Second)
+	for i := 0; i < vaneSwitchBudgetMax; i++ {
+		require.Empty(t, group.ledgerThrottleReasonLocked(key, now))
+		group.noteSwitchLocked(key, "alpha", now)
+		now = now.Add(vaneSwitchThrottle + time.Second)
 	}
-	require.Equal(t, "target-switch-budget", group.targetBudgetBlocksLocked(key, now))
+	require.Equal(t, "target-budget", group.ledgerThrottleReasonLocked(key, now))
 }
 
 // Observe window: a fresh switch gets 60s to prove itself before it may be
@@ -983,9 +980,9 @@ func TestVaneSwitchObserveWindowBlocksImmediateReswitch(t *testing.T) {
 	now := clock.Now()
 	group.mu.Lock()
 	defer group.mu.Unlock()
-	group.noteTargetSwitchLocked(key, "alpha", now)
-	require.Equal(t, "switch-observing", group.targetBudgetBlocksLocked(key, now.Add(10*time.Second)))
-	require.Empty(t, group.targetBudgetBlocksLocked(key, now.Add(vaneSwitchObserveWindow+time.Second)))
+	group.noteSwitchLocked(key, "alpha", now)
+	require.Equal(t, "switch-observing", group.ledgerThrottleReasonLocked(key, now.Add(10*time.Second)))
+	require.Empty(t, group.ledgerThrottleReasonLocked(key, now.Add(vaneSwitchThrottle+time.Second)))
 }
 
 // PHASE2: a non-flow must still carry a concrete state scope, else the
@@ -1016,30 +1013,30 @@ func TestVaneVerifyPenaltyCoolsSlowLanding(t *testing.T) {
 	now := clock.Now()
 
 	group.mu.Lock()
-	group.noteTargetSwitchLocked(key, "beta", now)
+	group.noteSwitchLocked(key, "beta", now)
 	group.mu.Unlock()
 
 	// A node we did not land on must not be cooled by this target's landing.
 	group.penalizeSlowLanding(key, "alpha", now.Add(10*time.Second))
 	group.mu.Lock()
-	require.Empty(t, group.slowCooldowns)
+	require.Empty(t, vaneCooledNodesLocked(group))
 	group.mu.Unlock()
 
 	// The node we did land on is cooled for the penalty duration.
 	group.penalizeSlowLanding(key, "beta", now.Add(10*time.Second))
 	group.mu.Lock()
-	cooled := len(group.slowCooldowns)
+	cooled := len(vaneCooledNodesLocked(group))
 	group.mu.Unlock()
 	require.Equal(t, 1, cooled)
 
 	// Past the observe window the landing is no longer judged.
 	other := vaneFlowKey{target: "rr-verify2.example", port: 443}
 	group.mu.Lock()
-	group.noteTargetSwitchLocked(other, "beta", now)
+	group.noteSwitchLocked(other, "beta", now)
 	group.mu.Unlock()
-	group.penalizeSlowLanding(other, "beta", now.Add(vaneSwitchObserveWindow+time.Second))
+	group.penalizeSlowLanding(other, "beta", now.Add(vaneSwitchThrottle+time.Second))
 	group.mu.Lock()
-	stillOne := len(group.slowCooldowns)
+	stillOne := len(vaneCooledNodesLocked(group))
 	group.mu.Unlock()
 	require.Equal(t, 1, stillOne)
 }
@@ -1051,11 +1048,11 @@ func TestVanePruneDropsExpiredTargetScopedState(t *testing.T) {
 	key := vaneFlowKey{target: "rr-prune.example", port: 443}
 	stickyKey := vaneStickyKeyFor("rr-prune.example", 443)
 	group.mu.Lock()
-	group.targetSwitches[key] = vaneTargetSwitchBudget{windowFrom: now.Add(-2 * vaneTargetSwitchBudgetWindow), lastSwitch: now.Add(-time.Hour), count: 3}
+	group.ledger[key] = vaneSwitchLedger{windowFrom: now.Add(-2 * vaneSwitchBudgetWindow), lastSwitch: now.Add(-time.Hour), count: 3}
 	group.stickiness[stickyKey] = vaneStickyChoice{name: "alpha", expiresAt: now.Add(-time.Second)}
 	group.lastPickProbeAt["rr-prune.example"] = now.Add(-3 * vaneRacingCapabilityTTL)
 	group.pruneFlowStateLocked(now)
-	_, hasSwitch := group.targetSwitches[key]
+	_, hasSwitch := group.ledger[key]
 	_, hasSticky := group.stickiness[stickyKey]
 	_, hasProbe := group.lastPickProbeAt["rr-prune.example"]
 	group.mu.Unlock()

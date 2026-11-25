@@ -641,8 +641,8 @@ func TestVaneRacingNoWinnerDoesNotCommitPolicyState(t *testing.T) {
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
 	require.Empty(t, group.targetPreferences)
-	require.Empty(t, group.slowCooldowns)
-	require.Empty(t, group.budgets)
+	require.Empty(t, vaneCooledNodesLocked(group))
+	require.Empty(t, group.ledger)
 	group.mu.Unlock()
 	require.Positive(t, group.VaneDiagnostics().Counters.RaceNoWinner)
 }

@@ -492,9 +492,9 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 			continue
 		}
 		blockUntil, _ := a.targetMemberBlockedLocked(request.targetKey, member, now)
-		legacyKey := vaneCandidateKey{vaneFlowKey: request.scopeKey, candidate: member.name, identity: member.identity}
-		if until := a.slowCooldowns[legacyKey]; until.After(blockUntil) {
-			blockUntil = until
+		// NODE-COOLDOWN: a node sits out on its own record, across every target.
+		if state := a.nodes[member.name]; state != nil && state.cooldown.After(blockUntil) {
+			blockUntil = state.cooldown
 		}
 		// B2 Step 3: the loss and stall records stay observations — they only
 		// filter or cool a challenger here and never write back to the failure

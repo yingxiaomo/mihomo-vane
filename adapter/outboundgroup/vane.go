@@ -341,10 +341,7 @@ type Vane struct {
 	anchors           map[vaneAnchorKey]vaneAnchor
 	cooldowns         map[vaneCooldownKey]time.Time
 	hints             map[vaneFlowKey]vaneHint
-	reconnects        map[vaneNodeKey]time.Time
-	targetSwitches    map[vaneFlowKey]vaneTargetSwitchBudget
-	slowCooldowns     map[vaneCandidateKey]time.Time
-	budgets           map[vaneNodeKey]vaneBudget
+	ledger            map[vaneFlowKey]vaneSwitchLedger
 	targetHandoffs    map[vaneTargetKey]vaneHandoffLease
 	targetPreferences map[vaneTargetKey]vaneTargetPreference
 	targetEvidence    map[vaneTargetEvidenceKey]vaneTargetEvidence
@@ -491,10 +488,7 @@ func newVaneWithClock(
 		stickiness:        make(map[vaneTargetKey]vaneStickyChoice),
 		cooldowns:         make(map[vaneCooldownKey]time.Time),
 		hints:             make(map[vaneFlowKey]vaneHint),
-		reconnects:        make(map[vaneNodeKey]time.Time),
-		targetSwitches:    make(map[vaneFlowKey]vaneTargetSwitchBudget),
-		slowCooldowns:     make(map[vaneCandidateKey]time.Time),
-		budgets:           make(map[vaneNodeKey]vaneBudget),
+		ledger:            make(map[vaneFlowKey]vaneSwitchLedger),
 		targetHandoffs:    make(map[vaneTargetKey]vaneHandoffLease),
 		targetPreferences: make(map[vaneTargetKey]vaneTargetPreference),
 		targetEvidence:    make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
@@ -949,19 +943,15 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 			snapshot.Runtime.ActiveHints++
 		}
 	}
-	for _, until := range a.reconnects {
-		if until.After(now) {
-			snapshot.Runtime.ActiveReconnectCooldowns++
-		}
-	}
-	for _, until := range a.slowCooldowns {
-		if until.After(now) {
-			snapshot.Runtime.ActiveSlowCooldowns++
-		}
-	}
-	for _, budget := range a.budgets {
-		if budget.startedAt.Add(a.flow.budgetWindow).After(now) {
+	// SWITCH-LEDGER: one live record per target that has switched.
+	for _, ledger := range a.ledger {
+		if ledger.windowFrom.Add(vaneSwitchBudgetWindow).After(now) {
 			snapshot.Runtime.ActiveBudgets++
+		}
+	}
+	for _, state := range a.nodes {
+		if state != nil && state.cooldown.After(now) {
+			snapshot.Runtime.ActiveSlowCooldowns++
 		}
 	}
 	for _, lease := range a.targetHandoffs {

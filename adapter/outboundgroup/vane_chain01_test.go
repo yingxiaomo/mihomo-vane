@@ -99,11 +99,9 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			require.Zero(t, snapshot.Counters.ReconnectCommitted)
 			key := group.targetScopeKey(metadata.Host, metadata.DstPort)
 			group.mu.Lock()
-			require.Zero(t, group.budgets[vaneNodeKeyFor(key, alpha.Name())].count)
+			require.Zero(t, group.ledger[key].count)
 			_, hinted := group.hints[key]
-			_, cooled := group.slowCooldowns[vaneCandidateKey{
-				vaneFlowKey: key, candidate: alpha.Name(), identity: alpha.identity,
-			}]
+			cooled := group.nodeCoolingLocked(alpha.Name(), clock.Now())
 			group.mu.Unlock()
 			require.False(t, hinted)
 			require.False(t, cooled)
@@ -253,7 +251,7 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		require.Equal(t, "challenger-no-evidence", group.commitReconnectDetailed(plan))
 		group.mu.Lock()
 		key := group.targetScopeKey(metadata.Host, metadata.DstPort)
-		require.Zero(t, group.budgets[vaneNodeKeyFor(key, alpha.Name())].count)
+		require.Zero(t, group.ledger[key].count)
 		group.mu.Unlock()
 	})
 

@@ -456,13 +456,8 @@ func TestVaneHashPinDoesNotWriteAnchor(t *testing.T) {
 // plain flow too.
 func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
-	key := vaneFlowKey{target: "googlevideo.com", port: 443}
 	group.mu.Lock()
-	group.slowCooldowns[vaneCandidateKey{
-		vaneFlowKey: key,
-		candidate:   "a",
-		identity:    vaneProxyPersistentIdentity(byName["a"]),
-	}] = clock.Now().Add(time.Hour)
+	group.coolNodeLocked("a", clock.Now().Add(time.Hour))
 	group.mu.Unlock()
 
 	cand := &vaneRankedProxy{proxy: byName["a"]}

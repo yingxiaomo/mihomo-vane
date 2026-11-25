@@ -103,7 +103,7 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 			prepare: func(t *testing.T, group *Vane, plan vaneReconnectPlan) {
 				require.Empty(t, group.commitTargetHandoff(plan))
 			},
-			want: "reconnect-cooldown",
+			want: "switch-observing",
 		},
 		{
 			name: "target candidate cooldown",
@@ -132,9 +132,7 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 			name: "challenger slow cooldown",
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				group.mu.Lock()
-				group.slowCooldowns[vaneCandidateKey{
-					vaneFlowKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity,
-				}] = clock.Now().Add(time.Minute)
+				group.coolNodeLocked(plan.challenger, clock.Now().Add(time.Minute))
 				group.mu.Unlock()
 			},
 			want: "challenger-slow-cooldown",
@@ -144,7 +142,7 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				group.flow.budgetMax = 0
 			},
-			want: "budget-exhausted",
+			want: "target-budget",
 		},
 	}
 
@@ -190,11 +188,7 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 		{
 			name: "slow cooldown blocks preference",
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease) {
-				group.slowCooldowns[vaneCandidateKey{
-					vaneFlowKey: vaneFlowKey{target: key.targetScope, port: key.port},
-					candidate:   lease.name,
-					identity:    lease.identity,
-				}] = clock.Now().Add(time.Minute)
+				group.coolNodeLocked(lease.name, clock.Now().Add(time.Minute))
 			},
 		},
 	}
@@ -572,9 +566,7 @@ func TestVaneRaceSnapshotBlockedCandidates(t *testing.T) {
 		lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 		failure := group.recordTargetFailureLocked(request.targetKey, lease, clock.Now())
 		cooldown := clock.Now().Add(2 * time.Hour)
-		group.slowCooldowns[vaneCandidateKey{
-			vaneFlowKey: request.scopeKey, candidate: beta.Name(), identity: beta.identity,
-		}] = cooldown
+		group.coolNodeLocked(beta.Name(), cooldown)
 		group.mu.Unlock()
 
 		candidates, reason := group.snapshotRaceCandidates(request)

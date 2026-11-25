@@ -25,18 +25,13 @@ const (
 	vaneDefaultDemandBPS        = int64(1_000_000)
 	vaneDefaultBufferGuard      = 5 * time.Second
 	vaneDefaultReconnectDelay   = 10 * time.Minute
-	// BREAK-WINDOW: a switch that lands on a worse node must not freeze the
-	// target for the whole reconnect cooldown. Once the new flow is starving
-	// again and this window has passed, one retry is allowed; the budget still
-	// caps the total number of switches per window.
-	vaneBreakWindow            = 5 * time.Minute
-	vaneDefaultSlowCooldown    = 30 * time.Minute
-	vaneDefaultHintTTL         = 15 * time.Second
-	vaneDefaultChallengerRatio = 1.25
-	vaneDefaultBudgetMax       = 3
-	vaneDefaultBudgetWindow    = 30 * time.Minute
-	vaneEvidenceMaxAge         = 10 * time.Minute
-	vaneMaximumThroughputBPS   = int64(1_000_000_000)
+	vaneDefaultSlowCooldown     = 30 * time.Minute
+	vaneDefaultHintTTL          = 15 * time.Second
+	vaneDefaultChallengerRatio  = 1.25
+	vaneDefaultBudgetMax        = 4
+	vaneDefaultBudgetWindow     = 30 * time.Minute
+	vaneEvidenceMaxAge          = 10 * time.Minute
+	vaneMaximumThroughputBPS    = int64(1_000_000_000)
 	// B-part degradation lines. Loss reuses the 5% the B2 loss EMA already
 	// treats as degraded (healthy paths retransmit < 1%); latency is where a
 	// video path is visibly unusable (production saw 800 ms), far above the
@@ -1267,110 +1262,148 @@ type vaneReconnectPlan struct {
 	skipReconnectCooldown bool
 }
 
-// TARGET-BUDGET: switching is scoped per node, so a target can ping-pong
-// A->B->C forever - each new node carries no cooldown record. The budget and
-// the observe window therefore live on the target, not the node.
+// SWITCH-LEDGER: one record per target answers every "may we switch again?"
+// question. The previous model kept four overlapping tables: per-node
+// reconnects, per-node budgets, per-target budgets and per-candidate slow
+// cooldowns. Any one of them could reject, so the reason a stuck flow reported
+// depended on which table happened to be populated, and switching away from a
+// bad node armed a ten-minute freeze on the target instead of on the node.
+// Two rules live here (throttle and budget). The third, no-backtrack, falls out
+// of the five-minute node cooldown every switch writes: a node we just left is
+// not a candidate, so A->B->A cannot happen.
 const (
-	vaneTargetSwitchBudgetWindow = 30 * time.Minute
-	vaneTargetSwitchBudgetMax    = 3
-	vaneSwitchObserveWindow      = 60 * time.Second
-	// VERIFY: a landing is judged on real bytes, not the probe. Two low windows
-	// inside the observe window is enough to conclude the node cannot feed the
-	// flow; it then sits out for ten minutes on every target.
+	// SWITCH-THROTTLE: one switch per target per minute.
+	vaneSwitchThrottle = 60 * time.Second
+	// SWITCH-BUDGET: four switches per target per half hour.
+	vaneSwitchBudgetWindow = 30 * time.Minute
+	vaneSwitchBudgetMax    = 4
+	// SWITCH-AWAY-COOLDOWN: the node we leave sits out this long on every
+	// target. This is what makes no-backtrack structural rather than a rule.
+	vaneSwitchAwayCooldown = 5 * time.Minute
+	// VERIFY: a landing is judged on real bytes, not the probe.
 	vaneVerifyPenaltyLowWindows = 2
 	vaneVerifyPenaltyCooldown   = 10 * time.Minute
 )
 
-type vaneTargetSwitchBudget struct {
+type vaneSwitchLedger struct {
 	windowFrom time.Time
 	count      int
 	lastSwitch time.Time
-	// VERIFY: the node we just landed on and when we landed on it. If it keeps
-	// tripping the low-window counter during the observe window the landing was
-	// bad, so the node itself is cooled down instead of trusting the probe.
+	// VERIFY: the node we just landed on and when.
 	verifyNode string
-	verifyFrom time.Time
+	verifyAt   time.Time
 }
 
-func (a *Vane) targetBudgetBlocksLocked(targetKey vaneFlowKey, now time.Time) string {
-	budget := a.targetSwitches[targetKey]
-	if budget.lastSwitch.IsZero() {
+// ledgerBudgetLocked reads the configured switch budget, falling back to the
+// built-in defaults so a zero value keeps the production behaviour.
+func (a *Vane) ledgerBudgetLocked() (int, time.Duration) {
+	window := a.flow.budgetWindow
+	if window <= 0 {
+		window = vaneSwitchBudgetWindow
+	}
+	return a.flow.budgetMax, window
+}
+
+// ledgerThrottleReasonLocked is the target-wide half of "may we switch".
+func (a *Vane) ledgerThrottleReasonLocked(targetKey vaneFlowKey, now time.Time) string {
+	limit, window := a.ledgerBudgetLocked()
+	if limit <= 0 {
+		// SWITCH-BUDGET: a zero budget forbids switching at all.
+		return "target-budget"
+	}
+	ledger := a.ledger[targetKey]
+	if ledger.lastSwitch.IsZero() {
 		return ""
 	}
-	if now.Sub(budget.lastSwitch) < vaneSwitchObserveWindow {
+	if now.Sub(ledger.lastSwitch) < vaneSwitchThrottle {
 		return "switch-observing"
 	}
-	if now.Sub(budget.windowFrom) < vaneTargetSwitchBudgetWindow && budget.count >= vaneTargetSwitchBudgetMax {
-		return "target-switch-budget"
+	if now.Sub(ledger.windowFrom) < window && ledger.count >= limit {
+		return "target-budget"
 	}
 	return ""
 }
 
-func (a *Vane) noteTargetSwitchLocked(targetKey vaneFlowKey, node string, now time.Time) {
-	if a.targetSwitches == nil {
-		a.targetSwitches = make(map[vaneFlowKey]vaneTargetSwitchBudget)
+// noteSwitchLocked records a committed switch: it consumes budget, arms the
+// throttle and marks the landing for verification.
+func (a *Vane) noteSwitchLocked(targetKey vaneFlowKey, node string, now time.Time) {
+	if a.ledger == nil {
+		a.ledger = make(map[vaneFlowKey]vaneSwitchLedger)
 	}
-	budget := a.targetSwitches[targetKey]
-	if budget.windowFrom.IsZero() || now.Sub(budget.windowFrom) >= vaneTargetSwitchBudgetWindow {
-		budget.windowFrom = now
-		budget.count = 0
+	_, window := a.ledgerBudgetLocked()
+	ledger := a.ledger[targetKey]
+	if ledger.windowFrom.IsZero() || now.Sub(ledger.windowFrom) >= window {
+		ledger.windowFrom = now
+		ledger.count = 0
 	}
-	budget.count++
-	budget.lastSwitch = now
-	budget.verifyNode = node
-	budget.verifyFrom = now
-	a.targetSwitches[targetKey] = budget
+	ledger.count++
+	ledger.lastSwitch = now
+	ledger.verifyNode = node
+	ledger.verifyAt = now
+	a.ledger[targetKey] = ledger
+}
+
+// clearLandingLocked drops the verification marker once the landing proves
+// itself.
+func (a *Vane) clearLandingLocked(targetKey vaneFlowKey, node string) {
+	ledger, ok := a.ledger[targetKey]
+	if !ok || ledger.verifyNode != node {
+		return
+	}
+	ledger.verifyNode = ""
+	ledger.verifyAt = time.Time{}
+	a.ledger[targetKey] = ledger
+}
+
+// nodeCoolingLocked reports whether a node sits on its own cooldown, which
+// applies to every target because the node is the failing unit.
+func (a *Vane) nodeCoolingLocked(name string, now time.Time) bool {
+	state := a.nodes[name]
+	return state != nil && state.cooldown.After(now)
+}
+
+// coolNodeLocked puts a node on cooldown across every target.
+func (a *Vane) coolNodeLocked(name string, until time.Time) {
+	if name == "" {
+		return
+	}
+	state := a.nodes[name]
+	if state == nil {
+		// NODE-COOL: a node that has not served traffic yet has no state row, but
+		// the switch that just left it still needs its cooling recorded.
+		state = &vaneNodeState{name: name, identity: a.nodeIdentities[name]}
+		a.nodes[name] = state
+	}
+	if until.After(state.cooldown) {
+		state.cooldown = until
+	}
 }
 
 // penalizeSlowLanding cools down a node we just switched onto but which is
 // already tripping the low-window counter. VERIFY: the probe can be wildly
 // optimistic (a free node measured 18Mbps to dl.google.com yet delivered only
-// 4Mbps of googlevideo), so a bad landing is judged on real bytes and the node
-// is put on cooldown across every target instead of being re-picked.
+// 4Mbps of googlevideo), so a bad landing is judged on real bytes. The penalty
+// lands on the node, not on the target, because the node is what failed.
 func (a *Vane) penalizeSlowLanding(targetKey vaneFlowKey, candidate string, now time.Time) {
 	a.mu.Lock()
-	budget, ok := a.targetSwitches[targetKey]
-	if !ok || budget.verifyNode != candidate || now.Sub(budget.verifyFrom) > vaneSwitchObserveWindow {
+	ledger, ok := a.ledger[targetKey]
+	if !ok || ledger.verifyNode != candidate || now.Sub(ledger.verifyAt) > vaneSwitchThrottle {
 		a.mu.Unlock()
 		return
 	}
-	ident := ""
-	if st := a.nodes[candidate]; st != nil {
-		ident = st.identity
-	}
-	key := vaneCandidateKey{vaneFlowKey: targetKey, candidate: candidate, identity: ident}
-	if a.slowCooldowns[key].After(now) {
+	if a.nodeCoolingLocked(candidate, now) {
 		a.mu.Unlock()
 		return
 	}
-	a.slowCooldowns[key] = now.Add(vaneVerifyPenaltyCooldown)
+	a.coolNodeLocked(candidate, now.Add(vaneVerifyPenaltyCooldown))
 	a.mu.Unlock()
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind:   "verify-penalty",
 		target: targetKey.target,
-		bucket: targetKey.target,
 		port:   targetKey.port,
-		from:   candidate,
+		to:     candidate,
 		reason: "slow-landing",
 	})
-}
-
-// cooldownBlocksLocked reports whether the reconnect cooldown still
-// forbids another switch for this target. BREAK-WINDOW: the cooldown exists to
-// stop flapping, not to trap a target on a node that is already starving. When
-// the current flow is back below the low line and the break window has elapsed
-// since the switch that armed the cooldown, one retry is allowed. The caller
-// still has to pass the challenger evidence bar and the budget.
-func (a *Vane) cooldownBlocksLocked(key vaneNodeKey, currentBPS float64, now time.Time) bool {
-	until := a.reconnects[key]
-	if !until.After(now) {
-		return false
-	}
-	if currentBPS >= a.flow.lowThroughputBPS {
-		return true
-	}
-	lastSwitch := until.Add(-a.flow.reconnectCooldown)
-	return now.Sub(lastSwitch) < vaneBreakWindow
 }
 
 type vaneLockedProxyProvider interface {
@@ -1489,21 +1522,11 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 	a.pruneFlowStateLocked(now)
 	// §E: the valve's re-run carries its own skip flag — the cooldown it would
 	// hit was written by the very commit being re-evaluated.
-	currentNodeKey := vaneNodeKeyFor(targetKey, current)
-	if !skipReconnectCooldown && a.cooldownBlocksLocked(currentNodeKey, currentBPS, now) {
-		return vaneReconnectPlan{}, "reconnect-cooldown"
-	}
+	// SWITCH-LEDGER: throttle and budget are the only target-wide gates left.
 	if !skipReconnectCooldown {
-		if reason := a.targetBudgetBlocksLocked(targetKey, now); reason != "" {
+		if reason := a.ledgerThrottleReasonLocked(targetKey, now); reason != "" {
 			return vaneReconnectPlan{}, reason
 		}
-	}
-	budget := a.budgets[currentNodeKey]
-	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.flow.budgetWindow).After(now) {
-		budget = vaneBudget{startedAt: now}
-	}
-	if budget.count >= a.flow.budgetMax {
-		return vaneReconnectPlan{}, "budget-exhausted"
 	}
 
 	// BASELINE-COOLDOWN-001: the progressive target backoff gates the baseline
@@ -1519,8 +1542,7 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 			continue
 		}
 		challengerIdentity := vaneProxyPersistentIdentity(proxy)
-		candidateKey := vaneCandidateKey{vaneFlowKey: targetKey, candidate: proxy.Name(), identity: challengerIdentity}
-		if a.slowCooldowns[candidateKey].After(now) {
+		if a.nodeCoolingLocked(proxy.Name(), now) {
 			continue
 		}
 		// Same lease shape (name + identity + epoch) the failure records are
@@ -1702,8 +1724,10 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 	if now.Sub(plan.preparedAt) > a.flow.hintTTL {
 		return "plan-expired"
 	}
-	if !plan.skipReconnectCooldown && a.cooldownBlocksLocked(vaneNodeKeyFor(plan.targetKey, plan.current), plan.currentBPS, now) {
-		return "reconnect-cooldown"
+	if !plan.skipReconnectCooldown {
+		if reason := a.ledgerThrottleReasonLocked(plan.targetKey, now); reason != "" {
+			return reason
+		}
 	}
 	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: plan.target, port: plan.port, candidate: plan.challenger, identity: plan.challengerIdentity}
 	if a.cooldownUntilLocked(dialKey, now, false).After(now) {
@@ -1722,8 +1746,7 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 	}, now); blocked {
 		return "candidate-blocked"
 	}
-	challengerKey := vaneCandidateKey{vaneFlowKey: plan.targetKey, candidate: plan.challenger, identity: plan.challengerIdentity}
-	if a.slowCooldowns[challengerKey].After(now) {
+	if a.nodeCoolingLocked(plan.challenger, now) {
 		return "challenger-slow-cooldown"
 	}
 	// CHAIN-08: a plan admitted on fresh throughput must still have fresh
@@ -1769,18 +1792,9 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 	if reason := a.checkChallengerEvidenceLocked(plan, capSnapshot, now); reason != "" {
 		return reason
 	}
-	budgetKey := vaneNodeKeyFor(plan.targetKey, plan.current)
-	budget := a.budgets[budgetKey]
-	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.flow.budgetWindow).After(now) {
-		budget = vaneBudget{startedAt: now}
-	}
-	if budget.count >= a.flow.budgetMax {
-		return "budget-exhausted"
-	}
-	budget.count++
-	a.budgets[budgetKey] = budget
-	currentKey := vaneCandidateKey{vaneFlowKey: plan.targetKey, candidate: plan.current, identity: plan.identity}
-	a.slowCooldowns[currentKey] = now.Add(a.flow.slowCooldown)
+	// SWITCH-AWAY: the node we leave is not a candidate for five minutes on
+	// every target, which is what makes A->B->A impossible.
+	a.coolNodeLocked(plan.current, now.Add(vaneSwitchAwayCooldown))
 	handoff := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
 		target:     plan.target,
 		bucket:     plan.targetKey.target,
@@ -1802,8 +1816,7 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 		expiresAt: now.Add(a.flow.hintTTL),
 		handoff:   handoff,
 	}
-	a.reconnects[vaneNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.flow.reconnectCooldown)
-	a.noteTargetSwitchLocked(plan.targetKey, plan.challenger, now)
+	a.noteSwitchLocked(plan.targetKey, plan.challenger, now)
 	return ""
 }
 
@@ -1951,8 +1964,7 @@ func (a *Vane) takeHintLocked(target string, port uint16, proxies []C.Proxy, now
 		if a.cooldownUntilLocked(dialKey, now, false).After(now) {
 			return nil, nil
 		}
-		scopeKey := vaneCandidateKey{vaneFlowKey: key, candidate: proxy.Name(), identity: vaneProxyPersistentIdentity(proxy)}
-		if a.slowCooldowns[scopeKey].After(now) {
+		if a.nodeCoolingLocked(proxy.Name(), now) {
 			return nil, nil
 		}
 		var handoff *vaneHandoffToken
@@ -1972,24 +1984,20 @@ func (a *Vane) flowCooldownUntilLocked(target string, port uint16, candidate str
 	return a.cooldownUntilLockedWithCleanup(target, port, candidate, "", now, true)
 }
 
+// cooldownUntilLockedWithCleanup reports the node's own cooldown. NODE-COOLDOWN:
+// the failing unit is the node, so its cooldown applies to every target.
 func (a *Vane) cooldownUntilLockedWithCleanup(target string, port uint16, candidate, identity string, now time.Time, cleanup bool) time.Time {
-	targetKey := a.targetScopeKey(target, port)
-	if targetKey.target == "" {
+	_ = target
+	_ = port
+	_ = cleanup
+	state := a.nodes[candidate]
+	if state == nil || !state.cooldown.After(now) {
 		return time.Time{}
 	}
-	key := vaneCandidateKey{
-		vaneFlowKey: targetKey,
-		candidate:   candidate,
-		identity:    identity,
-	}
-	until := a.slowCooldowns[key]
-	if !until.After(now) && !until.IsZero() {
-		if cleanup {
-			delete(a.slowCooldowns, key)
-		}
+	if identity != "" && state.identity != "" && state.identity != identity {
 		return time.Time{}
 	}
-	return until
+	return state.cooldown
 }
 
 func (a *Vane) flowCandidateCoolingLocked(candidate string, now time.Time) bool {
@@ -1997,19 +2005,12 @@ func (a *Vane) flowCandidateCoolingLocked(candidate string, now time.Time) bool 
 }
 
 func (a *Vane) candidateCoolingLockedWithCleanup(candidate, identity string, now time.Time, cleanup bool) bool {
-	cooling := false
-	for key, until := range a.slowCooldowns {
-		if !until.After(now) {
-			if cleanup {
-				delete(a.slowCooldowns, key)
-			}
-			continue
-		}
-		if key.candidate == candidate && (identity == "" || key.identity == "" || key.identity == identity) {
-			cooling = true
-		}
+	_ = cleanup
+	state := a.nodes[candidate]
+	if state == nil || !state.cooldown.After(now) {
+		return false
 	}
-	return cooling
+	return identity == "" || state.identity == "" || state.identity == identity
 }
 
 func (a *Vane) pruneFlowStateLocked(now time.Time) {
@@ -2018,33 +2019,21 @@ func (a *Vane) pruneFlowStateLocked(now time.Time) {
 			delete(a.hints, key)
 		}
 	}
-	for key, until := range a.reconnects {
-		if !until.After(now) {
-			delete(a.reconnects, key)
+	// SWITCH-LEDGER: a record only matters while its budget window or its
+	// throttle is live.
+	for key, ledger := range a.ledger {
+		if ledger.lastSwitch.IsZero() {
+			delete(a.ledger, key)
+			continue
 		}
-	}
-	for key, until := range a.slowCooldowns {
-		if !until.After(now) {
-			delete(a.slowCooldowns, key)
-		}
-	}
-	for key, budget := range a.budgets {
-		if !budget.startedAt.Add(a.flow.budgetWindow).After(now) {
-			delete(a.budgets, key)
+		if ledger.windowFrom.Add(vaneSwitchBudgetWindow).Before(now) && now.Sub(ledger.lastSwitch) >= vaneSwitchThrottle {
+			delete(a.ledger, key)
 		}
 	}
 	// §E: expired valve throttle entries fall out with the rest.
 	for key, until := range a.valveLastRun {
 		if now.Sub(until) >= vaneValveThrottle {
 			delete(a.valveLastRun, key)
-		}
-	}
-	// PRUNE: the target switch budget and the sticky choice are also per-target
-	// maps that would otherwise grow without bound as new hosts are visited.
-	for key, budget := range a.targetSwitches {
-		if budget.windowFrom.Add(vaneTargetSwitchBudgetWindow).Before(now) &&
-			(budget.lastSwitch.IsZero() || now.Sub(budget.lastSwitch) >= vaneSwitchObserveWindow) {
-			delete(a.targetSwitches, key)
 		}
 	}
 	for scope, at := range a.pickProbeInflight {

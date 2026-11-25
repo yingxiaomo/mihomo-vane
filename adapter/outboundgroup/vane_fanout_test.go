@@ -45,39 +45,31 @@ func TestVaneFlowSiblingFlowsCloseTogether(t *testing.T) {
 	require.False(t, f2.siblingCloseAction(plan, sample)(), "sibling close must be idempotent")
 }
 
-// NODESCOPE-01: a reconnect cooldown and budget belong to one (target, node),
-// so a slow node must not freeze another node on the same target.
-func TestVaneFlowBudgetScopedPerNode(t *testing.T) {
+// NODE-COOLDOWN-01: a switch cools the node it left, not the target, so the
+// other nodes of the same target stay eligible. The budget, in contrast, is
+// per target: every node behind that target shares it.
+func TestVaneNodeCooldownDoesNotFreezeTheTarget(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	group.flow.reconnectCooldown = 10 * time.Minute
 	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
 	now := clock.Now()
 
 	group.mu.Lock()
-	group.budgets[vaneNodeKeyFor(key, alpha.Name())] = vaneBudget{
-		startedAt: now, count: group.flow.budgetMax,
-	}
-	group.reconnects[vaneNodeKeyFor(key, alpha.Name())] = now.Add(group.flow.reconnectCooldown)
+	group.coolNodeLocked(alpha.Name(), now.Add(vaneSwitchAwayCooldown))
+	alphaCooling := group.nodeCoolingLocked(alpha.Name(), now)
+	betaCooling := group.nodeCoolingLocked(beta.Name(), now)
 	group.mu.Unlock()
+
+	require.True(t, alphaCooling)
+	require.False(t, betaCooling, "a cooldown on one node must not block another node")
+	require.False(t, group.nodeCoolingLocked(alpha.Name(), now.Add(vaneSwitchAwayCooldown+time.Second)),
+		"the node cooldown expires on its own")
 
 	group.mu.Lock()
-	alphaBlocked := group.cooldownBlocksLocked(vaneNodeKeyFor(key, alpha.Name()), 1, now)
-	betaBlocked := group.cooldownBlocksLocked(vaneNodeKeyFor(key, beta.Name()), 1, now)
-	alphaBudget := group.budgets[vaneNodeKeyFor(key, alpha.Name())].count
-	betaBudget := group.budgets[vaneNodeKeyFor(key, beta.Name())].count
+	group.ledger[key] = vaneSwitchLedger{windowFrom: now, count: vaneSwitchBudgetMax, lastSwitch: now.Add(-vaneSwitchThrottle)}
+	reason := group.ledgerThrottleReasonLocked(key, now)
 	group.mu.Unlock()
-
-	require.True(t, alphaBlocked)
-	require.False(t, betaBlocked, "a cooldown on one node must not block another node")
-	require.Equal(t, group.flow.budgetMax, alphaBudget)
-	require.Zero(t, betaBudget)
-
-	// After the break window a starving node is allowed one retry again.
-	require.True(t, group.cooldownBlocksLocked(
-		vaneNodeKeyFor(key, alpha.Name()), 1, now.Add(vaneBreakWindow-time.Second)))
-	require.False(t, group.cooldownBlocksLocked(
-		vaneNodeKeyFor(key, alpha.Name()), 1, now.Add(vaneBreakWindow+time.Second)))
+	require.Equal(t, "target-budget", reason, "the budget is shared by every node behind the target")
 }
 
 // PROBE-GAP-01: a race probe that reads far above a node's real throughput

@@ -14,6 +14,19 @@ import (
 
 func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata, challenger C.Proxy) vaneReconnectPlan {
 	t.Helper()
+	// SWITCH-AWAY-COOLDOWN: an earlier commit in the same test cooled alpha.
+	// Step past that cooling so every prepare starts from the same current node.
+	group.mu.Lock()
+	cooledUntil := time.Time{}
+	if state := group.nodes["alpha"]; state != nil {
+		cooledUntil = state.cooldown
+	}
+	group.mu.Unlock()
+	if now := group.clock.Now(); cooledUntil.After(now) {
+		if testClock, ok := group.clock.(*vaneConnTestClock); ok {
+			testClock.Advance(cooledUntil.Sub(now) + time.Second)
+		}
+	}
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
 	scopeKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
@@ -145,7 +158,7 @@ func TestVaneBaselineTokenIDNeverCollidesWithRaceTaskID(t *testing.T) {
 
 // TARGET-LEASE-001 + TARGET-SCOPE-001: lease scope isolation and single-outcome tokens.
 func TestVaneTargetHandoffLeaseScopeAndSingleOutcomeToken(t *testing.T) {
-	group, _, _, beta, metadata := newTargetGroupForTest(t)
+	group, clock, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
 
@@ -156,6 +169,9 @@ func TestVaneTargetHandoffLeaseScopeAndSingleOutcomeToken(t *testing.T) {
 	require.Equal(t, "beta", second.proxy.Name(), "TTL-related concurrent connections must still prefer the handoff member")
 	require.Nil(t, second.handoff, "only the first matching reconnect owns the outcome token")
 
+	// SWITCH-AWAY-COOLDOWN: the commit cooled alpha across every target. Step
+	// past it so the scope checks below still start from alpha.
+	clock.Advance(vaneSwitchAwayCooldown + time.Second)
 	otherPort := *metadata
 	otherPort.DstPort = 8443
 	require.Equal(t, "alpha", group.pickDecision(t.Context(), &otherPort, vaneTransportTCP, false, true).proxy.Name())
@@ -209,13 +225,11 @@ func TestVaneTargetNoGainUsesSlowCooldownWithoutHardFailure(t *testing.T) {
 	// observation fields.
 	state, hasRecord := group.targetFailures[vaneTargetFailureKey{target: key, member: member}]
 	hardFailed := hasRecord && (state.streak > 0 || state.blockUntil.After(group.clock.Now()))
-	slowUntil := group.slowCooldowns[vaneCandidateKey{
-		vaneFlowKey: group.targetScopeKey(metadata.Host, metadata.DstPort), candidate: member.name, identity: member.identity,
-	}]
+	cooled := group.nodeCoolingLocked(member.name, group.clock.Now())
 	group.mu.Unlock()
 	require.False(t, preferred)
 	require.False(t, hardFailed)
-	require.True(t, slowUntil.After(group.clock.Now()))
+	require.True(t, cooled)
 	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffNoGain)
 }
 

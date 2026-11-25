@@ -32,7 +32,7 @@ func TestVaneCommitRejectsExpiredEvidenceForKnownGoodPlan(t *testing.T) {
 
 	require.Equal(t, "challenger-no-evidence", group.commitReconnectDetailed(plan))
 	group.mu.Lock()
-	require.Empty(t, group.budgets, "a rejected commit must not consume budget")
+	require.Empty(t, group.ledger, "a rejected commit must not consume budget")
 	require.Empty(t, group.hints)
 	group.mu.Unlock()
 
@@ -66,7 +66,7 @@ func TestVaneCommitRejectsChallengerBelowRatioForFastPlan(t *testing.T) {
 
 	require.Equal(t, "challenger-evidence-degraded", group.commitReconnectDetailed(plan))
 	group.mu.Lock()
-	require.Empty(t, group.budgets)
+	require.Empty(t, group.ledger)
 	require.Empty(t, group.hints)
 	group.mu.Unlock()
 }
@@ -92,7 +92,7 @@ func TestVaneTargetCommitRejectsFreshTargetEvidenceBelowRequired(t *testing.T) {
 
 	require.Equal(t, "challenger-evidence-degraded", group.commitTargetHandoff(plan))
 	group.mu.Lock()
-	require.Empty(t, group.budgets, "a rejected target commit must not consume budget")
+	require.Empty(t, group.ledger, "a rejected target commit must not consume budget")
 	require.Empty(t, group.targetHandoffs)
 	group.mu.Unlock()
 }
@@ -119,13 +119,8 @@ func TestVaneTargetCommitSynthesizesTokenWhenDiagnosticsUnavailable(t *testing.T
 	require.Equal(t, plan.current, lease.token.from)
 	require.Equal(t, plan.challenger, lease.token.to)
 	require.Equal(t, plan.currentBPS, lease.token.previousBPS)
-	require.Equal(t, 1, group.budgets[vaneNodeKeyFor(plan.targetKey, plan.current)].count)
-	_, slow := group.slowCooldowns[vaneCandidateKey{
-		vaneFlowKey: plan.targetKey,
-		candidate:   plan.current,
-		identity:    plan.identity,
-	}]
-	require.True(t, slow)
+	require.Equal(t, 1, group.ledger[plan.targetKey].count)
+	require.True(t, group.nodeCoolingLocked(plan.current, group.clock.Now()), "the node we left is cooled")
 	group.mu.Unlock()
 }
 
@@ -368,7 +363,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		require.False(t, action())
 		group.mu.Lock()
 		require.Empty(t, group.targetHandoffs)
-		require.Empty(t, group.budgets)
+		require.Empty(t, group.ledger)
 		group.mu.Unlock()
 	})
 
@@ -421,7 +416,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		require.False(t, action())
 		group.mu.Lock()
 		require.Empty(t, group.targetHandoffs)
-		require.Empty(t, group.budgets)
+		require.Empty(t, group.ledger)
 		group.mu.Unlock()
 	})
 }
@@ -494,7 +489,7 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
 	require.Empty(t, group.hints)
-	require.Empty(t, group.budgets)
+	require.Empty(t, group.ledger)
 	require.Empty(t, group.targetPreferences)
 	group.mu.Unlock()
 }
@@ -564,7 +559,7 @@ func TestVaneConnectionLifecycleArbitration(t *testing.T) {
 		require.False(t, action())
 		group.mu.Lock()
 		require.Empty(t, group.targetHandoffs)
-		require.Empty(t, group.budgets)
+		require.Empty(t, group.ledger)
 		group.mu.Unlock()
 	})
 }
@@ -635,7 +630,7 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 
 	group.mu.Lock()
 	require.Empty(t, group.targetHandoffs)
-	require.Empty(t, group.budgets)
+	require.Empty(t, group.ledger)
 	require.Empty(t, group.targetPreferences)
 	group.mu.Unlock()
 	require.Len(t, observations, 1)
@@ -965,10 +960,10 @@ func TestVaneCommitAcceptsRescueBelowDemand(t *testing.T) {
 		"a 13.6 Mbps challenger must rescue a 1 bps flow even though demand is 15 Mbps")
 }
 
-// BREAK-WINDOW: a switch that lands on a worse node must not freeze the target
-// for the whole reconnect cooldown. Once the replacement flow is starving
-// again and the break window has elapsed, one retry is allowed.
-func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
+// SWITCH-AWAY-COOLDOWN: the node a switch just left stays off the candidate
+// list until its cooling expires, so one target cannot bounce straight back to
+// the node that was already failing.
+func TestVaneSwitchAwayCoolingBlocksBacktracking(t *testing.T) {
 	newRig := func(t *testing.T) (*Vane, *vaneConnTestClock, *C.Metadata, vaneFlowKey, *vaneTestProxy) {
 		t.Helper()
 		clock := newVaneConnTestClock()
@@ -979,73 +974,44 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		group.flow.lowThroughputBPS = 5_000_000
 		group.flow.demandBPS = 8_000_000
-		// Production cooldown is 10 minutes; the break window has to sit well
-		// inside it for the rule to matter.
-		group.flow.reconnectCooldown = 10 * time.Minute
 		now := clock.Now()
 		group.mu.Lock()
 		group.learning.mu.Lock()
 		require.NotNil(t, group.ensureProxyNodeLocked(alpha, now))
 		require.NotNil(t, group.ensureProxyNodeLocked(beta, now))
-		group.nodeControls["beta"].recentTCPThroughput = vaneRecentThroughput{
+		// alpha is the node the last switch left behind.
+		group.nodeControls["alpha"].recentTCPThroughput = vaneRecentThroughput{
 			bitsPerSecond: 6_000_000, observedAt: now,
 		}
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		key := group.targetScopeKey(metadata.Host, metadata.DstPort)
-		group.reconnects[vaneNodeKeyFor(key, alpha.Name())] = now.Add(group.flow.reconnectCooldown)
+		group.coolNodeLocked(alpha.Name(), now.Add(vaneSwitchAwayCooldown))
 		group.learning.mu.Unlock()
 		group.mu.Unlock()
 		return group, clock, metadata, key, beta
 	}
 
-	t.Run("starving flow retries after the break window", func(t *testing.T) {
-		group, clock, metadata, key, beta := newRig(t)
-		group.mu.Lock()
-		alphaState := group.nodes["alpha"]
-		group.mu.Unlock()
-		require.NotNil(t, alphaState)
-
-		_, reason := group.prepareReconnectForNodeDetailed(
-			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_000_000,
-		)
-		require.Equal(t, "reconnect-cooldown", reason,
-			"inside the break window the cooldown still holds")
-
-		clock.Advance(vaneBreakWindow + time.Second)
-		plan, reason := group.prepareReconnectForNodeDetailed(
-			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 1_000_000,
-		)
-		require.Empty(t, reason, "a starving flow must be able to retry after the break window")
-		require.Equal(t, beta.Name(), plan.challenger)
-	})
-
-	t.Run("healthy flow keeps the cooldown", func(t *testing.T) {
+	t.Run("the node we just left is not a candidate", func(t *testing.T) {
 		group, clock, metadata, key, _ := newRig(t)
 		group.mu.Lock()
-		group.learning.mu.Lock()
-		alphaState := group.nodes["alpha"]
-		// A 20 Mbps flow needs a 25 Mbps challenger to be worth switching to;
-		// give beta that much so the candidate bar is not what stops the plan.
-		group.nodeControls["beta"].recentTCPThroughput = vaneRecentThroughput{
-			bitsPerSecond: 30_000_000, observedAt: clock.Now(),
-		}
-		group.learning.mu.Unlock()
+		betaState := group.nodes["beta"]
 		group.mu.Unlock()
-		require.NotNil(t, alphaState)
+		require.NotNil(t, betaState)
 
-		clock.Advance(vaneBreakWindow + time.Second)
 		_, reason := group.prepareReconnectForNodeDetailed(
-			key, metadata.Host, metadata.DstPort, "alpha", alphaState.identity, alphaState.epoch, 20_000_000,
+			key, metadata.Host, metadata.DstPort, "beta", betaState.identity, betaState.epoch, 1_000_000,
 		)
-		require.Equal(t, "reconnect-cooldown", reason,
-			"a flow above the slow line must not break its own cooldown")
+		require.NotEmpty(t, reason, "the node we just left must not come back while it cools")
+
+		clock.Advance(vaneSwitchAwayCooldown + time.Second)
+		plan, reason := group.prepareReconnectForNodeDetailed(
+			key, metadata.Host, metadata.DstPort, "beta", betaState.identity, betaState.epoch, 1_000_000,
+		)
+		require.Empty(t, reason, "once the cooling expires the node is a candidate again")
+		require.Equal(t, "alpha", plan.challenger)
 	})
 }
 
-// RESCUE-FLOOR: §L raises lowThroughputBPS up to the group's demand, which used
-// to inflate the race's required floor to demand as well (a 15M group demanded
-// a 15M probe before it would rescue a 1 bps flow). The rescue floor must stay
-// at the 5M slow line so a 6M probe can still save a dead connection.
 func TestVaneRaceRescueFloorFollowsTheSlowLine(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)

@@ -438,18 +438,16 @@ func TestVaneReadOnlySelectorsDoNotPruneExpiredCooldowns(t *testing.T) {
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 
 	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: "rr1.googlevideo.com", port: 443, candidate: "beta"}
-	scopeKey := vaneCandidateKey{vaneFlowKey: group.targetScopeKey(metadata.Host, metadata.DstPort), candidate: "beta"}
 	group.cooldowns[dialKey] = clock.Now().Add(-time.Second)
-	group.slowCooldowns[scopeKey] = clock.Now().Add(-time.Second)
+	vaneCoolNodeForTest(group, "beta", clock.Now().Add(-time.Second))
 
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, false).Name())
 	require.Contains(t, group.cooldowns, dialKey)
-	require.Contains(t, group.slowCooldowns, scopeKey)
+	require.False(t, group.nodeCoolingLocked("beta", clock.Now()), "an expired node cooldown no longer holds")
 
 	// A committed selection may perform the normal lazy cleanup.
 	require.Equal(t, "alpha", group.pick(metadata, vaneTransportTCP, false, true).Name())
 	require.NotContains(t, group.cooldowns, dialKey)
-	require.NotContains(t, group.slowCooldowns, scopeKey)
 }
 
 func TestVaneExplorationConcurrentQuotaIsExact(t *testing.T) {
