@@ -26,11 +26,14 @@ const (
 	vaneDefaultRacingURL          = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 	vaneDefaultRacingBudgetMBHour = int64(64)
 	vaneRacingProbeByteCap        = int64(4 * 1024 * 1024)
-	vaneRacingProbeTimeout        = 4 * time.Second
-	vaneRacingMaxChallengers      = 2
-	vaneRacingCapabilityTTL       = 10 * time.Minute
-	vaneRacingNoWinnerCooldown    = 30 * time.Second
-	vaneRacingMinimumReservation  = int64(64 * 1024)
+	// RACE-TIMEOUT: 4s was too tight once the probe left Cloudflare - a
+	// dl.google.com fetch spends 1-2s on dial+TLS, so a 10Mbps node timed out
+	// mid-body and its real speed was discarded. 8s lets the 4MiB cap finish.
+	vaneRacingProbeTimeout       = 8 * time.Second
+	vaneRacingMaxChallengers     = 2
+	vaneRacingCapabilityTTL      = 10 * time.Minute
+	vaneRacingNoWinnerCooldown   = 30 * time.Second
+	vaneRacingMinimumReservation = int64(64 * 1024)
 	// vaneRacingProbeMinDuration is the measurement floor for a proven
 	// throughput lower bound. A probe whose header consumed almost the whole
 	// budget leaves a body-read window of a few milliseconds; dividing by it
