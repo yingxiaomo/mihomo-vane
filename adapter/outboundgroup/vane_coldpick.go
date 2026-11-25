@@ -75,7 +75,10 @@ func (a *Vane) coldPickGateLocked(freshCaps map[vaneMemberLease]float64, scope s
 	if a.lastPickProbeAt[scope].Add(vaneRacingCapabilityTTL).After(now) {
 		return false
 	}
-	return !a.pickProbeInflight[scope]
+	if _, busy := a.pickProbeInflight[scope]; busy {
+		return false
+	}
+	return true
 }
 
 // coldPickInflightChoiceLocked returns the fastest member of ranked that already

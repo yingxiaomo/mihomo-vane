@@ -1063,3 +1063,48 @@ func TestVanePruneDropsExpiredTargetScopedState(t *testing.T) {
 	require.False(t, hasSticky, "expired sticky choice must be pruned")
 	require.False(t, hasProbe, "stale cold-pick timestamp must be pruned")
 }
+
+// AUDIT-LOW-LINE: an out-of-range low-throughput-bps is rejected at
+// construction instead of silently turning every window into a low one.
+func TestVaneLowThroughputBPSRange(t *testing.T) {
+	fallback := newVaneTestProxy("fallback", true, false)
+	_, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{
+		Reconnect:        true,
+		LowThroughputBPS: vaneBandwidth(vaneMaximumThroughputBPS + 1),
+	}, fallback, nil)
+	require.ErrorContains(t, err, "low-throughput-bps must be between 0 and")
+}
+
+// AUDIT-FLOOR: the rescue floor follows the configured slow line, so a pool
+// tuned to 20M never hands a stalled flow to a 5M node.
+func TestVaneReconnectFloorFollowsTheSlowLine(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	require.Equal(t, float64(5_000_000), group.reconnectFloorLocked(),
+		"the default slow line is the floor")
+	group.flow.lowThroughputBPS = 20_000_000
+	require.Equal(t, float64(20_000_000), group.reconnectFloorLocked(),
+		"a configured slow line raises the floor")
+	group.flow.lowThroughputBPS = 1_000_000
+	require.Equal(t, float64(5_000_000), group.reconnectFloorLocked(),
+		"a slow line below the default never lowers the floor")
+}
+
+// AUDIT-INFLIGHT: a leaked cold-pick in-flight flag is pruned like the other
+// per-scope maps instead of holding its scope forever.
+func TestVanePruneDropsStaleInflightProbe(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
+	now := clock.Now()
+	group.pickProbeInflight["stale.example"] = now.Add(-3 * vaneRacingCapabilityTTL)
+	group.pickProbeInflight["fresh.example"] = now
+
+	group.pruneFlowStateLocked(now)
+
+	_, stale := group.pickProbeInflight["stale.example"]
+	_, fresh := group.pickProbeInflight["fresh.example"]
+	require.False(t, stale, "stale in-flight flag is pruned")
+	require.True(t, fresh, "a fresh in-flight flag survives")
+}

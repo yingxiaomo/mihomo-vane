@@ -203,6 +203,9 @@ func newVaneFlowConfig(option VaneOption) (vaneFlowConfig, error) {
 	// that peaks at 25M a 15M demand marked 71% of real samples "low" and kept
 	// the watchdog switching forever.
 	if option.LowThroughputBPS > 0 {
+		if int64(option.LowThroughputBPS) > vaneMaximumThroughputBPS {
+			return vaneFlowConfig{}, fmt.Errorf("low-throughput-bps must be between 0 and %d", vaneMaximumThroughputBPS)
+		}
 		config.lowThroughputBPS = float64(option.LowThroughputBPS)
 	}
 	return config, nil
@@ -232,6 +235,19 @@ type vaneNodeKey struct {
 
 func vaneNodeKeyFor(targetKey vaneFlowKey, candidate string) vaneNodeKey {
 	return vaneNodeKey{vaneFlowKey: targetKey, candidate: candidate}
+}
+
+// reconnectFloorLocked is the absolute floor a rescue candidate must clear.
+// It follows the configured low line, so a pool tuned with
+// low-throughput-bps: 10M does not hand a stalled flow to a 5M node and let it
+// stall again. The demand rate stays out of this bar on purpose: demand gates
+// the current flow, never its replacement.
+func (a *Vane) reconnectFloorLocked() float64 {
+	floor := float64(vaneDefaultLowThroughputBPS)
+	if a.flow.lowThroughputBPS > floor {
+		return a.flow.lowThroughputBPS
+	}
+	return floor
 }
 
 type vaneHint struct {
@@ -891,9 +907,8 @@ func (f *vaneFlow) raceRequest(sample vaneThroughputObservation, lowWindows int)
 	// RESCUE: the race asks for a node that beats the current flow, not one that
 	// already reaches demand — a 1 bps flow would otherwise race for nothing.
 	required := sample.BitsPerSecond * f.group.flow.challengerRatio
-	// RESCUE-FLOOR: the absolute floor is the 5M slow line, never the
-	// demand-inflated lowThroughputBPS (which §L raises to demand).
-	if floor := float64(vaneDefaultLowThroughputBPS); required < floor {
+	// RESCUE-FLOOR: the absolute floor is the slow line, never demand.
+	if floor := f.group.reconnectFloorLocked(); required < floor {
 		required = floor
 	}
 	f.group.mu.Lock()
@@ -1454,7 +1469,7 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 	// a rescue challenger has to clear. A 1 bps flow must be allowed to move to
 	// any node that beats the slow line by the challenger ratio.
 	requiredBPS := currentBPS * a.flow.challengerRatio
-	improvementBar := float64(vaneDefaultLowThroughputBPS)
+	improvementBar := a.reconnectFloorLocked()
 	if requiredBPS > improvementBar {
 		improvementBar = requiredBPS
 	}
@@ -1740,7 +1755,7 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 		// "reaches demand". demand decides whether the current flow is good
 		// enough; once it is not, a challenger that clears the slow line and
 		// the ratio rescues the user even if it cannot reach demand.
-		bar := float64(vaneDefaultLowThroughputBPS)
+		bar := a.reconnectFloorLocked()
 		if required := plan.currentBPS * a.flow.challengerRatio; required > bar {
 			bar = required
 		}
@@ -1845,7 +1860,7 @@ func (a *Vane) checkChallengerEvidenceLocked(plan vaneReconnectPlan, caps map[va
 	// rescued by any challenger that clears the slow line and the ratio; the
 	// old demand floor kept a dead flow alive because no candidate could
 	// reach a bar that only the dead flow's own demand defined.
-	bar := float64(vaneDefaultLowThroughputBPS)
+	bar := a.reconnectFloorLocked()
 	requiredBPS := plan.currentBPS * a.flow.challengerRatio
 	if requiredBPS > bar {
 		bar = requiredBPS
@@ -2030,6 +2045,11 @@ func (a *Vane) pruneFlowStateLocked(now time.Time) {
 		if budget.windowFrom.Add(vaneTargetSwitchBudgetWindow).Before(now) &&
 			(budget.lastSwitch.IsZero() || now.Sub(budget.lastSwitch) >= vaneSwitchObserveWindow) {
 			delete(a.targetSwitches, key)
+		}
+	}
+	for scope, at := range a.pickProbeInflight {
+		if now.Sub(at) >= 2*vaneRacingCapabilityTTL {
+			delete(a.pickProbeInflight, scope)
 		}
 	}
 	for key, choice := range a.stickiness {

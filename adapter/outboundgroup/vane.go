@@ -352,7 +352,7 @@ type Vane struct {
 	// Cold-pick probe throttle (COLD-PICK): per target scope. Both maps are
 	// guarded by a.mu and only touched in pickInternalDecision's (a)/(c)
 	// stages — never inside racingRuntime.mu (see snapshotFreshCapabilities).
-	pickProbeInflight map[string]bool
+	pickProbeInflight map[string]time.Time
 	lastPickProbeAt   map[string]time.Time
 	// §E: the per-target valve throttle — a target re-runs its prepare at most
 	// once per vaneValveThrottle, regardless of how many flows ask.
@@ -499,7 +499,7 @@ func newVaneWithClock(
 		targetPreferences: make(map[vaneTargetKey]vaneTargetPreference),
 		targetEvidence:    make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
 		targetFailures:    make(map[vaneTargetFailureKey]vaneTargetFailureState),
-		pickProbeInflight: make(map[string]bool),
+		pickProbeInflight: make(map[string]time.Time),
 		lastPickProbeAt:   make(map[string]time.Time),
 		valveLastRun:      make(map[vaneTargetKey]time.Time),
 		nodes:             make(map[string]*vaneNodeState),
@@ -1088,11 +1088,6 @@ func (a *Vane) pick(metadata *C.Metadata, transport vaneTransport, touch, commit
 	return a.pickInternalDecision(context.Background(), metadata, transport, touch, commit, false).proxy
 }
 
-func (a *Vane) pickWithHandoff(metadata *C.Metadata, transport vaneTransport, touch, commit bool) (C.Proxy, *vaneHandoffToken) {
-	decision := a.pickInternalDecision(context.Background(), metadata, transport, touch, commit, true)
-	return decision.proxy, decision.handoff
-}
-
 func (a *Vane) pickDecision(ctx context.Context, metadata *C.Metadata, transport vaneTransport, touch, commit bool) vanePickDecision {
 	return a.pickInternalDecision(ctx, metadata, transport, touch, commit, true)
 }
@@ -1407,8 +1402,8 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			top2 := []vaneRankedProxy{ranked[0], ranked[1]}
 			if a.coldPickGateLocked(freshCaps, coldPickScope, top2, now) {
 				coldPickTop2 = top2
-				a.pickProbeInflight[coldPickScope] = true
-			} else if a.pickProbeInflight[coldPickScope] {
+				a.pickProbeInflight[coldPickScope] = now
+			} else if _, ok := a.pickProbeInflight[coldPickScope]; ok {
 				coldPickInflightRejected = true
 				// INFLIGHT-BW: another cold pick on this scope is still
 				// probing, so this pick cannot wait for a fresh

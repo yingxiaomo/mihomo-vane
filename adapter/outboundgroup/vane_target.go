@@ -693,7 +693,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	// not when it already reaches demand.
 	required := token.previousBPS * a.flow.challengerRatio
 	// RESCUE-FLOOR: 5M slow line, not the demand-inflated lowThroughputBPS.
-	if floor := float64(vaneDefaultLowThroughputBPS); required < floor {
+	if floor := a.reconnectFloorLocked(); required < floor {
 		required = floor
 	}
 	kind := "handoff-no-gain"

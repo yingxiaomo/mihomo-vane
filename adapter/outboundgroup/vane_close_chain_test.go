@@ -1046,7 +1046,7 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 // to inflate the race's required floor to demand as well (a 15M group demanded
 // a 15M probe before it would rescue a 1 bps flow). The rescue floor must stay
 // at the 5M slow line so a 6M probe can still save a dead connection.
-func TestVaneRaceRescueFloorIgnoresDemandInflatedSlowLine(t *testing.T) {
+func TestVaneRaceRescueFloorFollowsTheSlowLine(t *testing.T) {
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
 	beta := newVaneTestProxy("beta", true, true)
@@ -1062,6 +1062,6 @@ func TestVaneRaceRescueFloorIgnoresDemandInflatedSlowLine(t *testing.T) {
 	request := flow.raceRequest(vaneThroughputObservation{
 		BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
 	}, 3)
-	require.Equal(t, float64(5_000_000), request.requiredBPS,
-		"the rescue floor is the 5M slow line, not the demand-inflated lowThroughputBPS")
+	require.Equal(t, float64(15_000_000), request.requiredBPS,
+		"the rescue floor follows the configured slow line, so a 1 bps flow is never handed to a 5M node")
 }

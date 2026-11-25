@@ -496,7 +496,7 @@ func TestVaneColdPickInflightPrefersMeasuredBandwidth(t *testing.T) {
 	group.ensureProxyNodeLocked(beta, now)
 	group.racingRuntime.capabilities[vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}] =
 		vaneCapabilityRecord{member: vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}, lowerBoundBPS: 40_000_000, observedAt: now}
-	group.pickProbeInflight[targetKey.targetScope] = true
+	group.pickProbeInflight[targetKey.targetScope] = now
 	group.learning.mu.Unlock()
 	group.mu.Unlock()
 
