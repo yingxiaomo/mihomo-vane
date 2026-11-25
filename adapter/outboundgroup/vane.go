@@ -1413,6 +1413,20 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					a.pickProbeInflight[coldPickScope] = true
 				} else if a.pickProbeInflight[coldPickScope] {
 					coldPickInflightRejected = true
+					// INFLIGHT-BW: another cold pick on this scope is still
+					// probing, so this pick cannot wait for a fresh
+					// measurement. Falling back to plain delay ranking is what
+					// lands the first video connection on a low-bandwidth node,
+					// so reuse whatever capability records already exist and
+					// take the fastest ranked candidate among them.
+					if fastest, ok := a.coldPickInflightChoiceLocked(freshCaps, ranked, now); ok {
+						chosen = fastest
+						selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
+						if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
+							a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
+							a.rememberStickyLocked(target, port, scene, chosen.name, now)
+						}
+					}
 				}
 			}
 		}

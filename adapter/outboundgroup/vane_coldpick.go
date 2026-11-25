@@ -78,6 +78,34 @@ func (a *Vane) coldPickGateLocked(freshCaps map[vaneMemberLease]float64, scope s
 	return !a.pickProbeInflight[scope]
 }
 
+// coldPickInflightChoiceLocked returns the fastest member of ranked that already
+// has a fresh capability record. Caller holds a.mu. It backs the INFLIGHT-BW
+// fallback: when a concurrent cold pick on the same scope owns the probe, the
+// late pick cannot measure, but it can still prefer a node that was already
+// measured instead of dropping back to delay-only ranking.
+func (a *Vane) coldPickInflightChoiceLocked(freshCaps map[vaneMemberLease]float64, ranked []vaneRankedProxy, now time.Time) (vaneRankedProxy, bool) {
+	var best vaneRankedProxy
+	var bestBPS float64
+	found := false
+	for _, candidate := range ranked {
+		if candidate.cooldownUntil.After(now) {
+			continue
+		}
+		identity := vaneProxyPersistentIdentity(candidate.proxy)
+		name := candidate.proxy.Name()
+		for member, bps := range freshCaps {
+			if member.name != name || member.identity != identity || bps <= 0 {
+				continue
+			}
+			if !found || bps > bestBPS {
+				best, bestBPS, found = candidate, bps, true
+			}
+			break
+		}
+	}
+	return best, found
+}
+
 // runColdPickProbe is the unlocked stage (b): reserve budget, probe both
 // candidates in parallel, wait for both results, settle the budget. It never
 // touches a.mu or learning.mu; all shared state writes happen in stage (c).

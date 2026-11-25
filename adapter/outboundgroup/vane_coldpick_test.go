@@ -480,3 +480,34 @@ func TestVaneColdPickCanceledProbeWritesNothing(t *testing.T) {
 	}
 	require.True(t, canceledSeen)
 }
+
+// INFLIGHT-BW: a cold pick that loses the in-flight race on its scope cannot
+// wait for a fresh measurement, but it must not fall back to delay-only ranking
+// when a measured-fast node is already on record. This is what keeps the first
+// video connection off a low-bandwidth node.
+func TestVaneColdPickInflightPrefersMeasuredBandwidth(t *testing.T) {
+	group, _, alpha, beta, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	now := group.clock.Now()
+	group.mu.Lock()
+	group.learning.mu.Lock()
+	targetKey, ok := group.targetKeyForMedia(metadata.Host, metadata.DstPort)
+	require.True(t, ok)
+	group.ensureProxyNodeLocked(alpha, now)
+	group.ensureProxyNodeLocked(beta, now)
+	group.racingRuntime.capabilities[vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}] =
+		vaneCapabilityRecord{member: vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}, lowerBoundBPS: 40_000_000, observedAt: now}
+	group.pickProbeInflight[targetKey.targetScope] = true
+	group.learning.mu.Unlock()
+	group.mu.Unlock()
+
+	probeCalled := atomic.Bool{}
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probeCalled.Store(true)
+		return vaneProbeResult{reason: "nil-connection"}
+	}
+
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, beta.Name(), decision.proxy.Name(),
+		"inflight fallback must take the measured-fast node, not the delay leader")
+	require.False(t, probeCalled.Load(), "the in-flight marker must keep this pick from probing")
+}
