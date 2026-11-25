@@ -1484,8 +1484,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 	if state != nil && recent.bitsPerSecond > 0 && !recent.observedAt.IsZero() &&
 		now.Sub(recent.observedAt) <= vaneMediaEvidenceMaxAge &&
 		(recent.bitsPerSecond < a.media.lowThroughputBPS ||
-			recent.bitsPerSecond < plan.currentBPS*a.media.challengerRatio ||
-			(plan.knownGood && recent.bitsPerSecond < a.media.demandBPS)) {
+			recent.bitsPerSecond < plan.currentBPS*a.media.challengerRatio) {
 		// §L exemption: a fresh target-tier measurement at or above the bar is
 		// the authority (target > node), and checkChallengerEvidenceLocked
 		// below would accept the plan through that tier. Vetoing here would
@@ -1493,12 +1492,13 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		// low line follows demand, that inversion would kill exactly the
 		// plans §B admits on target evidence alone.
 		to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: plan.challengerEpoch}
+		// RESCUE: the bar is "clearly better than the current flow", not
+		// "reaches demand". demand decides whether the current flow is good
+		// enough; once it is not, a challenger that clears the slow line and
+		// the ratio rescues the user even if it cannot reach demand.
 		bar := a.media.lowThroughputBPS
 		if required := plan.currentBPS * a.media.challengerRatio; required > bar {
 			bar = required
-		}
-		if a.media.demandBPS > bar {
-			bar = a.media.demandBPS
 		}
 		if targetBPS, targetFresh, degraded := a.targetEvidenceLocked(plan.targetStateKey, to, now); !(targetFresh && !degraded && targetBPS >= bar) {
 			return "challenger-evidence-degraded"
@@ -1594,11 +1594,12 @@ func (a *Vane) checkChallengerEvidenceLocked(plan vaneMediaPlan, caps map[vaneMe
 	if best <= 0 {
 		return "challenger-no-evidence"
 	}
+	// RESCUE: demand is not a floor for the challenger. A starving flow is
+	// rescued by any challenger that clears the slow line and the ratio; the
+	// old demand floor kept a dead flow alive because no candidate could
+	// reach a bar that only the dead flow's own demand defined.
 	bar := a.media.lowThroughputBPS
 	requiredBPS := plan.currentBPS * a.media.challengerRatio
-	if requiredBPS < a.media.demandBPS {
-		requiredBPS = a.media.demandBPS
-	}
 	if requiredBPS > bar {
 		bar = requiredBPS
 	}

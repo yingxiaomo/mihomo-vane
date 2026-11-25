@@ -43,12 +43,16 @@ func TestVaneCommitRejectsExpiredEvidenceForKnownGoodPlan(t *testing.T) {
 		"missing control state is also missing evidence")
 }
 
-// CHAIN-04: commit must re-check the demand line that admitted the plan.
-func TestVaneCommitRejectsDemandRegressionForKnownGoodPlan(t *testing.T) {
+// CHAIN-04: commit must re-check the admission bar that prepared the plan.
+// The bar is max(slow line, currentBPS x challengerRatio), so a fast flow is
+// never swapped onto a slower challenger. demand is deliberately absent: it
+// decides whether the current flow is good enough, not what a rescue must hit.
+func TestVaneCommitRejectsChallengerBelowRatioForFastPlan(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	group.media.demandBPS = 8_000_000
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	plan.knownGood = true
+	plan.currentBPS = 20_000_000
 
 	now := group.clock.Now()
 	group.mu.Lock()
@@ -929,4 +933,31 @@ func TestVaneDemandDominatesCandidateAdmission(t *testing.T) {
 	group.mu.Lock()
 	require.Empty(t, group.targetPreferences)
 	group.mu.Unlock()
+}
+
+// RESCUE-01: a starving flow is rescued by a challenger that clears the slow
+// line and the ratio even when it cannot reach demand. Before this fix the
+// demand floor vetoed every rescue: a flow reporting 1 bps demanded a
+// 15 Mbps challenger, so a measured 13.6 Mbps candidate was rejected as
+// degraded and the dead flow stayed in place (observed live as 18
+// challenger-evidence-degraded rejections with lowWindows above 17).
+func TestVaneCommitAcceptsRescueBelowDemand(t *testing.T) {
+	group, _, _, beta, metadata := newTargetGroupForTest(t)
+	group.media.demandBPS = 15_000_000
+	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
+	plan.knownGood = true
+	plan.currentBPS = 1_000_000
+
+	now := group.clock.Now()
+	group.mu.Lock()
+	group.nodeControls["beta"] = &vaneNodeControlState{
+		recentTCPThroughput: vaneRecentThroughput{
+			bitsPerSecond: 13_600_000,
+			observedAt:    now,
+		},
+	}
+	group.mu.Unlock()
+
+	require.Empty(t, group.commitMediaReconnectDetailed(plan),
+		"a 13.6 Mbps challenger must rescue a 1 bps flow even though demand is 15 Mbps")
 }
