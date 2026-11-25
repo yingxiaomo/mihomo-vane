@@ -82,7 +82,7 @@ func TestVaneBacklogStampExpires(t *testing.T) {
 	}
 	flow.mu.Lock()
 	require.Zero(t, flow.lowWindows)
-	flow.backloggedAt = clock.Now().Add(-2*vaneMediaWatchdogTick - time.Second)
+	flow.backloggedAt = clock.Now().Add(-vaneMediaBacklogGrace - time.Second)
 	flow.mu.Unlock()
 
 	require.Nil(t, flow.observe(vaneObservationLowSample()))
@@ -223,4 +223,36 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 	}
 	require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""), "a slow flow without backlog must still race")
 	require.Zero(t, countVaneEvents(group, "low-window-graced", "client-backlog"))
+}
+
+// BACKLOG-09: a backgrounded player reads in bursts, so the probe goes quiet
+// between ticks even though the client is still the bottleneck. The excuse has
+// to outlive that gap and clear the streak, otherwise a healthy node is closed
+// after a few minutes in the background and the player spins on return.
+func TestVaneBacklogExcusesBackgroundBursts(t *testing.T) {
+	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+
+	for i := 0; i < 2; i++ {
+		require.Nil(t, flow.observe(vaneObservationLowSample()))
+	}
+	flow.mu.Lock()
+	require.Equal(t, 2, flow.lowWindows)
+	flow.mu.Unlock()
+
+	flow.mu.Lock()
+	flow.backloggedAt = clock.Now()
+	flow.mu.Unlock()
+	require.Nil(t, flow.observe(vaneObservationLowSample()))
+	flow.mu.Lock()
+	require.Zero(t, flow.lowWindows, "backlog clears the streak")
+	flow.mu.Unlock()
+
+	// The throttled reader unwrites nothing for a while, so the probe stops
+	// refreshing the stamp; the excuse must still hold across the gap.
+	clock.Advance(2 * vaneMediaWatchdogTick)
+	require.Nil(t, flow.observe(vaneObservationLowSample()))
+	flow.mu.Lock()
+	require.Zero(t, flow.lowWindows, "the excuse outlives the probe gap")
+	flow.mu.Unlock()
 }

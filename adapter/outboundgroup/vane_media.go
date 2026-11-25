@@ -59,6 +59,15 @@ const (
 	// granularity bounds how late the first synthetic window can arrive.
 	vaneMediaStallSilence = 10 * time.Second
 	vaneMediaWatchdogTick = 5 * time.Second
+	// BACKLOG-STREAK: how long one backlog sighting excuses low windows.
+	// A backgrounded player (browser tab, phone screen off) throttles or
+	// stops reading, so its delivery rate collapses while the node is fine.
+	// The backlog probe only reports while bytes are unwritten, which is
+	// intermittent for a throttled-but-alive reader, so the excuse has to
+	// outlive the probe's own tick by a wide margin. Without this the
+	// "recently-fast" branch counted those windows and closed healthy
+	// flows after a few minutes in the background.
+	vaneMediaBacklogGrace = 90 * time.Second
 )
 
 type vaneMediaConfig struct {
@@ -575,8 +584,13 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		// forever, so a flow that stalled between bursts never reached the
 		// switch threshold and the player stayed stuck on a half-dead node.
 		switch {
-		case !f.backloggedAt.IsZero() && now.Sub(f.backloggedAt) < 2*vaneMediaWatchdogTick:
+		case !f.backloggedAt.IsZero() && now.Sub(f.backloggedAt) < vaneMediaBacklogGrace:
 			graceReason = "client-backlog"
+			// BACKLOG-STREAK: a client that is not reading (background tab,
+			// paused player, phone screen off) produces low delivery windows
+			// that say nothing about the node, so the streak is cleared and a
+			// return to the foreground starts from zero.
+			f.lowWindows = 0
 		case !f.lastNonLowAt.IsZero() && now.Sub(f.lastNonLowAt) < vaneMediaFastGrace:
 			graceReason = "recently-fast"
 			f.lowWindows++
