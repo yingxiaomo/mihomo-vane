@@ -673,8 +673,9 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	// RESCUE: a handoff counts as a gain when it beats the flow it replaced,
 	// not when it already reaches demand.
 	required := token.previousBPS * a.media.challengerRatio
-	if required < a.media.lowThroughputBPS {
-		required = a.media.lowThroughputBPS
+	// RESCUE-FLOOR: 5M slow line, not the demand-inflated lowThroughputBPS.
+	if floor := float64(vaneDefaultMediaLowThroughputBPS); required < floor {
+		required = floor
 	}
 	kind := "handoff-no-gain"
 	a.mu.Lock()

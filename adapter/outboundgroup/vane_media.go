@@ -836,8 +836,10 @@ func (f *vaneMediaFlow) raceRequest(sample vaneThroughputObservation, lowWindows
 	// RESCUE: the race asks for a node that beats the current flow, not one that
 	// already reaches demand — a 1 bps flow would otherwise race for nothing.
 	required := sample.BitsPerSecond * f.group.media.challengerRatio
-	if required < f.group.media.lowThroughputBPS {
-		required = f.group.media.lowThroughputBPS
+	// RESCUE-FLOOR: the absolute floor is the 5M slow line, never the
+	// demand-inflated lowThroughputBPS (which §L raises to demand).
+	if floor := float64(vaneDefaultMediaLowThroughputBPS); required < floor {
+		required = floor
 	}
 	f.group.mu.Lock()
 	f.group.learning.mu.Lock()
@@ -1309,7 +1311,7 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 	// a rescue challenger has to clear. A 1 bps flow must be allowed to move to
 	// any node that beats the slow line by the challenger ratio.
 	requiredBPS := currentBPS * a.media.challengerRatio
-	improvementBar := a.media.lowThroughputBPS
+	improvementBar := float64(vaneDefaultMediaLowThroughputBPS)
 	if requiredBPS > improvementBar {
 		improvementBar = requiredBPS
 	}
@@ -1590,7 +1592,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		// "reaches demand". demand decides whether the current flow is good
 		// enough; once it is not, a challenger that clears the slow line and
 		// the ratio rescues the user even if it cannot reach demand.
-		bar := a.media.lowThroughputBPS
+		bar := float64(vaneDefaultMediaLowThroughputBPS)
 		if required := plan.currentBPS * a.media.challengerRatio; required > bar {
 			bar = required
 		}
@@ -1694,7 +1696,7 @@ func (a *Vane) checkChallengerEvidenceLocked(plan vaneMediaPlan, caps map[vaneMe
 	// rescued by any challenger that clears the slow line and the ratio; the
 	// old demand floor kept a dead flow alive because no candidate could
 	// reach a bar that only the dead flow's own demand defined.
-	bar := a.media.lowThroughputBPS
+	bar := float64(vaneDefaultMediaLowThroughputBPS)
 	requiredBPS := plan.currentBPS * a.media.challengerRatio
 	if requiredBPS > bar {
 		bar = requiredBPS

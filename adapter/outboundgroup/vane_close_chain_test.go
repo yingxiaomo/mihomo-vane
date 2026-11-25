@@ -1041,3 +1041,27 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 			"a flow above the slow line must not break its own cooldown")
 	})
 }
+
+// RESCUE-FLOOR: §L raises lowThroughputBPS up to the group's demand, which used
+// to inflate the race's required floor to demand as well (a 15M group demanded
+// a 15M probe before it would rescue a 1 bps flow). The rescue floor must stay
+// at the 5M slow line so a 6M probe can still save a dead connection.
+func TestVaneRaceRescueFloorIgnoresDemandInflatedSlowLine(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, true)
+	beta := newVaneTestProxy("beta", true, true)
+	beta.delay = 10
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneMediaForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com,media")
+	group.media.lowThroughputBPS = 15_000_000
+	group.media.demandBPS = 15_000_000
+
+	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	flow := newVaneMediaFlow(group, "alpha", metadata)
+	require.NotNil(t, flow)
+	request := flow.raceRequest(vaneThroughputObservation{
+		BitsPerSecond: 1_000_000, TotalBytes: 4 * 1024 * 1024, Age: 20 * time.Second,
+	}, 3)
+	require.Equal(t, float64(5_000_000), request.requiredBPS,
+		"the rescue floor is the 5M slow line, not the demand-inflated lowThroughputBPS")
+}
