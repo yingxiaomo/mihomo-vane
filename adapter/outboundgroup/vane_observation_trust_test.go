@@ -309,3 +309,31 @@ func TestVaneMediaSyntheticWindowIgnoresBufferCredit(t *testing.T) {
 	require.Equal(t, 3, flow.lowWindows, "the synthetic window still counts")
 	flow.mu.Unlock()
 }
+
+// PHASE1-01: a TCP flow whose target is not a configured media target is still
+// watched — it counts low windows so phase 2 has data — but it owns no target
+// state and can never arm a switch or flood the per-sample diagnostics.
+func TestVaneNonMediaFlowWatchedButCannotSwitch(t *testing.T) {
+	group, _, _ := newVaneObservationRig(t, vaneRacingOn)
+	dropVaneRecordedEvents(group)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+
+	flow := newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "rr.example.com", DstPort: 443, NetWork: C.TCP})
+	require.NotNil(t, flow, "PHASE1: every TCP flow is watched")
+	t.Cleanup(flow.releaseActiveFlowCount)
+	require.Empty(t, flow.targetKey.target, "a non-media target owns no target state")
+
+	for i := 0; i < 3; i++ {
+		require.Nil(t, flow.observe(vaneObservationLowSample()))
+	}
+	flow.mu.Lock()
+	count := flow.lowWindows
+	flow.mu.Unlock()
+	require.Equal(t, 3, count, "the non-media flow still counts low windows")
+	require.Zero(t, countVaneEvents(group, "race-scheduled", ""),
+		"a non-media flow must not arm a race")
+	require.Zero(t, countVaneEvents(group, "reconnect-prepared", ""),
+		"a non-media flow must not prepare a reconnect")
+	require.Zero(t, countVaneEvents(group, "reconnect-suppressed", ""),
+		"a non-media flow must not even evaluate a reconnect")
+}

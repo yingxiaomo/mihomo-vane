@@ -48,9 +48,12 @@ type VaneOption struct {
 	GrayFailureObservation bool          `group:"gray-failure-observation,omitempty"`
 	MediaReconnect         bool          `group:"media-reconnect,omitempty"`
 	MediaReconnectDomains  []string      `group:"media-reconnect-domains,omitempty"`
-	MediaDemandBPS         vaneBandwidth `group:"media-demand-bps,omitempty"`
+	DemandBPS              vaneBandwidth `group:"demand-bps,omitempty"`
 	Vane                   *bool         `group:"vane,omitempty"`
 	RacingURL              string        `group:"racing-url,omitempty"`
+	// MediaDemandBPS is the pre-simplification key. It still parses so an
+	// existing config keeps working, but DemandBPS wins when both are set.
+	MediaDemandBPS vaneBandwidth `group:"media-demand-bps,omitempty"`
 }
 
 type vaneTransport uint8

@@ -797,6 +797,27 @@ func TestVaneMediaConfigValidation(t *testing.T) {
 	}
 }
 
+// PHASE1-02: demand-bps is the new key; media-demand-bps still works so an
+// existing config keeps loading, and the new key wins when both are set.
+func TestVaneDemandBPSKeyPrecedence(t *testing.T) {
+	fallback := newVaneTestProxy("fallback", true, false)
+
+	newGroup := func(option VaneOption) *Vane {
+		option.MediaReconnect = true
+		group, err := NewVane(GroupCommonOption{Name: "vane"}, option, fallback, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = group.Close() })
+		return group
+	}
+
+	require.Equal(t, float64(8_000_000), newGroup(VaneOption{DemandBPS: 8_000_000}).media.demandBPS,
+		"demand-bps sets the demand")
+	require.Equal(t, float64(2_000_000), newGroup(VaneOption{MediaDemandBPS: 2_000_000}).media.demandBPS,
+		"the deprecated key still works")
+	require.Equal(t, float64(8_000_000), newGroup(VaneOption{DemandBPS: 8_000_000, MediaDemandBPS: 2_000_000}).media.demandBPS,
+		"demand-bps wins over the deprecated key")
+}
+
 // TARGET-SCOPE-001: hints expire and only apply to allowed domains.
 func TestVaneMediaHintExpiresAndOnlyAffectsAllowedDomain(t *testing.T) {
 	clock := newVaneConnTestClock()

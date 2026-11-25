@@ -25,8 +25,11 @@ func TestVaneB2ActiveMediaFlows(t *testing.T) {
 	group.mediaFlowsMu.Unlock()
 	require.Equal(t, 2, count, "two live flows hold two counts")
 
-	// Non-media flows must not hold a count.
-	require.Nil(t, newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "example.com", DstPort: 443, NetWork: C.TCP}))
+	// Non-media flows are watched but must not hold a media count.
+	nonMedia := newVaneMediaFlow(group, alpha.Name(), &C.Metadata{Host: "example.com", DstPort: 443, NetWork: C.TCP})
+	require.NotNil(t, nonMedia, "PHASE1: every TCP flow is watched")
+	require.False(t, nonMedia.counted, "a non-media flow holds no B2 count")
+	nonMedia.releaseActiveFlowCount()
 	group.mediaFlowsMu.Lock()
 	count = group.mediaActiveFlows[alpha.Name()]
 	group.mediaFlowsMu.Unlock()

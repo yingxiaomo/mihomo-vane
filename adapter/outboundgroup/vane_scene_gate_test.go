@@ -150,6 +150,8 @@ func TestVaneSceneGateBuildsMediaFlowWithoutGate(t *testing.T) {
 	require.NotNil(t, flow, "a media flow must be built with no media-reconnect-domains set")
 	require.Equal(t, "googlevideo.com", flow.targetKey.target)
 
-	require.Nil(t, newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "other.example", DstPort: 443, NetWork: C.TCP}),
-		"a host outside every scene rule is not a media flow")
+	outside := newVaneMediaFlow(group, "alpha", &C.Metadata{Host: "other.example", DstPort: 443, NetWork: C.TCP})
+	require.NotNil(t, outside, "PHASE1: every TCP flow is watched")
+	require.Empty(t, outside.targetKey.target, "a host outside every scene rule cannot arm the switch path")
+	outside.releaseActiveFlowCount()
 }

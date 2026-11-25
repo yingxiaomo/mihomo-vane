@@ -172,11 +172,20 @@ func newVaneMediaConfig(option VaneOption) (vaneMediaConfig, error) {
 		config.domains = append(config.domains, domain)
 	}
 
-	if int64(option.MediaDemandBPS) < 0 || int64(option.MediaDemandBPS) > vaneMaximumMediaThroughputBPS {
-		return vaneMediaConfig{}, fmt.Errorf("media-demand-bps must be between 0 and %d", vaneMaximumMediaThroughputBPS)
+	// PHASE1: demand-bps is the new key. media-demand-bps still parses so an
+	// existing config keeps working; the new key wins when both are set.
+	demand := option.DemandBPS
+	if option.MediaDemandBPS != 0 {
+		log.Warnln("Vane: media-demand-bps is deprecated, use demand-bps")
+		if demand == 0 {
+			demand = option.MediaDemandBPS
+		}
 	}
-	if option.MediaDemandBPS > 0 {
-		config.demandBPS = float64(option.MediaDemandBPS)
+	if int64(demand) < 0 || int64(demand) > vaneMaximumMediaThroughputBPS {
+		return vaneMediaConfig{}, fmt.Errorf("demand-bps must be between 0 and %d", vaneMaximumMediaThroughputBPS)
+	}
+	if demand > 0 {
+		config.demandBPS = float64(demand)
 	}
 	// §L: the low-window trigger line follows the group's demand (floored at
 	// the 5M default). demand already dominates the close bar, knownGood and
@@ -238,6 +247,9 @@ type vaneMediaFlow struct {
 	raceToken       uint64
 	policySubmitter func(vanePolicyAction, bool)
 	flowCountOnce   sync.Once
+	// PHASE1: only a configured media target holds a B2 media-flow count.
+	// Every TCP flow is watched, but the count keeps its media meaning.
+	counted bool
 	// §E: only the flow that claimed the handoff token (the connection the
 	// switch was made for) arms the re-evaluation valve. valveCurrentBPS
 	// keeps the pre-switch speed from the token for the re-run prepare.
@@ -277,27 +289,27 @@ func (f *vaneMediaFlow) releaseActiveFlowCount() {
 		return
 	}
 	f.flowCountOnce.Do(func() {
-		f.group.mediaFlowEnded(f.candidate)
+		if f.counted {
+			f.group.mediaFlowEnded(f.candidate)
+		}
 		f.group.forgetMediaFlow(f)
 	})
 }
 
 func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, handoff ...*vaneHandoffToken) *vaneMediaFlow {
-	if group == nil || !group.media.enabled || classifyVaneScene(metadata, group.rules) != vaneSceneMedia {
+	if group == nil || !group.media.enabled {
 		return nil
 	}
 	target, port := vaneTarget(metadata)
 	if target == "" {
 		return nil
 	}
+	// PHASE1: every TCP flow enters the watchdog, not only media targets. A
+	// flow whose target is not a configured media target keeps an empty
+	// targetKey: it still counts low windows and feeds node health, but it
+	// owns no target state and never reaches the switch path in observe.
 	targetKey := group.mediaTargetKey(target, port)
-	if targetKey.target == "" {
-		return nil
-	}
-	targetStateKey, ok := group.targetKeyForMedia(target, port)
-	if !ok {
-		return nil
-	}
+	targetStateKey, _ := group.targetKeyForMedia(target, port)
 	flow := &vaneMediaFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey}
 	if len(handoff) > 0 && handoff[0] != nil {
 		flow.handoff = handoff[0]
@@ -317,7 +329,10 @@ func newVaneMediaFlow(group *Vane, candidate string, metadata *C.Metadata, hando
 	// rides on the connection settlement (releaseActiveFlowCount); a
 	// never-closing connection keeps holding its count, which is acceptable —
 	// connections eventually close.
-	group.mediaFlowStarted(candidate)
+	if targetKey.target != "" {
+		flow.counted = true
+		group.mediaFlowStarted(candidate)
+	}
 	// §2.4: the watchdog only watches flows that have actually delivered
 	// samples, so registration is cheap and silence is measured against the
 	// flow's own sample clock.
@@ -621,38 +636,45 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	f.handoff = nil
 	f.mu.Unlock()
 
-	f.group.diagnostics.record(vaneDiagnosticRecord{
-		kind:          "throughput-sample",
-		target:        f.target,
-		bucket:        f.targetKey.target,
-		port:          f.port,
-		from:          f.candidate,
-		bps:           sample.BitsPerSecond,
-		totalBytes:    sample.TotalBytes,
-		age:           sample.Age,
-		lowWindows:    lowWindows,
-		low:           low,
-		lowSignal:     lowSignal,
-		latencyMillis: sample.Latency.Milliseconds(),
-		lossRate:      sample.LossRate,
-	})
-	if graceReason != "" {
+	// PHASE1: every TCP flow is observed, but only a configured media target
+	// owns target state, may arm a switch, and emits per-sample diagnostics.
+	// A flow with an empty targetKey still counts low windows so the phase-2
+	// rollout has data, without flooding the log with one record per window.
+	mediaTarget := f.targetKey.target != ""
+	if mediaTarget {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
-			kind:       "low-window-graced",
-			reason:     graceReason,
-			target:     f.target,
-			bucket:     f.targetKey.target,
-			port:       f.port,
-			from:       f.candidate,
-			bps:        sample.BitsPerSecond,
-			totalBytes: sample.TotalBytes,
-			age:        sample.Age,
-			lowWindows: lowWindows,
+			kind:          "throughput-sample",
+			target:        f.target,
+			bucket:        f.targetKey.target,
+			port:          f.port,
+			from:          f.candidate,
+			bps:           sample.BitsPerSecond,
+			totalBytes:    sample.TotalBytes,
+			age:           sample.Age,
+			lowWindows:    lowWindows,
+			low:           low,
+			lowSignal:     lowSignal,
+			latencyMillis: sample.Latency.Milliseconds(),
+			lossRate:      sample.LossRate,
 		})
+		if graceReason != "" {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind:       "low-window-graced",
+				reason:     graceReason,
+				target:     f.target,
+				bucket:     f.targetKey.target,
+				port:       f.port,
+				from:       f.candidate,
+				bps:        sample.BitsPerSecond,
+				totalBytes: sample.TotalBytes,
+				age:        sample.Age,
+				lowWindows: lowWindows,
+			})
+		}
 	}
 	untrusted := sample.untrusted || graceReason != ""
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
-	if !untrusted {
+	if !untrusted && mediaTarget {
 		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond, lowLoss || lowLatency)
 		if low {
 			f.group.invalidateTargetPreference(f.targetStateKey, member)
@@ -690,6 +712,10 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 			})
 			f.group.settleTargetHandoff(handoff, member, sample)
 		}
+	}
+	// PHASE1: a non-media flow is observed only; phase 2 will let it switch.
+	if !mediaTarget {
+		return nil
 	}
 	if lowWindows < config.lowWindows || sample.Age < config.minAge || sample.TotalBytes < config.minBytes {
 		return nil

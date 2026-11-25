@@ -312,9 +312,9 @@ func TestVaneMediaDemandBandwidthParsing(t *testing.T) {
 		_, err = parseDemand(t, "10X")
 		require.ErrorContains(t, err, "bandwidth")
 		_, err = parseDemand(t, int64(vaneMaximumMediaThroughputBPS)+1)
-		require.ErrorContains(t, err, "media-demand-bps must be between 0 and")
+		require.ErrorContains(t, err, "demand-bps must be between 0 and")
 		_, err = parseDemand(t, "2G")
-		require.ErrorContains(t, err, "media-demand-bps must be between 0 and")
+		require.ErrorContains(t, err, "demand-bps must be between 0 and")
 	})
 
 	t.Run("DEMAND-04 string and integer forms agree", func(t *testing.T) {
