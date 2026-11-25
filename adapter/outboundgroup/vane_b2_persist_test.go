@@ -11,7 +11,7 @@ import (
 
 func vaneB2SampleTarget(now time.Time, ema float64, loss, attempts, suspected int64) vanePersistedB2Target {
 	return vanePersistedB2Target{
-		Transport: "tcp", Scene: "media", TargetScope: "rr.googlevideo.com", Port: 443,
+		Transport: "tcp", TargetScope: "rr.googlevideo.com", Port: 443,
 		Candidate: "beta", Identity: "test:beta",
 		LossEMA: ema, LossSamples: loss, AttemptCount: attempts, SuspectedStallCount: suspected,
 		LastObservedAt: now,
@@ -59,12 +59,12 @@ func TestVaneB2TargetPersistenceValidation(t *testing.T) {
 
 	snapshot := source.snapshotLocked(clock.Now().UTC())
 	snapshot.Targets = append(snapshot.Targets,
-		vanePersistedB2Target{Transport: "tcp", Scene: "media", TargetScope: "x.example", Port: 443, Candidate: "", Identity: "i", AttemptCount: 1, LastObservedAt: now},
-		vanePersistedB2Target{Transport: "tcp", Scene: "media", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: 1, LastObservedAt: now, LossEMA: 1.5},
-		vanePersistedB2Target{Transport: "tcp", Scene: "media", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: -1, LastObservedAt: now},
-		vanePersistedB2Target{Transport: "quic", Scene: "media", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: 1, LastObservedAt: now},
-		vanePersistedB2Target{Transport: "tcp", Scene: "media", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: 1, LastObservedAt: now.Add(time.Hour)},
-		vanePersistedB2Target{Transport: "tcp", Scene: "media", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i"},
+		vanePersistedB2Target{Transport: "tcp", TargetScope: "x.example", Port: 443, Candidate: "", Identity: "i", AttemptCount: 1, LastObservedAt: now},
+		vanePersistedB2Target{Transport: "tcp", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: 1, LastObservedAt: now, LossEMA: 1.5},
+		vanePersistedB2Target{Transport: "tcp", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: -1, LastObservedAt: now},
+		vanePersistedB2Target{Transport: "quic", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: 1, LastObservedAt: now},
+		vanePersistedB2Target{Transport: "tcp", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i", AttemptCount: 1, LastObservedAt: now.Add(time.Hour)},
+		vanePersistedB2Target{Transport: "tcp", TargetScope: "x.example", Port: 443, Candidate: "beta", Identity: "i"},
 	)
 	payload, err := marshalVaneLearningSnapshot(snapshot)
 	require.NoError(t, err)

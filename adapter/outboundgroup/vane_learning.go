@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	VaneLearningSchemaVersion      = 1
+	VaneLearningSchemaVersion      = 2
 	vaneLearningRegistryLimit      = 256
 	vaneLearningPersistInterval    = 30 * time.Second
 	vaneLearningFutureSkew         = 5 * time.Minute
@@ -120,7 +120,6 @@ type vanePersistedNode struct {
 // telemetry, and must never resurrect.
 type vanePersistedB2Target struct {
 	Transport           string    `json:"transport"`
-	Scene               string    `json:"scene"`
 	TargetScope         string    `json:"targetScope"`
 	Port                uint16    `json:"port"`
 	Candidate           string    `json:"candidate"`
