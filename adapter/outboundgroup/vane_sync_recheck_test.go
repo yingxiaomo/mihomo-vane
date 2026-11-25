@@ -75,14 +75,15 @@ func TestVaneSyncRecheckRecoveredVetoesClose(t *testing.T) {
 	flow.lowWindows = 3
 	flow.mu.Unlock()
 	// The flow recovers before execution: a real fast window through observe()
-	// resets the streak (and clears the race token, RACE-06).
+	// decays the streak by one (STALL-STREAK) and clears the race token
+	// (RACE-06), which is enough to drop below the threshold and veto the close.
 	flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 12_000_000, TotalBytes: 8 * 1024 * 1024, Age: 60 * time.Second,
 	})
 	flow.mu.Lock()
 	lowAfter := flow.lowWindows
 	flow.mu.Unlock()
-	require.Zero(t, lowAfter, "the fast window must reset the streak")
+	require.Equal(t, 2, lowAfter, "the fast window decays the streak by one")
 
 	require.False(t, action(), "a recovered flow must not be closed")
 	group.mu.Lock()
@@ -132,7 +133,7 @@ func TestVaneSyncRecheckQueuedRecoveredRejected(t *testing.T) {
 		BitsPerSecond: 12_000_000, TotalBytes: 8 * 1024 * 1024, Age: 60 * time.Second,
 	})
 	flow.mu.Lock()
-	require.Zero(t, flow.lowWindows)
+	require.Equal(t, 2, flow.lowWindows, "the fast window decays the streak by one")
 	flow.mu.Unlock()
 
 	require.False(t, action())

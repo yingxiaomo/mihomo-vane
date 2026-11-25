@@ -1116,60 +1116,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 
 	a.mu.Lock()
 	a.learning.mu.Lock()
-	if commit && transport == vaneTransportTCP && scene == vaneSceneMedia {
-		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
-			if selected, handoff, source := a.takeTargetSelectionLocked(targetKey, compatible, now, claimHandoff); selected != nil {
-				state := a.ensureProxyNodeLocked(selected, now)
-				a.pruneLocked(now, proxies)
-				a.learning.markDirtyLocked(now)
-				a.learning.mu.Unlock()
-				a.mu.Unlock()
-				record := vaneDiagnosticRecord{
-					kind:      "handoff-reconnect-selected",
-					reason:    source,
-					target:    target,
-					bucket:    targetKey.targetScope,
-					port:      port,
-					to:        selected.Name(),
-					transport: vaneTransportTCP.String(),
-					scene:     vaneSceneMedia.String(),
-				}
-				if handoff != nil {
-					record.handoffID = handoff.id
-					record.leaseID = handoff.leaseID
-					record.from = handoff.from
-					record.previousBPS = handoff.previousBPS
-				}
-				a.diagnostics.record(record)
-				a.recordPickScoredSnapshot("target-hint", scene, transport, target, port, selected.Name(), state.snapshot(transport, now))
-				return vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
-			}
-		}
-		if hinted, handoff := a.takeMediaHintLocked(target, port, compatible, now, claimHandoff); hinted != nil {
-			state := a.ensureProxyNodeLocked(hinted, now)
-			a.pruneLocked(now, proxies)
-			a.learning.markDirtyLocked(now)
-			a.learning.mu.Unlock()
-			a.mu.Unlock()
-			targetKey := a.mediaTargetKey(target, port)
-			record := vaneDiagnosticRecord{
-				kind:   "handoff-selected",
-				target: target,
-				bucket: targetKey.target,
-				port:   port,
-				to:     hinted.Name(),
-			}
-			if handoff != nil {
-				record.handoffID = handoff.id
-				record.leaseID = handoff.leaseID
-				record.from = handoff.from
-				record.previousBPS = handoff.previousBPS
-			}
-			a.diagnostics.record(record)
-			a.recordPickScoredSnapshot("media-hint", scene, transport, target, port, hinted.Name(), state.snapshot(transport, now))
-			return vanePickDecision{proxy: hinted, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
-		}
-	}
 	ranked := make([]vaneRankedProxy, 0, len(compatible))
 	var capped []vaneRankedProxy
 	// The hash pool is only built when it can be used, and it is deliberately
@@ -1313,6 +1259,65 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					scene:     scene.String(),
 				})
 			}
+		}
+	}
+
+	// HASH-PIN-MEDIA: media target handoff runs after the pin, so an explicit
+	// hash pin wins over it. A handoff token is claimed only when the operator
+	// has not pinned this scope; otherwise the media path would silently
+	// override the pin on every reconnect inside the pinned rule set.
+	if pinned == nil && commit && transport == vaneTransportTCP && scene == vaneSceneMedia {
+		if targetKey, ok := a.targetKeyForMedia(target, port); ok {
+			if selected, handoff, source := a.takeTargetSelectionLocked(targetKey, compatible, now, claimHandoff); selected != nil {
+				state := a.ensureProxyNodeLocked(selected, now)
+				a.pruneLocked(now, proxies)
+				a.learning.markDirtyLocked(now)
+				a.learning.mu.Unlock()
+				a.mu.Unlock()
+				record := vaneDiagnosticRecord{
+					kind:      "handoff-reconnect-selected",
+					reason:    source,
+					target:    target,
+					bucket:    targetKey.targetScope,
+					port:      port,
+					to:        selected.Name(),
+					transport: vaneTransportTCP.String(),
+					scene:     vaneSceneMedia.String(),
+				}
+				if handoff != nil {
+					record.handoffID = handoff.id
+					record.leaseID = handoff.leaseID
+					record.from = handoff.from
+					record.previousBPS = handoff.previousBPS
+				}
+				a.diagnostics.record(record)
+				a.recordPickScoredSnapshot("target-hint", scene, transport, target, port, selected.Name(), state.snapshot(transport, now))
+				return vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
+			}
+		}
+		if hinted, handoff := a.takeMediaHintLocked(target, port, compatible, now, claimHandoff); hinted != nil {
+			state := a.ensureProxyNodeLocked(hinted, now)
+			a.pruneLocked(now, proxies)
+			a.learning.markDirtyLocked(now)
+			a.learning.mu.Unlock()
+			a.mu.Unlock()
+			targetKey := a.mediaTargetKey(target, port)
+			record := vaneDiagnosticRecord{
+				kind:   "handoff-selected",
+				target: target,
+				bucket: targetKey.target,
+				port:   port,
+				to:     hinted.Name(),
+			}
+			if handoff != nil {
+				record.handoffID = handoff.id
+				record.leaseID = handoff.leaseID
+				record.from = handoff.from
+				record.previousBPS = handoff.previousBPS
+			}
+			a.diagnostics.record(record)
+			a.recordPickScoredSnapshot("media-hint", scene, transport, target, port, hinted.Name(), state.snapshot(transport, now))
+			return vanePickDecision{proxy: hinted, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 		}
 	}
 

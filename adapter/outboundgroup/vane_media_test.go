@@ -461,7 +461,7 @@ func TestVaneMediaReconnectSafetyGates(t *testing.T) {
 		require.NoError(t, conn.Close())
 	})
 
-	t.Run("good window resets consecutive low count", func(t *testing.T) {
+	t.Run("good window decays consecutive low count", func(t *testing.T) {
 		clock := newVaneConnTestClock()
 		alpha := newVaneTestProxy("alpha", true, true)
 		beta := newVaneTestProxy("beta", true, true)
@@ -474,15 +474,17 @@ func TestVaneMediaReconnectSafetyGates(t *testing.T) {
 		require.Nil(t, flow.observe(low))
 		require.Nil(t, flow.observe(low))
 		require.Nil(t, flow.observe(high))
-		// P1 grace: lows within 30s of the fast sample are graced (not
-		// counted); past the grace the streak accumulates again.
+		// P1 grace: lows within 30s of the fast sample are graced; past the
+		// grace the streak accumulates again. A fast window decays the streak
+		// by one instead of resetting it, so a pulsing node still converges
+		// (STALL-STREAK).
 		clock.Advance(vaneMediaFastGrace + time.Second)
 		require.Nil(t, flow.observe(low))
 		require.Nil(t, flow.observe(low))
 		flow.mu.Lock()
 		count := flow.lowWindows
 		flow.mu.Unlock()
-		require.Equal(t, 2, count)
+		require.Equal(t, 3, count, "two lows, one decayed by the fast window, two more lows")
 	})
 }
 

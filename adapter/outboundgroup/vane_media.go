@@ -567,16 +567,30 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 		// §6 backlog: unwritten bytes on the connection are direct proof the
 		// client is behind, which is stronger than "it was fast recently", so
 		// it wins when both apply.
+		//
+		// STALL-STREAK: only client backlog excuses a low window from the
+		// streak. "recently-fast" still marks the window untrusted (no
+		// evidence is written) but no longer skips the count. A bursty node
+		// that delivers one fast window every 30s used to refresh the grace
+		// forever, so a flow that stalled between bursts never reached the
+		// switch threshold and the player stayed stuck on a half-dead node.
 		switch {
 		case !f.backloggedAt.IsZero() && now.Sub(f.backloggedAt) < 2*vaneMediaWatchdogTick:
 			graceReason = "client-backlog"
 		case !f.lastNonLowAt.IsZero() && now.Sub(f.lastNonLowAt) < vaneMediaFastGrace:
 			graceReason = "recently-fast"
+			f.lowWindows++
 		default:
 			f.lowWindows++
 		}
 	} else {
-		f.lowWindows = 0
+		// STALL-STREAK: decay instead of reset. A throughput pulse between
+		// two silent windows is not a recovery; zeroing the streak let a
+		// bursty node hold the flow indefinitely. A healthy flow never
+		// accumulates a low window, so decay only changes degraded paths.
+		if f.lowWindows > 0 {
+			f.lowWindows--
+		}
 		f.lastNonLowAt = now
 		// A recovered flow invalidates any in-flight race: its result belongs
 		// to the previous low-window streak, not the next one (RACE-06).
@@ -668,7 +682,14 @@ func (f *vaneMediaFlow) observe(sample vaneThroughputObservation) vanePolicyActi
 	}
 	creditBits := float64(sample.TotalBytes)*8 - config.demandBPS*sample.Age.Seconds()
 	guardBits := config.demandBPS * config.bufferGuard.Seconds()
-	if creditBits < guardBits && lowWindows < config.maxLowWindows {
+	// CREDIT-STALL: the credit is a lifetime average (bytes read so far minus
+	// what the demand line would have used), so it only answers "was this flow
+	// fast on average". A synthetic window is ten seconds of zero bytes: the
+	// node stopped delivering, and the credit earned during the fast part of
+	// its life must not buy it more patience. Letting it do so is how a
+	// connection that downloaded 754 MB and then died kept its slot until the
+	// streak reached maxLowWindows.
+	if !sample.synthetic && creditBits < guardBits && lowWindows < config.maxLowWindows {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:       "buffer-credit-deferred",
 			reason:     "buffer-credit",

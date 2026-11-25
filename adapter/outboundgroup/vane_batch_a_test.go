@@ -267,7 +267,9 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				}
 				flow.mu.Lock()
 				if source == "grace" {
-					require.Zero(t, flow.lowWindows)
+					// A graced window still counts once (STALL-STREAK); the
+					// grace only keeps the switch from firing on this window.
+					require.Equal(t, 1, flow.lowWindows)
 				} else {
 					require.Equal(t, 2, flow.lowWindows)
 					require.Equal(t, float64(1), flow.lastSample.BitsPerSecond)

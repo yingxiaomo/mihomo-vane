@@ -40,7 +40,10 @@ func vaneObservationLowSample() vaneThroughputObservation {
 	return vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}
 }
 
-// FAST-GRACE-01: preserve the original strict zero-streak assertion in both modes.
+// FAST-GRACE-01: a graced low still counts toward the streak, so a pulsing
+// node (one fast window every 30s, silence in between) can no longer defer the
+// switch forever. The grace only decides when the switch fires, it no longer
+// freezes the counter (STALL-STREAK).
 func TestVaneFastGraceDefersStreak(t *testing.T) {
 	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
 		t.Run(mode.String(), func(t *testing.T) {
@@ -52,10 +55,10 @@ func TestVaneFastGraceDefersStreak(t *testing.T) {
 				flow.mu.Lock()
 				count := flow.lowWindows
 				flow.mu.Unlock()
-				require.Zero(t, count, "graced lows must not accumulate")
+				require.Equal(t, i+1, count, "graced lows still count toward the streak")
 			}
 			require.Equal(t, 3, countVaneEvents(group, "low-window-graced", "recently-fast"))
-			require.Zero(t, countVaneEvents(group, "race-scheduled", ""))
+			require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""))
 		})
 	}
 }
@@ -69,12 +72,14 @@ func TestVaneFastGraceExpiresAndCloses(t *testing.T) {
 			clock.Advance(29 * time.Second)
 			require.Nil(t, flow.observe(vaneObservationLowSample()))
 			clock.Advance(time.Second)
-			for i := 0; i < 3; i++ {
+			// The graced low at 29s already counted, so the next two lows take
+			// the streak from 2 to 3 and reach the race gate.
+			for i := 0; i < 2; i++ {
 				require.Nil(t, flow.observe(vaneObservationLowSample()))
 				flow.mu.Lock()
 				count := flow.lowWindows
 				flow.mu.Unlock()
-				require.Equal(t, i+1, count)
+				require.Equal(t, i+2, count, "the graced low before the expiry already counted")
 			}
 			require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""))
 			require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "no-evidence-candidate"))
@@ -157,7 +162,9 @@ func TestVaneStallWatchdogSkipsInactiveFlows(t *testing.T) {
 	}
 }
 
-// WATCHDOG-03: synthetic lows obey recently-fast grace, in both modes.
+// WATCHDOG-03: synthetic lows obey recently-fast grace, in both modes. The
+// grace records the window but no longer freezes the streak (STALL-STREAK), so
+// a single synthetic window counts once instead of vanishing.
 func TestVaneStallWatchdogRespectsGrace(t *testing.T) {
 	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
 		t.Run(mode.String(), func(t *testing.T) {
@@ -168,8 +175,9 @@ func TestVaneStallWatchdogRespectsGrace(t *testing.T) {
 			flow.mu.Lock()
 			count := flow.lowWindows
 			flow.mu.Unlock()
-			require.Zero(t, count)
+			require.Equal(t, 1, count, "a graced synthetic window still counts once")
 			require.Equal(t, 1, countVaneEvents(group, "low-window-graced", "recently-fast"))
+			require.Zero(t, countVaneEvents(group, "race-scheduled", ""), "one window is far below the threshold")
 		})
 	}
 }
@@ -259,4 +267,45 @@ func TestVaneUntrustedHighSampleDoesNotRefreshPreference(t *testing.T) {
 			group.mu.Unlock()
 		})
 	}
+}
+
+// STALL-STREAK-01: a node that alternates one fast burst with silence no longer
+// resets the streak, so a pulsing but stalled node still reaches the switch.
+// This is the live rr4 case: a 30Mbps burst every 30s kept the flow graced for
+// minutes while the stream itself never resumed.
+func TestVaneMediaPulsingNodeStillTriggers(t *testing.T) {
+	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	fast := vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}
+	for i := 0; i < 2; i++ {
+		require.Nil(t, flow.observe(fast))
+		require.Nil(t, flow.observe(vaneObservationLowSample()))
+		require.Nil(t, flow.observe(vaneObservationLowSample()))
+	}
+	flow.mu.Lock()
+	count := flow.lowWindows
+	flow.mu.Unlock()
+	require.Equal(t, 3, count, "each fast window decays one low, the two lows after it add them back")
+	require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""))
+}
+
+// CREDIT-STALL-01: a synthetic (zero-byte) window must not be deferred by the
+// cumulative buffer credit earned before the stream stopped. A connection that
+// downloaded a lot early shows a large negative credit once it goes silent, and
+// the old gate read that as "buffer still has slack" and waited forever.
+func TestVaneMediaSyntheticWindowIgnoresBufferCredit(t *testing.T) {
+	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	// 2MiB in 20s is far below the 1Mbps demand, so creditBits is negative.
+	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 2 * 1024 * 1024, Age: 20 * time.Second}))
+	flow.mu.Lock()
+	flow.lowWindows = 2
+	flow.mu.Unlock()
+
+	clock.Advance(vaneMediaStallSilence)
+	group.runMediaWatchdogTick(clock.Now())
+
+	require.Zero(t, countVaneEvents(group, "buffer-credit-deferred", ""),
+		"a synthetic window must not be deferred by stale credit")
+	flow.mu.Lock()
+	require.Equal(t, 3, flow.lowWindows, "the synthetic window still counts")
+	flow.mu.Unlock()
 }
