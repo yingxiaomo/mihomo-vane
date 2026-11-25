@@ -1178,7 +1178,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				until = mediaUntil
 			}
 		}
-		parts := scoreVaneMetricsParts(scene, snapshot)
+		parts := scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot)
 		// Computed before the literal: a candidate that goes to `capped` must
 		// carry hardCapped into the pool too, otherwise the pin would happily
 		// select a node the latency cap just excluded.
@@ -1554,7 +1554,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 // recordPickScoredSnapshot covers the sticky early returns that never reach the
 // ranking loop: without it a media flow served from target memory logs nothing.
 func (a *Vane) recordPickScoredSnapshot(reason string, scene vaneScene, transport vaneTransport, target string, port uint16, name string, snapshot vaneMetricsSnapshot) {
-	parts := scoreVaneMetricsParts(scene, snapshot)
+	parts := scoreVaneMetricsPartsWith(vaneScoringFlat(), snapshot)
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind: "pick-scored", reason: reason, target: target, port: port,
 		transport: transport.String(), scene: scene.String(),
