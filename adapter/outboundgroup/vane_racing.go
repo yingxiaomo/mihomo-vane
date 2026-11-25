@@ -20,7 +20,10 @@ import (
 )
 
 const (
-	vaneDefaultRacingURL          = "https://speed.cloudflare.com/__down?bytes=4194304"
+	// RACE-TARGET: probe a Google CDN large file, not Cloudflare. Free nodes
+	// measured 30Mbps to Cloudflare but only 5-20Mbps to Google, so a
+	// Cloudflare probe picked nodes that cannot actually feed YouTube.
+	vaneDefaultRacingURL          = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 	vaneDefaultRacingBudgetMBHour = int64(64)
 	vaneRacingProbeByteCap        = int64(4 * 1024 * 1024)
 	vaneRacingProbeTimeout        = 4 * time.Second
