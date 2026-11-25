@@ -231,7 +231,7 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 	require.Empty(t, group.commitMediaReconnectDetailed(plan))
 
 	group.mu.Lock()
-	require.True(t, group.mediaReconnects[metadataKey].After(clock.Now()), "commit writes the reconnect cooldown")
+	require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "commit writes the reconnect cooldown")
 	group.mu.Unlock()
 
 	// NOGAIN-01: the settle lands on the switched-to flow (member = beta);
@@ -244,7 +244,7 @@ func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 		BitsPerSecond: 1_500_000, TotalBytes: 8 * 1024 * 1024, Age: 30 * time.Second,
 	})
 	group.mu.Lock()
-	_, reconnected := group.mediaReconnects[metadataKey]
+	_, reconnected := group.mediaReconnects[vaneMediaNodeKeyFor(metadataKey, plan.current)]
 	require.False(t, reconnected, "no-gain must release the reconnect cooldown")
 	slowUntil := group.mediaSlowCooldowns[vaneMediaCandidateKey{
 		vaneMediaTargetKey: metadataKey, candidate: beta.Name(), identity: beta.identity,
@@ -276,7 +276,7 @@ func TestVaneImprovedKeepsReconnectCooldown(t *testing.T) {
 	})
 
 	group.mu.Lock()
-	require.True(t, group.mediaReconnects[metadataKey].After(clock.Now()), "improved keeps the reconnect cooldown")
+	require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(metadataKey, plan.current)].After(clock.Now()), "improved keeps the reconnect cooldown")
 	group.mu.Unlock()
 	require.Positive(t, group.VaneDiagnostics().Counters.HandoffImproved)
 }
@@ -822,7 +822,7 @@ func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
 func TestVaneStarvedFlowBypassesReconnectCooldown(t *testing.T) {
 	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
 	group.mu.Lock()
-	group.mediaReconnects[flow.targetKey] = clock.Now().Add(time.Minute)
+	group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)] = clock.Now().Add(time.Minute)
 	group.mu.Unlock()
 
 	// Credit stays above the guard: the streak reaches the line, and the armed

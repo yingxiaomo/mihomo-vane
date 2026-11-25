@@ -213,6 +213,21 @@ type vaneMediaCandidateKey struct {
 	identity  string
 }
 
+// vaneMediaNodeKey scopes a cooldown or budget to (target, node) instead of the
+// whole target. NODE-SCOPE: one slow node must be punished alone — a target is
+// usually shared by many concurrent player connections, and a domain-wide
+// quota let one bad node burn the whole budget for every other connection on
+// the same target (the field symptom: five rejections with reason
+// budget-exhausted while three connections sat dead on one node).
+type vaneMediaNodeKey struct {
+	vaneMediaTargetKey
+	candidate string
+}
+
+func vaneMediaNodeKeyFor(targetKey vaneMediaTargetKey, candidate string) vaneMediaNodeKey {
+	return vaneMediaNodeKey{vaneMediaTargetKey: targetKey, candidate: candidate}
+}
+
 type vaneMediaHint struct {
 	candidate string
 	identity  string
@@ -956,6 +971,55 @@ func (f *vaneMediaFlow) policyActionForPlan(plan vaneMediaPlan, sample vaneThrou
 		f.aborted = true
 		f.mu.Unlock()
 		log.Infoln("Vane: media reconnect target=%s:%d bucket=%s from=%s to=%s bps=%.0f low-windows=%d", f.target, f.port, f.targetKey.target, f.candidate, plan.challenger, sample.BitsPerSecond, lowWindows)
+		// FANOUT: the switch must cancel every sibling flow on the same target
+		// that is still pinned to the node we just left. A player streams a
+		// video over several concurrent connections; closing only the flow
+		// that happened to trip the watchdog leaves the others stalled on the
+		// same slow node, which is exactly what "switched but still stuck"
+		// looked like in the field. Siblings are closed, never committed: the
+		// budget, cooldown and hint are already written by this commit.
+		for _, sibling := range f.group.mediaSiblingFlows(plan.targetKey, f.candidate, f) {
+			sibling.submitPolicyAction(sibling.siblingCloseAction(plan, sample), true)
+		}
+		return true
+	}
+}
+
+// mediaSiblingFlows snapshots the other active flows for the same target that
+// are still on candidate, so a committed switch can close them too.
+func (a *Vane) mediaSiblingFlows(targetKey vaneMediaTargetKey, candidate string, exclude *vaneMediaFlow) []*vaneMediaFlow {
+	if a == nil {
+		return nil
+	}
+	a.mediaFlowsMu.Lock()
+	defer a.mediaFlowsMu.Unlock()
+	var siblings []*vaneMediaFlow
+	for flow := range a.mediaFlowSet {
+		if flow == exclude || flow == nil {
+			continue
+		}
+		if flow.targetKey != targetKey || flow.candidate != candidate {
+			continue
+		}
+		siblings = append(siblings, flow)
+	}
+	return siblings
+}
+
+// siblingCloseAction closes a flow without running the commit again. The
+// per-flow view is re-checked under the lock so a flow that already recovered,
+// closed or committed is left alone.
+func (f *vaneMediaFlow) siblingCloseAction(plan vaneMediaPlan, sample vaneThroughputObservation) vanePolicyAction {
+	return func() bool {
+		f.mu.Lock()
+		if f.aborted || f.closed {
+			f.mu.Unlock()
+			return false
+		}
+		f.aborted = true
+		target, port, from, low := f.target, f.port, f.candidate, f.lowWindows
+		f.mu.Unlock()
+		log.Infoln("Vane: media reconnect sibling target=%s:%d bucket=%s from=%s to=%s bps=%.0f low-windows=%d", target, port, plan.targetKey.target, from, plan.challenger, sample.BitsPerSecond, low)
 		return true
 	}
 }
@@ -1131,8 +1195,8 @@ type vaneMediaPlan struct {
 // the current flow is back below the low line and the break window has elapsed
 // since the switch that armed the cooldown, one retry is allowed. The caller
 // still has to pass the challenger evidence bar and the budget.
-func (a *Vane) mediaCooldownBlocksLocked(targetKey vaneMediaTargetKey, currentBPS float64, now time.Time) bool {
-	until := a.mediaReconnects[targetKey]
+func (a *Vane) mediaCooldownBlocksLocked(key vaneMediaNodeKey, currentBPS float64, now time.Time) bool {
+	until := a.mediaReconnects[key]
 	if !until.After(now) {
 		return false
 	}
@@ -1259,10 +1323,11 @@ func (a *Vane) prepareMediaReconnectForNodeDetailedSkipCooldown(targetKey vaneMe
 	a.pruneMediaLocked(now)
 	// §E: the valve's re-run carries its own skip flag — the cooldown it would
 	// hit was written by the very commit being re-evaluated.
-	if !skipReconnectCooldown && a.mediaCooldownBlocksLocked(targetKey, currentBPS, now) {
+	currentNodeKey := vaneMediaNodeKeyFor(targetKey, current)
+	if !skipReconnectCooldown && a.mediaCooldownBlocksLocked(currentNodeKey, currentBPS, now) {
 		return vaneMediaPlan{}, "reconnect-cooldown"
 	}
-	budget := a.mediaBudgets[targetKey]
+	budget := a.mediaBudgets[currentNodeKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
 		budget = vaneMediaBudget{startedAt: now}
 	}
@@ -1466,7 +1531,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 	if now.Sub(plan.preparedAt) > a.media.hintTTL {
 		return "plan-expired"
 	}
-	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(plan.targetKey, plan.currentBPS, now) {
+	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(vaneMediaNodeKeyFor(plan.targetKey, plan.current), plan.currentBPS, now) {
 		return "reconnect-cooldown"
 	}
 	dialKey := vaneCooldownKey{transport: vaneTransportTCP, target: plan.target, port: plan.port, candidate: plan.challenger, identity: plan.challengerIdentity}
@@ -1533,7 +1598,8 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 	if reason := a.checkChallengerEvidenceLocked(plan, capSnapshot, now); reason != "" {
 		return reason
 	}
-	budget := a.mediaBudgets[plan.targetKey]
+	budgetKey := vaneMediaNodeKeyFor(plan.targetKey, plan.current)
+	budget := a.mediaBudgets[budgetKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
 		budget = vaneMediaBudget{startedAt: now}
 	}
@@ -1541,7 +1607,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		return "budget-exhausted"
 	}
 	budget.count++
-	a.mediaBudgets[plan.targetKey] = budget
+	a.mediaBudgets[budgetKey] = budget
 	currentKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.current, identity: plan.identity}
 	a.mediaSlowCooldowns[currentKey] = now.Add(a.media.slowCooldown)
 	handoff := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
@@ -1565,7 +1631,7 @@ func (a *Vane) commitMediaReconnectDetailed(plan vaneMediaPlan) string {
 		expiresAt: now.Add(a.media.hintTTL),
 		handoff:   handoff,
 	}
-	a.mediaReconnects[plan.targetKey] = now.Add(a.media.reconnectCooldown)
+	a.mediaReconnects[vaneMediaNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.media.reconnectCooldown)
 	return ""
 }
 

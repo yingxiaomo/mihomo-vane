@@ -683,7 +683,7 @@ func TestVaneMediaCommitRejectsChallengerThatFailedAfterPrepare(t *testing.T) {
 	group.mu.Lock()
 	_, hinted := group.mediaHints[key]
 	_, slowed := group.mediaSlowCooldowns[vaneMediaCandidateKey{vaneMediaTargetKey: key, candidate: "alpha"}]
-	budget := group.mediaBudgets[key]
+	budget := group.mediaBudgets[vaneMediaNodeKeyFor(key, "alpha")]
 	group.mu.Unlock()
 	require.False(t, hinted)
 	require.False(t, slowed)
@@ -749,7 +749,7 @@ func TestVaneMediaFixedPolicyBoundaries(t *testing.T) {
 	key := group.mediaTargetKey(host, 443)
 	require.NotEmpty(t, key.target)
 	group.mediaHints[key] = vaneMediaHint{expiresAt: now}
-	group.mediaBudgets[key] = vaneMediaBudget{startedAt: now.Add(-group.media.budgetWindow), count: group.media.budgetMax}
+	group.mediaBudgets[vaneMediaNodeKeyFor(key, "alpha")] = vaneMediaBudget{startedAt: now.Add(-group.media.budgetWindow), count: group.media.budgetMax}
 	candidate := vaneMediaCandidateKey{vaneMediaTargetKey: key, candidate: "alpha"}
 	group.mediaSlowCooldowns[candidate] = now
 	require.True(t, group.mediaCooldownUntilLocked(host, 443, "alpha", now).IsZero())

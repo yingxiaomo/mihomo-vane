@@ -99,7 +99,7 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			require.Zero(t, snapshot.Counters.ReconnectCommitted)
 			key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
 			group.mu.Lock()
-			require.Zero(t, group.mediaBudgets[key].count)
+			require.Zero(t, group.mediaBudgets[vaneMediaNodeKeyFor(key, alpha.Name())].count)
 			_, hinted := group.mediaHints[key]
 			_, cooled := group.mediaSlowCooldowns[vaneMediaCandidateKey{
 				vaneMediaTargetKey: key, candidate: alpha.Name(), identity: alpha.identity,
@@ -253,7 +253,7 @@ func TestVaneChain01CommitEvidenceRecheck(t *testing.T) {
 		require.Equal(t, "challenger-no-evidence", group.commitMediaReconnectDetailed(plan))
 		group.mu.Lock()
 		key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-		require.Zero(t, group.mediaBudgets[key].count)
+		require.Zero(t, group.mediaBudgets[vaneMediaNodeKeyFor(key, alpha.Name())].count)
 		group.mu.Unlock()
 	})
 

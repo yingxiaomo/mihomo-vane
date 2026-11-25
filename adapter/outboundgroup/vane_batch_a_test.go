@@ -147,7 +147,7 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 				require.Equal(t, 1, closes, "async callback closes without another low window")
 				group.mu.Lock()
 				require.Len(t, group.targetHandoffs, 1)
-				require.True(t, group.mediaReconnects[group.mediaTargetKey(metadata.Host, metadata.DstPort)].After(clock.Now()))
+				require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(group.mediaTargetKey(metadata.Host, metadata.DstPort), alpha.Name())].After(clock.Now()))
 				group.mu.Unlock()
 			}
 		})
@@ -253,7 +253,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				failure := vaneTargetFailureState{capBPS: 12_000_000, capSamples: 2, capAt: clock.Now(), lossSamples: 3, attemptCount: 4, suspectedStallCount: 1}
 				group.targetFailures[failureKey] = failure
 				lease := group.targetHandoffs[key]
-				cooldown := group.mediaReconnects[flow.targetKey]
+				cooldown := group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)]
 				slowKey := vaneMediaCandidateKey{vaneMediaTargetKey: flow.targetKey, candidate: member.name, identity: member.identity}
 				slowCount := len(group.mediaSlowCooldowns)
 				group.mu.Unlock()
@@ -282,7 +282,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.Equal(t, failure, group.targetFailures[failureKey], "capBPS and B2 telemetry unchanged")
 				require.Equal(t, lease, group.targetHandoffs[key])
 				require.True(t, lease.expiresAt.After(clock.Now()), "the untrusted window arrives while the claimed lease is still valid")
-				require.Equal(t, cooldown, group.mediaReconnects[flow.targetKey])
+				require.Equal(t, cooldown, group.mediaReconnects[vaneMediaNodeKeyFor(flow.targetKey, flow.candidate)])
 				require.Equal(t, slowCount, len(group.mediaSlowCooldowns))
 				require.Zero(t, group.mediaSlowCooldowns[slowKey])
 				group.mu.Unlock()

@@ -68,11 +68,11 @@ func valveEventCount(t *testing.T, group *Vane) int {
 // better-evidenced candidate and the early close commits WITHOUT hitting the
 // reconnect cooldown the original commit wrote.
 func TestVaneValveClosesToBetterEvidence(t *testing.T) {
-	group, clock, _, beta, gamma, flow, observed, _, _, mediaKey := newValveRig(t, 2_000_000)
+	group, clock, alpha, beta, gamma, flow, observed, _, _, mediaKey := newValveRig(t, 2_000_000)
 	seedChain01Traffic(t, group, gamma.Name(), clock.Now(), 12_000_000)
 
 	group.mu.Lock()
-	require.True(t, group.mediaReconnects[mediaKey].After(clock.Now()), "the original commit wrote the cooldown")
+	require.True(t, group.mediaReconnects[vaneMediaNodeKeyFor(mediaKey, alpha.Name())].After(clock.Now()), "the original commit wrote the cooldown")
 	group.mu.Unlock()
 
 	flow.noteEmptyWindow()

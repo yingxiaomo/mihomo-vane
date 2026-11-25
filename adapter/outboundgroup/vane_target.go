@@ -523,7 +523,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	}
 	// §E: valve plans skip the cooldown they are re-evaluating (no valve plan
 	// reaches the target commit today, but the flag rides the shared plan).
-	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(plan.targetKey, plan.currentBPS, now) {
+	if !plan.skipReconnectCooldown && a.mediaCooldownBlocksLocked(vaneMediaNodeKeyFor(plan.targetKey, plan.current), plan.currentBPS, now) {
 		return "reconnect-cooldown"
 	}
 	to := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: challengerState.epoch}
@@ -556,7 +556,8 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 	if reason := a.checkChallengerEvidenceLocked(plan, capSnapshot, now); reason != "" {
 		return reason
 	}
-	budget := a.mediaBudgets[plan.targetKey]
+	budgetKey := vaneMediaNodeKeyFor(plan.targetKey, plan.current)
+	budget := a.mediaBudgets[budgetKey]
 	if budget.startedAt.IsZero() || !budget.startedAt.Add(a.media.budgetWindow).After(now) {
 		budget = vaneMediaBudget{startedAt: now}
 	}
@@ -564,7 +565,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		return "budget-exhausted"
 	}
 	budget.count++
-	a.mediaBudgets[plan.targetKey] = budget
+	a.mediaBudgets[budgetKey] = budget
 	from := vaneMemberLease{name: plan.current, identity: plan.identity, epoch: plan.nodeEpoch}
 	currentKey := vaneMediaCandidateKey{vaneMediaTargetKey: plan.targetKey, candidate: plan.current, identity: plan.identity}
 	a.mediaSlowCooldowns[currentKey] = now.Add(a.media.slowCooldown)
@@ -610,7 +611,7 @@ func (a *Vane) commitTargetHandoff(plan vaneMediaPlan) string {
 		updatedAt: now,
 		token:     token,
 	}
-	a.mediaReconnects[plan.targetKey] = now.Add(a.media.reconnectCooldown)
+	a.mediaReconnects[vaneMediaNodeKeyFor(plan.targetKey, plan.current)] = now.Add(a.media.reconnectCooldown)
 	return ""
 }
 
@@ -674,7 +675,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 		// commit must not keep blocking re-evaluation for this target. The 30
 		// minute slow cooldown above still stops this same candidate from
 		// being picked again; the two cooldowns guard different things.
-		delete(a.mediaReconnects, legacyKey.vaneMediaTargetKey)
+		delete(a.mediaReconnects, vaneMediaNodeKeyFor(legacyKey.vaneMediaTargetKey, token.from))
 	}
 	// §A: fold the settlement's real-traffic sample into the (target, member)
 	// record — the per-target capability observation, record-only for now.

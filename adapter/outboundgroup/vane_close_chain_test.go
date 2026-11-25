@@ -119,7 +119,7 @@ func TestVaneTargetCommitSynthesizesTokenWhenDiagnosticsUnavailable(t *testing.T
 	require.Equal(t, plan.current, lease.token.from)
 	require.Equal(t, plan.challenger, lease.token.to)
 	require.Equal(t, plan.currentBPS, lease.token.previousBPS)
-	require.Equal(t, 1, group.mediaBudgets[plan.targetKey].count)
+	require.Equal(t, 1, group.mediaBudgets[vaneMediaNodeKeyFor(plan.targetKey, plan.current)].count)
 	_, slow := group.mediaSlowCooldowns[vaneMediaCandidateKey{
 		vaneMediaTargetKey: plan.targetKey,
 		candidate:          plan.current,
@@ -992,7 +992,7 @@ func TestVaneReconnectCooldownBreaksForStarvingFlow(t *testing.T) {
 		}
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		key := group.mediaTargetKey(metadata.Host, metadata.DstPort)
-		group.mediaReconnects[key] = now.Add(group.media.reconnectCooldown)
+		group.mediaReconnects[vaneMediaNodeKeyFor(key, alpha.Name())] = now.Add(group.media.reconnectCooldown)
 		group.learning.mu.Unlock()
 		group.mu.Unlock()
 		return group, clock, metadata, key, beta

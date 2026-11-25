@@ -326,9 +326,9 @@ type Vane struct {
 	anchors            map[vaneAnchorKey]vaneAnchor
 	cooldowns          map[vaneCooldownKey]time.Time
 	mediaHints         map[vaneMediaTargetKey]vaneMediaHint
-	mediaReconnects    map[vaneMediaTargetKey]time.Time
+	mediaReconnects    map[vaneMediaNodeKey]time.Time
 	mediaSlowCooldowns map[vaneMediaCandidateKey]time.Time
-	mediaBudgets       map[vaneMediaTargetKey]vaneMediaBudget
+	mediaBudgets       map[vaneMediaNodeKey]vaneMediaBudget
 	targetHandoffs     map[vaneTargetKey]vaneHandoffLease
 	targetPreferences  map[vaneTargetKey]vaneTargetPreference
 	targetEvidence     map[vaneTargetEvidenceKey]vaneTargetEvidence
@@ -474,9 +474,9 @@ func newVaneWithClock(
 		anchors:            make(map[vaneAnchorKey]vaneAnchor),
 		cooldowns:          make(map[vaneCooldownKey]time.Time),
 		mediaHints:         make(map[vaneMediaTargetKey]vaneMediaHint),
-		mediaReconnects:    make(map[vaneMediaTargetKey]time.Time),
+		mediaReconnects:    make(map[vaneMediaNodeKey]time.Time),
 		mediaSlowCooldowns: make(map[vaneMediaCandidateKey]time.Time),
-		mediaBudgets:       make(map[vaneMediaTargetKey]vaneMediaBudget),
+		mediaBudgets:       make(map[vaneMediaNodeKey]vaneMediaBudget),
 		targetHandoffs:     make(map[vaneTargetKey]vaneHandoffLease),
 		targetPreferences:  make(map[vaneTargetKey]vaneTargetPreference),
 		targetEvidence:     make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
@@ -1872,12 +1872,41 @@ func (a *Vane) observeThroughputEpochIdentity(candidate, identity string, nodeEp
 	}
 	state.metrics(transport).observeThroughput(now, bitsPerSecond)
 	state.recordMaxRate(now, bitsPerSecond)
+	var demoteLease vaneMemberLease
 	if transport == vaneTransportTCP && a.nodeIdentityIsCurrentLocked(candidate, identity) {
 		a.ensureNodeControlLocked(candidate, now).recentTCPThroughput = vaneRecentThroughput{bitsPerSecond: bitsPerSecond, observedAt: now}
+		demoteLease = vaneMemberLease{name: candidate, identity: identity, epoch: nodeEpoch}
 	}
 	a.learning.markDirtyLocked(now)
 	a.learning.mu.Unlock()
 	a.mu.Unlock()
+	if demoteLease.name != "" {
+		a.demoteProbeCapabilityLease(demoteLease, bitsPerSecond, now)
+	}
+}
+
+// PROBE-GAP: a race probe only proves a node can move bytes; it can read far
+// higher than the node actually delivers on a real connection (a probe once
+// claimed 38 Mbps on a node that then delivered 0.4 Mbps). When real traffic
+// comes in at less than half the probe claim, lower the stored capability to
+// what was actually observed, so later admissions stop trusting the probe.
+func (a *Vane) demoteProbeCapabilityLease(lease vaneMemberLease, observedBPS float64, now time.Time) {
+	if a == nil || observedBPS <= 0 {
+		return
+	}
+	a.racingRuntime.mu.Lock()
+	defer a.racingRuntime.mu.Unlock()
+	rec, ok := a.racingRuntime.capabilities[lease]
+	if !ok {
+		lease.epoch = 0
+		rec, ok = a.racingRuntime.capabilities[lease]
+	}
+	if ok && rec.lowerBoundBPS > 2*observedBPS {
+		rec.lowerBoundBPS = observedBPS
+		rec.bytes = 0
+		rec.observedAt = now
+		a.racingRuntime.capabilities[lease] = rec
+	}
 }
 
 type vanePersistentIdentityProxy interface {
