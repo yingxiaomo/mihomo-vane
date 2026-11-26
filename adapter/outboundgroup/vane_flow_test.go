@@ -1281,4 +1281,122 @@ func TestVaneSmallFlowDoesNotPayForAProbe(t *testing.T) {
 	require.Zero(t, countVaneEvents(group, "race-scheduled", ""),
 		"a keep-alive-sized flow must be rescued by its score, never by a probe")
 	require.Zero(t, probes, "no probe may be spent on a keep-alive-sized flow")
+	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "small-flow-no-known-good"),
+		"a small flow with no known-good challenger must say so instead of probing")
+}
+
+// P0: a UDP pick against a pool where no node supports UDP skips every
+// candidate, so both ranked and capped come back empty. That early return used
+// to leave a.mu and a.learning.mu held, which deadlocks the whole group. A
+// second pick completing is the proof that the locks were released.
+func TestVaneUDPWithoutAnyCapableNodeDoesNotLeakLocks(t *testing.T) {
+	clock := newVaneConnTestClock()
+	alpha := newVaneTestProxy("alpha", true, false)
+	beta := newVaneTestProxy("beta", true, false)
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
+	t.Cleanup(func() { _ = group.Close() })
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+
+	meta := &C.Metadata{Host: "rr-udp.googlevideo.com", DstPort: 443, NetWork: C.UDP}
+	buried := make(chan string, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					buried <- ""
+				}
+			}()
+			buried <- group.pick(meta, vaneTransportUDP, true, true).Name()
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-buried:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("UDP pick %d blocked: the empty-ranked early return leaked a.mu/a.learning.mu", i)
+		}
+	}
+}
+
+// The threshold is strict: a flow that has moved exactly minBytes is no longer
+// small, because the floor exists to separate "the request is tiny" from "the
+// node is slow", and a flow at the bar has already proven it can move data.
+func TestVaneSmallFlowThreshold(t *testing.T) {
+	config := vaneFlowConfig{minBytes: 2 * 1024 * 1024}
+	cases := []struct {
+		name   string
+		bytes  int64
+		expect bool
+	}{
+		{"well under the bar", 0, true},
+		{"one byte under the bar", config.minBytes - 1, true},
+		{"exactly at the bar", config.minBytes, false},
+		{"one byte over the bar", config.minBytes + 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := smallFlow(vaneThroughputObservation{TotalBytes: tc.bytes}, config)
+			require.Equal(t, tc.expect, got)
+		})
+	}
+}
+
+// Observe mode does not switch, but it must still report what live mode would
+// decide: a small flow that skips the probe cannot be indistinguishable from a
+// flow that never triggered a decision.
+func TestVaneSmallFlowSkipsTheProbeInObserveMode(t *testing.T) {
+	clock := newVaneConnTestClock()
+	fill := func(payload []byte) (int, error) {
+		for i := range payload {
+			payload[i] = 1
+		}
+		return len(payload), nil
+	}
+	alpha := newVaneTestProxy("alpha", true, true)
+	alpha.delay = 20
+	alpha.dialConn = &vaneConnTestConn{readFunc: fill}
+	beta := newVaneTestProxy("beta", true, true)
+	beta.delay = 10
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneSwitchForTest(t, group, vaneSwitchObserve)
+	chain01ProductionValues(t, group, 10_000_000)
+	t.Cleanup(func() { _ = group.Close() })
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	probes := 0
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probes++
+		return vaneProbeResult{
+			valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
+			duration: time.Second, lowerBoundBPS: 6_000_000, capHit: true,
+		}
+	}
+
+	metadata := &C.Metadata{Host: "rr-observe-small.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	first, err := group.DialContext(t.Context(), metadata)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = first.Close() })
+	observed := first.(*vaneObservedConn)
+	reader, counters := observed.UnwrapReader()
+	payload := make([]byte, 64*1024)
+	for i := 0; i < 20; i++ {
+		clock.Advance(time.Second)
+		n, err := reader.Read(payload)
+		require.NoError(t, err)
+		for _, counter := range counters {
+			counter(int64(n))
+		}
+	}
+	clock.Advance(vaneStallToleranceMin)
+	group.runFlowWatchdogTick(clock.Now())
+
+	require.Zero(t, probes, "observe mode must not spend a probe on a small flow")
+	require.Zero(t, countVaneEvents(group, "race-scheduled", ""),
+		"observe mode must not schedule a race for a small flow")
+	require.Equal(t, 1, countVaneEvents(group, "small-flow-probe-skipped", ""),
+		"observe mode must leave a trace when it skips the probe")
+	require.Zero(t, countVaneEvents(group, "reconnect-committed", ""),
+		"observe mode never commits a handoff")
 }

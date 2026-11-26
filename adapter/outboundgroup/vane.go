@@ -1216,6 +1216,10 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	// no UDP-capable node), leaving both queues empty. Degrade instead of
 	// indexing an empty slice.
 	if len(ranked) == 0 {
+		// The two locks taken above are still held here: release them before
+		// degrading, or the whole group deadlocks silently.
+		a.learning.mu.Unlock()
+		a.mu.Unlock()
 		return vanePickDecision{proxy: a.EmptyFallback()}
 	}
 	if commit && len(capped) > 0 {

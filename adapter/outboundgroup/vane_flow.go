@@ -932,10 +932,6 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// SWITCH-EVIDENCE: below this many bytes a low rate is the request being
 	// small, not the node being slow. Target scopes keep the older, lower
 	// floor because a video flow proves itself by growing quickly.
-	// LOW-VOLUME: a phone segment can stall at a few hundred kilobytes before
-	// it ever gets a target scope, so the synthetic stall exemption has to
-	// bypass this gate as well — otherwise the 8 MiB floor alone keeps the
-	// mobile player stuck on a dead node.
 	// TARGET-SCOPED: a flow the config never named as a switch candidate has no
 	// business being reconnected on a few hundred kilobytes. Its silence is a
 	// keep-alive going idle (HTTP/2 to an API host), not a stalled segment, and
@@ -992,6 +988,15 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 		}
 		if reason != "" || !plan.knownGood {
 			if smallFlow(sample, f.group.flow) {
+				// SMALL-FLOW: observe mode must still report what live mode
+				// would decide. A small flow skips the probe, so record the
+				// skip instead of returning with no trace.
+				f.group.diagnostics.record(vaneDiagnosticRecord{
+					kind: "small-flow-probe-skipped", reason: reason, target: f.target,
+					bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
+					bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes, age: sample.Age,
+					lowWindows: lowWindows,
+				})
 				return nil
 			}
 			f.scheduleRace(sample, lowWindows)
@@ -1008,7 +1013,7 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	}
 	// SMALL-FLOW: a flow carrying a few hundred bytes cannot fund a probe.
 	// The scores already carry real traffic, so rescue it with the ranked
-	// challenger instead of spending 8-12 MB to prove what they say. Without
+	// challenger instead of spending up to 8 MB to prove what they say. Without
 	// a ranked challenger, leave the small flow alone.
 	if smallFlow(sample, f.group.flow) {
 		if reason == "" {
@@ -1023,7 +1028,7 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 }
 
 // smallFlow reports whether a flow has moved too few bytes for a probe to be
-// worth its bytes. One probe costs 8-12 MB across the candidates; a keep-alive
+// worth its bytes. One probe costs up to 8 MB across the candidates; a keep-alive
 // connection carrying a few hundred bytes cannot pay for that, and its score
 // already comes from the same real traffic.
 func smallFlow(sample vaneThroughputObservation, config vaneFlowConfig) bool {
