@@ -828,7 +828,9 @@ func TestVaneStarvedFlowBypassesReconnectCooldown(t *testing.T) {
 	// Credit stays above the guard: the streak reaches the line, and the armed
 	// cooldown still refuses the close.
 	for i := 0; i < vaneDefaultLowWindows; i++ {
-		clock.Advance(5 * time.Second)
+		// Stay inside the observation window: this case is about the cooldown,
+		// not about waiting the window out.
+		clock.Advance(3 * time.Second)
 		require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
 	}
 	require.Equal(t, 1, countVaneEvents(group, "reconnect-suppressed", "switch-observing"),

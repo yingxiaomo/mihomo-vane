@@ -28,7 +28,7 @@ const (
 	vaneDefaultSlowCooldown     = 30 * time.Minute
 	vaneDefaultHintTTL          = 15 * time.Second
 	vaneDefaultChallengerRatio  = 1.25
-	vaneDefaultBudgetMax        = 4
+	vaneDefaultBudgetMax        = 8
 	vaneDefaultBudgetWindow     = 30 * time.Minute
 	vaneEvidenceMaxAge          = 10 * time.Minute
 	vaneMaximumThroughputBPS    = int64(1_000_000_000)
@@ -97,7 +97,7 @@ const (
 	// bytes and then stopped. A googlevideo connection that answers with a few
 	// hundred bytes and goes quiet is not a slow start, so it does not need the
 	// full zero-sample patience.
-	vanePartialSilence = 25 * time.Second
+	vanePartialSilence = 12 * time.Second
 	vaneWatchdogTick   = 5 * time.Second
 	// BACKLOG-STREAK: how long one backlog sighting excuses low windows.
 	// A backgrounded player (browser tab, phone screen off) throttles or
@@ -1427,10 +1427,10 @@ const (
 	// otherwise every low window would re-open the switch and the group would
 	// thrash again.
 	vaneStarvingBPS    = float64(1_000_000)
-	vaneSwitchThrottle = 60 * time.Second
+	vaneSwitchThrottle = 15 * time.Second
 	// SWITCH-BUDGET: four switches per target per half hour.
 	vaneSwitchBudgetWindow = 30 * time.Minute
-	vaneSwitchBudgetMax    = 4
+	vaneSwitchBudgetMax    = 8
 	// SWITCH-AWAY-COOLDOWN: the node we leave sits out this long on every
 	// target. This is what makes no-backtrack structural rather than a rule.
 	vaneSwitchAwayCooldown = 5 * time.Minute

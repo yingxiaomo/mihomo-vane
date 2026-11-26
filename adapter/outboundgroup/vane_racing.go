@@ -23,7 +23,7 @@ const (
 	// RACE-TARGET: probe a Google CDN large file, not Cloudflare. Free nodes
 	// measured 30Mbps to Cloudflare but only 5-20Mbps to Google, so a
 	// Cloudflare probe picked nodes that cannot actually feed YouTube.
-	vaneDefaultRacingURL          = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+	vaneDefaultRacingURL          = "https://speed.cloudflare.com/__down?bytes=4194304"
 	vaneDefaultRacingBudgetMBHour = int64(64)
 	vaneRacingProbeByteCap        = int64(4 * 1024 * 1024)
 	// RACE-TIMEOUT: 4s was too tight once the probe left Cloudflare - a
