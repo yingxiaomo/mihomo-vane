@@ -60,10 +60,10 @@ type VaneDiagnosticCounters struct {
 	RaceBudgetDenied      uint64 `json:"raceBudgetDenied"`
 	RaceNoWinner          uint64 `json:"raceNoWinner"`
 	RaceStaleGeneration   uint64 `json:"raceStaleGeneration"`
-	B2LossSamples         uint64 `json:"b2LossSamples"`
-	B2LossUnsupported     uint64 `json:"b2LossUnsupported"`
-	B2StallSuspected      uint64 `json:"b2StallSuspected"`
-	B2StallAttempts       uint64 `json:"b2StallAttempts"`
+	LossSamples           uint64 `json:"lossSamples"`
+	LossUnsupported       uint64 `json:"lossUnsupported"`
+	StallSuspected        uint64 `json:"stallSuspected"`
+	StallAttempts         uint64 `json:"stallAttempts"`
 	// ProbeInvalidReasons splits ProbeInvalid by probe failure reason, so a
 	// rotated event ring can no longer erase why probes failed.
 	ProbeInvalidReasons map[string]uint64 `json:"probeInvalidReasons,omitempty"`
@@ -130,19 +130,19 @@ type VaneDiagnosticRuntime struct {
 	ActiveHandoffLeases      int                              `json:"activeHandoffLeases"`
 	ActiveTargetPreferences  int                              `json:"activeTargetPreferences"`
 	ActiveTargetCooldowns    int                              `json:"activeTargetCooldowns"`
-	B2LossTargets            int                              `json:"b2LossTargets"`
-	B2StallTargets           int                              `json:"b2StallTargets"`
+	LossTargets              int                              `json:"lossTargets"`
+	StallTargets             int                              `json:"stallTargets"`
 	// Step 3 guard-rail tallies: how many target/member pairs actually cross
 	// the loss and stall lines. All pairs over the line means the line is
 	// drawn wrong, which the two raw tallies above cannot answer.
-	B2LossDegradedTargets  int `json:"b2LossDegradedTargets"`
-	B2StallFrequentTargets int `json:"b2StallFrequentTargets"`
+	LossDegradedTargets  int `json:"lossDegradedTargets"`
+	StallFrequentTargets int `json:"stallFrequentTargets"`
 	// §A (§12.3 step 1): the per-target capability observation tally. Pairs is
 	// how many (target, candidate) records hold at least one settlement sample;
 	// Samples is the total count. Record-only — no selection path reads them.
 	TargetCapabilities      int                             `json:"targetCapabilities"`
 	TargetCapabilitySamples int64                           `json:"targetCapabilitySamples"`
-	B2ActiveFlows           map[string]int                  `json:"b2ActiveFlows,omitempty"`
+	ActiveFlows             map[string]int                  `json:"activeFlows,omitempty"`
 	P5Nodes                 map[string]VaneDiagnosticP5Node `json:"p5Nodes,omitempty"`
 }
 
@@ -540,14 +540,14 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) {
 		if record.reason == "stale-generation" {
 			d.snapshotData.Counters.RaceStaleGeneration++
 		}
-	case "b2-loss-sample":
-		d.snapshotData.Counters.B2LossSamples++
-	case "b2-loss-unsupported":
-		d.snapshotData.Counters.B2LossUnsupported++
-	case "b2-stall-attempt":
-		d.snapshotData.Counters.B2StallAttempts++
-	case "b2-stall-suspected":
-		d.snapshotData.Counters.B2StallSuspected++
+	case "loss-sample":
+		d.snapshotData.Counters.LossSamples++
+	case "loss-unsupported":
+		d.snapshotData.Counters.LossUnsupported++
+	case "stall-attempt":
+		d.snapshotData.Counters.StallAttempts++
+	case "stall-suspected":
+		d.snapshotData.Counters.StallSuspected++
 	case "gray-attempt-succeeded":
 		d.snapshotData.GrayFailure.Counters.AttemptEligible++
 		d.snapshotData.GrayFailure.Counters.AttemptSucceeded++

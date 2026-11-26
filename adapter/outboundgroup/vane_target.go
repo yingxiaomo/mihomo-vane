@@ -80,7 +80,7 @@ type vaneTargetFailureState struct {
 	streak        uint8
 	blockUntil    time.Time
 	lastFailureAt time.Time
-	// B2 observation fields (round5 item 2): passive loss telemetry that never
+	// observation fields (round5 item 2): passive loss telemetry that never
 	// participates in selection. A record holding only these fields keeps its
 	// zero streak/blockUntil/lastFailureAt, so it can never act as a failure.
 	lossEMA             float64
@@ -96,7 +96,7 @@ type vaneTargetFailureState struct {
 	capSamples int64
 }
 
-// B2 loss EMA weights early evidence more heavily and stabilizes the estimate
+// loss EMA weights early evidence more heavily and stabilizes the estimate
 // as samples accumulate. The stall signature window and minimum attempt count
 // are internal starting values. The Step 3 thresholds are deliberately fixed
 // instead of tuned from shadow samples: the network is not stationary, so a
@@ -104,11 +104,11 @@ type vaneTargetFailureState struct {
 // decision comes from live measurement (racing probes, target traffic
 // evidence, the decaying loss EMA); these thresholds are only guard rails.
 const (
-	vaneB2LossAlphaBase    = 0.4
-	vaneB2LossAlphaDecay   = 0.05
-	vaneB2StallMinAge      = 10 * time.Second
-	vaneB2StallMinAttempts = 5
-	// Step 3 selection guard rails (B2-STEP3-001 / B2-STEP3-002): a healthy
+	vaneLossAlphaBase    = 0.4
+	vaneLossAlphaDecay   = 0.05
+	vaneStallMinAge      = 10 * time.Second
+	vaneStallMinAttempts = 5
+	// Step 3 selection guard rails (STEP3-001 / STEP3-002): a healthy
 	// path retransmits well under 1%, so 5% is already visibly bad for a stream,
 	// and stalling one time in five is frequent enough to step aside.
 	vaneLossDegradedThreshold  = 0.05
@@ -253,11 +253,11 @@ func (a *Vane) clearTargetFailureLocked(key vaneTargetKey, member vaneMemberLeas
 	delete(a.targetFailures, vaneTargetFailureKey{target: key, member: member})
 }
 
-// b2FeedLoss folds one cumulative loss sample into the EMA. The first sample
+// feedLoss folds one cumulative loss sample into the EMA. The first sample
 // becomes the estimate directly; later samples decay with the sample count so
 // early evidence weighs more and the estimate stabilizes over time. Values
 // clamp to [0, 1]; NaN and Inf are rejected as no-sample.
-func (s *vaneTargetFailureState) b2FeedLoss(sample float64, now time.Time) {
+func (s *vaneTargetFailureState) feedLoss(sample float64, now time.Time) {
 	if math.IsNaN(sample) || math.IsInf(sample, 0) {
 		return
 	}
@@ -269,27 +269,27 @@ func (s *vaneTargetFailureState) b2FeedLoss(sample float64, now time.Time) {
 	if s.lossSamples == 0 {
 		s.lossEMA = sample
 	} else {
-		alpha := vaneB2LossAlphaBase / (1 + vaneB2LossAlphaDecay*float64(s.lossSamples))
+		alpha := vaneLossAlphaBase / (1 + vaneLossAlphaDecay*float64(s.lossSamples))
 		s.lossEMA += alpha * (sample - s.lossEMA)
 	}
 	s.lossSamples++
 	s.lastObservedAt = now
 }
 
-// recordB2Loss folds one flow's cumulative loss observation into
-// the flow's target record (round5 B2 item 2). Observation only: the failure
+// recordLoss folds one flow's cumulative loss observation into
+// the flow's target record (round5 item 2). Observation only: the failure
 // fields (streak, blockUntil, lastFailureAt) are never touched, so an
 // observation record can never block or suppress a member. Small transfers
 // stay out (a few kilobytes of loss ratio is noise), unsupported reads count
 // as unsupported instead of fabricating a sample, and the recording runs
 // regardless of the racing mode — the shadow data must not stop with it.
-func (a *Vane) recordB2Loss(flow *vaneFlow, observation vaneConnectionCloseObservation, now time.Time) {
+func (a *Vane) recordLoss(flow *vaneFlow, observation vaneConnectionCloseObservation, now time.Time) {
 	if flow == nil || observation.TotalReadBytes < a.flow.minBytes {
 		return
 	}
 	if !observation.LossSupported {
 		a.diagnostics.record(vaneDiagnosticRecord{
-			kind: "b2-loss-unsupported", target: flow.target, bucket: flow.targetKey.target,
+			kind: "loss-unsupported", target: flow.target, bucket: flow.targetKey.target,
 			port: flow.port, from: flow.candidate,
 		})
 		return
@@ -300,37 +300,37 @@ func (a *Vane) recordB2Loss(flow *vaneFlow, observation vaneConnectionCloseObser
 	}
 	a.mu.Lock()
 	state := a.targetFailures[failureKey]
-	state = a.seedB2StateFromLearning(flow, state)
-	state.b2FeedLoss(observation.LossRate, now)
+	state = a.seedStateFromLearning(flow, state)
+	state.feedLoss(observation.LossRate, now)
 	a.targetFailures[failureKey] = state
 	a.pruneTargetStateLocked(now)
-	a.learning.pushB2Target(a.b2TargetSnapshot(flow, state), now)
+	a.learning.pushTarget(a.targetSnapshot(flow, state), now)
 	a.mu.Unlock()
 	a.diagnostics.record(vaneDiagnosticRecord{
-		kind: "b2-loss-sample", target: flow.target, bucket: flow.targetKey.target,
+		kind: "loss-sample", target: flow.target, bucket: flow.targetKey.target,
 		port: flow.port, from: flow.candidate,
 	})
 }
 
-// vaneB2StallSignature reports the header-then-stall signature: the flow wrote
+// vaneStallSignature reports the header-then-stall signature: the flow wrote
 // payload, saw its first response, and then stayed silent until settlement —
 // no byte read after the response snapshot and a quiet tail of at least
-// vaneB2StallMinAge. A client that keeps reading (or gives up before the
+// vaneStallMinAge. A client that keeps reading (or gives up before the
 // window) does not match. This is distinct from churn, which only recognizes
 // short connections.
-func vaneB2StallSignature(observation vaneConnectionCloseObservation, closedAt time.Time) bool {
+func vaneStallSignature(observation vaneConnectionCloseObservation, closedAt time.Time) bool {
 	return observation.WrotePayload && observation.ResponseRecorded &&
 		observation.TotalReadBytes == observation.ResponseBytes &&
-		closedAt.Sub(observation.ResponseAt) >= vaneB2StallMinAge
+		closedAt.Sub(observation.ResponseAt) >= vaneStallMinAge
 }
 
-// b2StallRate returns the suspected-stall ratio once at least
-// vaneB2StallMinAttempts settled attempts exist; below that the ratio is
+// stallRate returns the suspected-stall ratio once at least
+// vaneStallMinAttempts settled attempts exist; below that the ratio is
 // meaningless and reads as zero. The clamp guards a future caller against
 // suspected exceeding attempts (stalls are observed while the connection is
 // alive, attempts only count at settlement).
-func (s *vaneTargetFailureState) b2StallRate() float64 {
-	if s.attemptCount < vaneB2StallMinAttempts {
+func (s *vaneTargetFailureState) stallRate() float64 {
+	if s.attemptCount < vaneStallMinAttempts {
 		return 0
 	}
 	rate := float64(s.suspectedStallCount) / float64(s.attemptCount)
@@ -352,28 +352,28 @@ func (s *vaneTargetFailureState) lossDegraded() bool {
 }
 
 // stallFrequent reports whether this challenger stalls often enough to be
-// cooled down for a while. b2StallRate already applies the minimum-attempt
+// cooled down for a while. stallRate already applies the minimum-attempt
 // floor, so no second gate is needed here.
 func (s *vaneTargetFailureState) stallFrequent() bool {
-	return s.b2StallRate() > vaneStallFrequentThreshold
+	return s.stallRate() > vaneStallFrequentThreshold
 }
 
-// recordB2Stall counts one flow settlement (round5 B2 item 3):
+// recordStall counts one flow settlement (round5 item 3):
 // AttemptCount always, SuspectedStallCount when the header-stall signature
 // matched. Observation only, same record as the loss EMA, same racing-mode
 // independence.
-func (a *Vane) recordB2Stall(flow *vaneFlow, observation vaneConnectionCloseObservation, now time.Time) {
+func (a *Vane) recordStall(flow *vaneFlow, observation vaneConnectionCloseObservation, now time.Time) {
 	if flow == nil {
 		return
 	}
-	stalled := vaneB2StallSignature(observation, now)
+	stalled := vaneStallSignature(observation, now)
 	failureKey := vaneTargetFailureKey{
 		target: flow.targetStateKey,
 		member: vaneMemberLease{name: flow.candidate, identity: flow.identity, epoch: flow.nodeEpoch},
 	}
 	a.mu.Lock()
 	state := a.targetFailures[failureKey]
-	state = a.seedB2StateFromLearning(flow, state)
+	state = a.seedStateFromLearning(flow, state)
 	state.attemptCount++
 	if stalled {
 		state.suspectedStallCount++
@@ -381,25 +381,25 @@ func (a *Vane) recordB2Stall(flow *vaneFlow, observation vaneConnectionCloseObse
 	state.lastObservedAt = now
 	a.targetFailures[failureKey] = state
 	a.pruneTargetStateLocked(now)
-	a.learning.pushB2Target(a.b2TargetSnapshot(flow, state), now)
+	a.learning.pushTarget(a.targetSnapshot(flow, state), now)
 	a.mu.Unlock()
 	a.diagnostics.record(vaneDiagnosticRecord{
-		kind: "b2-stall-attempt", target: flow.target, bucket: flow.targetKey.target,
+		kind: "stall-attempt", target: flow.target, bucket: flow.targetKey.target,
 		port: flow.port, from: flow.candidate,
 	})
 	if stalled {
 		a.diagnostics.record(vaneDiagnosticRecord{
-			kind: "b2-stall-suspected", reason: "header-stall", target: flow.target,
+			kind: "stall-suspected", reason: "header-stall", target: flow.target,
 			bucket: flow.targetKey.target, port: flow.port, from: flow.candidate,
 		})
 	}
 }
 
-// b2TargetSnapshot renders the live record's B2 telemetry for the learning
+// targetSnapshot renders the live record's telemetry for the learning
 // mirror (round6 item 3). Only observation fields — never streak, blockUntil
 // or lastFailureAt.
-func (a *Vane) b2TargetSnapshot(flow *vaneFlow, state vaneTargetFailureState) vanePersistedB2Target {
-	return vanePersistedB2Target{
+func (a *Vane) targetSnapshot(flow *vaneFlow, state vaneTargetFailureState) vanePersistedTarget {
+	return vanePersistedTarget{
 		Transport:           flow.targetStateKey.transport.String(),
 		TargetScope:         flow.targetStateKey.targetScope,
 		Port:                flow.targetStateKey.port,
@@ -413,14 +413,14 @@ func (a *Vane) b2TargetSnapshot(flow *vaneFlow, state vaneTargetFailureState) va
 	}
 }
 
-// seedB2StateFromLearning starts a B2-empty live record from the restored
-// learning copy (round6 item 3). A record holding any B2 data — even a single
+// seedStateFromLearning starts a empty live record from the restored
+// learning copy (round6 item 3). A record holding any data — even a single
 // attempt — is never overwritten. Called with a.mu held.
-func (a *Vane) seedB2StateFromLearning(flow *vaneFlow, state vaneTargetFailureState) vaneTargetFailureState {
+func (a *Vane) seedStateFromLearning(flow *vaneFlow, state vaneTargetFailureState) vaneTargetFailureState {
 	if state.lossSamples != 0 || state.attemptCount != 0 {
 		return state
 	}
-	seed, ok := a.learning.seedB2Target(
+	seed, ok := a.learning.seedTarget(
 		flow.targetStateKey.transport,
 		flow.targetStateKey.targetScope, flow.targetStateKey.port,
 		flow.candidate, flow.identity,
@@ -902,7 +902,7 @@ func (a *Vane) pruneTargetStateLocked(now time.Time) {
 		}
 		entries := make([]entry, 0, len(a.targetFailures))
 		for key, value := range a.targetFailures {
-			// B2 item 2 (round5), eviction-timestamp choice (b): observation
+			// item 2 (round5), eviction-timestamp choice (b): observation
 			// records evict by observation freshness, not first-out by their
 			// zero lastFailureAt.
 			trimTime := value.lastFailureAt

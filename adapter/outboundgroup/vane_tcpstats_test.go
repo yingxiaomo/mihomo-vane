@@ -79,7 +79,7 @@ func vaneLocalTCPConn(t *testing.T) *net.TCPConn {
 	return tcpConn
 }
 
-// B2 item 1: the wrapper walk resolves known wrappers, reflected fields and
+// item 1: the wrapper walk resolves known wrappers, reflected fields and
 // TLS, and refuses ambiguous or cyclic chains (nil = unsupported).
 func TestVaneUnwrapTCPConn(t *testing.T) {
 	tcpConn := vaneLocalTCPConn(t)

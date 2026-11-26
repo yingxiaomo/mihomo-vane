@@ -361,7 +361,7 @@ type Vane struct {
 	churnMu sync.Mutex
 	churn   map[vaneChurnKey]*vaneChurnState
 
-	// B2 item 4 (round5): per-node live flow counts on their own lock —
+	// Per-node live flow counts are kept on their own lock —
 	// the counter churns per connection while a.mu guards selection state.
 	flowsMu     sync.Mutex
 	activeFlows map[string]int
@@ -757,12 +757,12 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 			a.recordCumulativeLossIdentity(proxy.Name(), identity, nodeEpoch, observation)
 			a.recordCloseProfileIdentity(proxy.Name(), identity, nodeEpoch, observation)
 			if activeFlow != nil {
-				// B2 items 2+3: passive loss and stall telemetry ride on
+				// Passive loss and stall telemetry ride on
 				// flow settlement regardless of the racing mode.
 				now := a.clock.Now()
-				a.recordB2Loss(activeFlow, observation, now)
-				a.recordB2Stall(activeFlow, observation, now)
-				// B2 item 4: release the flow's per-node count once.
+				a.recordLoss(activeFlow, observation, now)
+				a.recordStall(activeFlow, observation, now)
+				// Release the flow's per-node count once.
 				activeFlow.releaseActiveFlowCount()
 			}
 		},
@@ -969,17 +969,17 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 			snapshot.Runtime.ActiveTargetCooldowns++
 		}
 		if failure.lossSamples > 0 {
-			snapshot.Runtime.B2LossTargets++
+			snapshot.Runtime.LossTargets++
 		}
 		if failure.attemptCount > 0 {
-			snapshot.Runtime.B2StallTargets++
+			snapshot.Runtime.StallTargets++
 		}
 		// Step 3 guard-rail tallies: pure reads of the same records.
 		if failure.lossDegraded() {
-			snapshot.Runtime.B2LossDegradedTargets++
+			snapshot.Runtime.LossDegradedTargets++
 		}
 		if failure.stallFrequent() {
-			snapshot.Runtime.B2StallFrequentTargets++
+			snapshot.Runtime.StallFrequentTargets++
 		}
 		// §A: per-target capability observation tallies (record-only).
 		if failure.capSamples > 0 {
@@ -987,14 +987,14 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 			snapshot.Runtime.TargetCapabilitySamples += failure.capSamples
 		}
 	}
-	// B2 item 4: copy the live per-node flow counts — never expose the
+	// Copy the live per-node flow counts — never expose the
 	// internal map's reference. An empty counter set keeps the zero Runtime
 	// value (nil map), matching the diagnostics read contract.
 	a.flowsMu.Lock()
 	if len(a.activeFlows) > 0 {
-		snapshot.Runtime.B2ActiveFlows = make(map[string]int, len(a.activeFlows))
+		snapshot.Runtime.ActiveFlows = make(map[string]int, len(a.activeFlows))
 		for name, count := range a.activeFlows {
-			snapshot.Runtime.B2ActiveFlows[name] = count
+			snapshot.Runtime.ActiveFlows[name] = count
 		}
 	}
 	a.flowsMu.Unlock()

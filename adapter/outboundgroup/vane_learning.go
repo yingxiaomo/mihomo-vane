@@ -114,11 +114,11 @@ type vanePersistedNode struct {
 	CumulObservedAt time.Time `json:"cumulObservedAt,omitempty"`
 }
 
-// vanePersistedB2Target carries one target+member pair's B2 telemetry across
+// vanePersistedTarget carries one target+member pair's telemetry across
 // restarts (round6 item 3). Coordination state — streak, blockUntil,
 // lastFailureAt — is deliberately absent: it is selection state, not
 // telemetry, and must never resurrect.
-type vanePersistedB2Target struct {
+type vanePersistedTarget struct {
 	Transport           string    `json:"transport"`
 	TargetScope         string    `json:"targetScope"`
 	Port                uint16    `json:"port"`
@@ -131,21 +131,21 @@ type vanePersistedB2Target struct {
 	LastObservedAt      time.Time `json:"lastObservedAt"`
 }
 
-// vaneLearningB2TargetLimit mirrors the target-state cap.
-const vaneLearningB2TargetLimit = 1024
+// vaneLearningTargetLimit mirrors the target-state cap.
+const vaneLearningTargetLimit = 1024
 
-func vaneLearningB2TargetKey(transport vaneTransport, targetScope string, port uint16, candidate, identity string) string {
+func vaneLearningTargetKey(transport vaneTransport, targetScope string, port uint16, candidate, identity string) string {
 	key := vaneTargetKey{transport: transport, targetScope: targetScope, port: port}
 	return key.String() + "\x00" + candidate + "\x00" + identity
 }
 
 type vaneLearningSnapshot struct {
-	SchemaVersion int                     `json:"schemaVersion"`
-	Group         string                  `json:"group"`
-	Revision      uint64                  `json:"revision"`
-	UpdatedAt     time.Time               `json:"updatedAt"`
-	Nodes         []vanePersistedNode     `json:"nodes"`
-	Targets       []vanePersistedB2Target `json:"targets,omitempty"`
+	SchemaVersion int                   `json:"schemaVersion"`
+	Group         string                `json:"group"`
+	Revision      uint64                `json:"revision"`
+	UpdatedAt     time.Time             `json:"updatedAt"`
+	Nodes         []vanePersistedNode   `json:"nodes"`
+	Targets       []vanePersistedTarget `json:"targets,omitempty"`
 }
 
 type vaneLearningPending struct {
@@ -163,11 +163,11 @@ type vaneLearningState struct {
 	storageKey string
 	nodes      map[string]*vaneNodeState
 	nodeEpochs map[string]uint64
-	// targets mirrors the live B2 telemetry per (target, candidate, identity)
+	// targets mirrors the live telemetry per (target, candidate, identity)
 	// pair (round6 item 3). The group pushes updates while holding a.mu and
 	// taking this lock; the flush serializes from here without ever reaching
 	// back for a.mu.
-	targets    map[string]vanePersistedB2Target
+	targets    map[string]vanePersistedTarget
 	stateTTL   time.Duration
 	maxStates  int
 	generation uint64
@@ -239,7 +239,7 @@ func newVaneLearningState(group string, clock vaneClock, store vaneLearningStore
 		storageKey:      vaneLearningStorageKey(group),
 		nodes:           make(map[string]*vaneNodeState),
 		nodeEpochs:      make(map[string]uint64),
-		targets:         make(map[string]vanePersistedB2Target),
+		targets:         make(map[string]vanePersistedTarget),
 		stateTTL:        stateTTL,
 		maxStates:       maxStates,
 		generation:      1,
@@ -471,7 +471,7 @@ func (s *vaneLearningState) restore(payload []byte) error {
 	}
 
 	s.restoredNodes = len(s.nodes)
-	// Round6 item 3: restore the B2 telemetry targets. Bad entries count and
+	// Round6 item 3: restore the telemetry targets. Bad entries count and
 	// skip — one corrupted record must not fail the whole snapshot. Only
 	// telemetry fields exist on the persisted struct, so nothing selection-
 	// related can resurrect here.
@@ -492,7 +492,7 @@ func (s *vaneLearningState) restore(payload []byte) error {
 			invalidTargets++
 			continue
 		}
-		key := vaneLearningB2TargetKey(transport, target.TargetScope, target.Port, target.Candidate, target.Identity)
+		key := vaneLearningTargetKey(transport, target.TargetScope, target.Port, target.Candidate, target.Identity)
 		if previous, exists := s.targets[key]; exists && !target.LastObservedAt.After(previous.LastObservedAt) {
 			continue
 		}
@@ -676,14 +676,14 @@ func persistVaneMetrics(metrics vaneMetrics, now time.Time) vanePersistedMetrics
 	}
 }
 
-// pushB2Target mirrors one live target record's B2 telemetry into the
+// pushTarget mirrors one live target record's telemetry into the
 // learning state (round6 item 3). The group calls it while holding a.mu —
 // the same a.mu → learning order the observe path uses — and only the
 // learning lock is taken here. The flush serializes from the map without
 // ever reaching back for a.mu. Over the cap the oldest entries evict first
 // (lastObservedAt ascending, key text breaking ties), matching the snapshot
 // ordering.
-func (s *vaneLearningState) pushB2Target(target vanePersistedB2Target, now time.Time) {
+func (s *vaneLearningState) pushTarget(target vanePersistedTarget, now time.Time) {
 	if s == nil || target.TargetScope == "" || target.Candidate == "" || target.Identity == "" {
 		return
 	}
@@ -693,8 +693,8 @@ func (s *vaneLearningState) pushB2Target(target vanePersistedB2Target, now time.
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.targets[vaneLearningB2TargetKey(transport, target.TargetScope, target.Port, target.Candidate, target.Identity)] = target
-	for len(s.targets) > vaneLearningB2TargetLimit {
+	s.targets[vaneLearningTargetKey(transport, target.TargetScope, target.Port, target.Candidate, target.Identity)] = target
+	for len(s.targets) > vaneLearningTargetLimit {
 		oldestKey, oldestAt := "", time.Time{}
 		for key, candidate := range s.targets {
 			if oldestKey == "" || candidate.LastObservedAt.Before(oldestAt) ||
@@ -707,16 +707,16 @@ func (s *vaneLearningState) pushB2Target(target vanePersistedB2Target, now time.
 	s.markDirtyLocked(now.UTC())
 }
 
-// seedB2Target returns the persisted telemetry for one pair so a live record
-// without B2 data can start from the restored values instead of zero
+// seedTarget returns the persisted telemetry for one pair so a live record
+// without data can start from the restored values instead of zero
 // (round6 item 3). Called with a.mu held; takes only learning.mu.
-func (s *vaneLearningState) seedB2Target(transport vaneTransport, targetScope string, port uint16, candidate, identity string) (vanePersistedB2Target, bool) {
+func (s *vaneLearningState) seedTarget(transport vaneTransport, targetScope string, port uint16, candidate, identity string) (vanePersistedTarget, bool) {
 	if s == nil || targetScope == "" || candidate == "" || identity == "" {
-		return vanePersistedB2Target{}, false
+		return vanePersistedTarget{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	target, ok := s.targets[vaneLearningB2TargetKey(transport, targetScope, port, candidate, identity)]
+	target, ok := s.targets[vaneLearningTargetKey(transport, targetScope, port, candidate, identity)]
 	return target, ok
 }
 
@@ -810,12 +810,12 @@ func (s *vaneLearningState) snapshotLocked(now time.Time) vaneLearningSnapshot {
 	}
 	targetPairs := make([]struct {
 		key    string
-		target vanePersistedB2Target
+		target vanePersistedTarget
 	}, 0, len(s.targets))
 	for key, target := range s.targets {
 		targetPairs = append(targetPairs, struct {
 			key    string
-			target vanePersistedB2Target
+			target vanePersistedTarget
 		}{key: key, target: target})
 	}
 	sort.Slice(targetPairs, func(i, j int) bool {
@@ -824,10 +824,10 @@ func (s *vaneLearningState) snapshotLocked(now time.Time) vaneLearningSnapshot {
 		}
 		return targetPairs[i].key < targetPairs[j].key
 	})
-	if len(targetPairs) > vaneLearningB2TargetLimit {
-		targetPairs = targetPairs[:vaneLearningB2TargetLimit]
+	if len(targetPairs) > vaneLearningTargetLimit {
+		targetPairs = targetPairs[:vaneLearningTargetLimit]
 	}
-	targets := make([]vanePersistedB2Target, 0, len(targetPairs))
+	targets := make([]vanePersistedTarget, 0, len(targetPairs))
 	for _, pair := range targetPairs {
 		targets = append(targets, pair.target)
 	}

@@ -32,7 +32,7 @@ const (
 	vaneDefaultBudgetWindow     = 30 * time.Minute
 	vaneEvidenceMaxAge          = 10 * time.Minute
 	vaneMaximumThroughputBPS    = int64(1_000_000_000)
-	// B-part degradation lines. Loss reuses the 5% the B2 loss EMA already
+	// B-part degradation lines. Loss reuses the 5% the loss EMA already
 	// treats as degraded (healthy paths retransmit < 1%); latency is where a
 	// video path is visibly unusable (production saw 800 ms), far above the
 	// 50-200 ms a healthy CDN path keeps.
@@ -284,7 +284,7 @@ type vaneFlow struct {
 	raceToken       uint64
 	policySubmitter func(vanePolicyAction, bool)
 	flowCountOnce   sync.Once
-	// PHASE1: only a configured target scope holds a B2 flow count.
+	// PHASE1: only a configured target scope holds a flow count.
 	// Every TCP flow is watched, but the count keeps its target-scoped meaning.
 	counted bool
 	// PHASE2: a flow that matches a configured target scope keeps
@@ -306,7 +306,7 @@ type vaneFlow struct {
 }
 
 // flowStarted and flowEnded maintain the per-node live flow
-// count (B2 item 4). The counter lives on its own lock: it churns per
+// count (item 4). The counter lives on its own lock: it churns per
 // connection and must never contend with a.mu selection work.
 func (a *Vane) flowStarted(name string) {
 	a.flowsMu.Lock()
@@ -378,7 +378,7 @@ func newVaneFlow(group *Vane, candidate string, metadata *C.Metadata, handoff ..
 		port:   port,
 		from:   candidate,
 	})
-	// B2 item 4: only successful flows hold a per-node count. The release
+	// item 4: only successful flows hold a per-node count. The release
 	// rides on the connection settlement (releaseActiveFlowCount); a
 	// never-closing connection keeps holding its count, which is acceptable —
 	// connections eventually close.

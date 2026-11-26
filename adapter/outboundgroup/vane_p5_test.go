@@ -87,7 +87,7 @@ func TestVaneP5Peak(t *testing.T) {
 }
 
 // P5-HOURLY-001: each local hour keeps its own count-decaying EMA, first
-// sample = estimate, same alpha shape as the B2 loss EMA.
+// sample = estimate, same alpha shape as the loss EMA.
 func TestVaneP5HourlyProfile(t *testing.T) {
 	now := vaneP5Time(10)
 	var p vaneP5

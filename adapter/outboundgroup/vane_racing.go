@@ -502,7 +502,7 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 		if state := a.nodes[member.name]; state != nil && state.cooldown.After(blockUntil) {
 			blockUntil = state.cooldown
 		}
-		// B2 Step 3: the loss and stall records stay observations — they only
+		// Step 3: the loss and stall records stay observations — they only
 		// filter or cool a challenger here and never write back to the failure
 		// streak. Same lock (a.mu) and same read style as
 		// targetMemberBlockedLocked.

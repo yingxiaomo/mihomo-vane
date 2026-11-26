@@ -324,7 +324,7 @@ func TestVaneFlowSyntheticWindowIgnoresBufferCredit(t *testing.T) {
 // PHASE2-01: a TCP flow whose target is not a configured target scope is now
 // watched AND may be switched — it owns a per-host target scope, so a stalled
 // download can be rescued the same way a video flow is. It is still kept out of
-// the target-scoped bookkeeping (no B2 count, no target evidence).
+// the target-scoped bookkeeping (no count, no target evidence).
 func TestVaneUntargetedFlowWatchedAndCanSwitch(t *testing.T) {
 	group, _, _ := newVaneObservationRig(t, vaneRacingOn)
 	dropVaneRecordedEvents(group)
@@ -335,7 +335,7 @@ func TestVaneUntargetedFlowWatchedAndCanSwitch(t *testing.T) {
 	t.Cleanup(flow.releaseActiveFlowCount)
 	require.False(t, flow.targetScoped, "a plain host is not a flow")
 	require.Equal(t, "rr.example.com", flow.targetKey.target, "a untargeted host gets its own target scope")
-	require.False(t, flow.counted, "a non-flow holds no B2 media count")
+	require.False(t, flow.counted, "a non-flow holds no media count")
 
 	for i := 0; i < 3; i++ {
 		require.Nil(t, flow.observe(vaneObservationLowSample()))

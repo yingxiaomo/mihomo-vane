@@ -17,7 +17,7 @@ const (
 	vaneP5RingWindow  = 6 * time.Hour
 	vaneP5PeakWindow  = 24 * time.Hour
 	vaneP5BucketCount = 24
-	// Same shape as the B2 loss EMA: early evidence weighs more, later
+	// Same shape as the loss EMA: early evidence weighs more, later
 	// samples only nudge the estimate.
 	vaneP5AlphaBase  = 0.4
 	vaneP5AlphaDecay = 0.05

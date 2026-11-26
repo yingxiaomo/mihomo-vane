@@ -4,7 +4,7 @@ import "sync"
 
 // The diagnostics event ring is gone; tests install a sink at group
 // construction and count records afterwards, which is what the ring used to
-// allow (and a superset: the sink also sees churn-*/gray-*/b2-* kinds).
+// allow (and a superset: the sink also sees churn-*/gray-*/-* kinds).
 type vaneRecordedEvent struct {
 	Sequence      uint64
 	Kind          string

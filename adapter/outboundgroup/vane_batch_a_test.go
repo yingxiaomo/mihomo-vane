@@ -243,7 +243,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				group.targetHandoffs[key] = lease
 				slowCount := len(vaneCooledNodesLocked(group))
 				group.mu.Unlock()
-				b2Before := group.VaneDiagnostics().Counters
+				Before := group.VaneDiagnostics().Counters
 				if source == "grace" {
 					clock.Advance(5 * time.Second)
 					require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 2_000_000, TotalBytes: fast.TotalBytes, Age: 25 * time.Second}))
@@ -266,7 +266,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				group.mu.Lock()
 				require.Equal(t, evidence, group.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}])
 				require.Equal(t, pref, group.targetPreferences[key])
-				require.Equal(t, failure, group.targetFailures[failureKey], "capBPS and B2 telemetry unchanged")
+				require.Equal(t, failure, group.targetFailures[failureKey], "capBPS and telemetry unchanged")
 				require.Equal(t, lease, group.targetHandoffs[key])
 				require.True(t, lease.expiresAt.After(clock.Now()), "the untrusted window arrives while the claimed lease is still valid")
 				require.Equal(t, slowCount, len(vaneCooledNodesLocked(group)))
@@ -276,10 +276,10 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 					require.False(t, group.nodeCoolingLocked(flow.candidate, clock.Now()))
 				}
 				group.mu.Unlock()
-				b2After := group.VaneDiagnostics().Counters
-				require.Equal(t, b2Before.B2LossSamples, b2After.B2LossSamples)
-				require.Equal(t, b2Before.B2StallAttempts, b2After.B2StallAttempts)
-				require.Equal(t, b2Before.B2StallSuspected, b2After.B2StallSuspected)
+				After := group.VaneDiagnostics().Counters
+				require.Equal(t, Before.LossSamples, After.LossSamples)
+				require.Equal(t, Before.StallAttempts, After.StallAttempts)
+				require.Equal(t, Before.StallSuspected, After.StallSuspected)
 				require.Zero(t, countVaneEvents(group, "handoff-no-gain", ""))
 				require.Zero(t, countVaneEvents(group, "handoff-measured", ""))
 				if source == "grace" {

@@ -173,7 +173,7 @@ type vaneObservedConn struct {
 	relayDepth       int
 	closePending     bool
 	closedAt         time.Time
-	b2Stats          *vaneTCPStats
+	tcpStats         *vaneTCPStats
 	lifecycleMu      sync.Mutex
 	lifecycle        vaneConnectionLifecycle
 	closeOnce        sync.Once
@@ -230,7 +230,7 @@ type vaneConnectionCloseObservation struct {
 	TotalReadBytes int64
 	Age            time.Duration
 	PolicyClosed   bool
-	// B2 observation (round5 item 2): the socket's cumulative loss ratio read
+	// The socket's cumulative loss ratio is read
 	// just before the underlying close. An unsupported read carries
 	// LossSupported=false and must never be mistaken for zero loss.
 	LossRate      float64
@@ -239,7 +239,7 @@ type vaneConnectionCloseObservation struct {
 	// node-level cumulative loss ratio. Zero means the kernel reported none.
 	SegsOut     uint64
 	RetransSegs uint64
-	// B2 observation (round5 item 3): the first-response snapshot, taken at
+	// The first-response snapshot is taken at
 	// whichever write/read site recorded the response first. Zero bytes read
 	// after that point plus a long quiet tail is the header-stall signature.
 	ResponseRecorded bool
@@ -498,9 +498,9 @@ func (c *vaneObservedConn) closeObservationLocked(closedAt time.Time) vaneConnec
 		Age:            vaneElapsed(c.createdAt, closedAt),
 		PolicyClosed:   c.policyClosed,
 	}
-	observation.LossRate, observation.LossSupported = c.b2Stats.lossRate()
+	observation.LossRate, observation.LossSupported = c.tcpStats.lossRate()
 	if observation.LossSupported {
-		observation.SegsOut, observation.RetransSegs = c.b2Stats.lossCounters()
+		observation.SegsOut, observation.RetransSegs = c.tcpStats.lossCounters()
 	}
 	observation.ResponseRecorded = c.responseRecorded
 	observation.ResponseBytes = c.responseBytes
@@ -535,7 +535,7 @@ func (c *vaneObservedConn) observeWrite(now time.Time) {
 		if !c.provisionalRead.IsZero() && !c.responseRecorded {
 			// The read arrived before the write completed, so there is no
 			// measurable request->response duration. Keep the accounting for
-			// B2 stall detection, but emit no response sample.
+			// Stall detection, but emit no response sample.
 			c.responseRecorded = true
 			c.responseBytes = c.totalReadBytes
 			c.responseAt = now
@@ -560,7 +560,7 @@ func (c *vaneObservedConn) finishWrite(now time.Time, success bool) {
 		c.wrotePayload = true
 		c.firstWriteAt = now
 		if !c.provisionalRead.IsZero() && !c.responseRecorded {
-			// The read preceded send confirmation: account it for B2, but do
+			// The read preceded send confirmation: account it for loss, but do
 			// not turn it into a zero-millisecond response sample.
 			c.responseRecorded = true
 			c.responseBytes = c.totalReadBytes
@@ -729,7 +729,7 @@ func (c *vaneObservedConn) throughputObservationLocked(bitsPerSecond float64, st
 		TotalBytes:    c.totalReadBytes,
 		Age:           vaneElapsed(c.createdAt, now),
 	}
-	// One fresh TCP_INFO read per window: c.b2Stats is only filled at close
+	// One fresh TCP_INFO read per window: c.tcpStats is only filled at close
 	// (the kernel counters die with the socket), so it cannot serve a live
 	// window. getsockopt is local and cheap; unsupported stays false.
 	stats := vaneReadTCPStats(c.Conn)
@@ -783,13 +783,13 @@ func (c *vaneObservedConn) requestAbort(action vanePolicyAction) {
 
 func (c *vaneObservedConn) closeUnderlying() error {
 	c.closeOnce.Do(func() {
-		// B2 item 2: the kernel counters die with the socket — read them
+		// The kernel counters die with the socket — read them
 		// before Close. The read runs outside the selector lock; unsupported
 		// platforms simply get nil, which the observation carries as
 		// "unsupported", never as zero loss.
 		stats := vaneReadTCPStats(c.Conn)
 		c.mu.Lock()
-		c.b2Stats = stats
+		c.tcpStats = stats
 		c.mu.Unlock()
 		c.closeErr = c.Conn.Close()
 	})

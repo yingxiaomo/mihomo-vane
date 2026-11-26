@@ -8,10 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// B2-FLOWCOUNT-001: per-node live flow counts are observation-only —
+// FLOWCOUNT-001: per-node live flow counts are observation-only —
 // flows +1 on successful creation, −1 exactly once on settlement, and the
 // runtime snapshot exposes a copy, never the internal map.
-func TestVaneB2ActiveFlows(t *testing.T) {
+func TestVaneActiveFlows(t *testing.T) {
 	group, _, alpha, _, _ := newVaneRacingEvidenceGroup(t)
 	flowMetadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 
@@ -28,7 +28,7 @@ func TestVaneB2ActiveFlows(t *testing.T) {
 	// Untargeted flows are watched but must not hold a flow count.
 	untargeted := newVaneFlow(group, alpha.Name(), &C.Metadata{Host: "example.com", DstPort: 443, NetWork: C.TCP})
 	require.NotNil(t, untargeted, "PHASE1: every TCP flow is watched")
-	require.False(t, untargeted.counted, "a non-flow holds no B2 count")
+	require.False(t, untargeted.counted, "a non-flow holds no loss count")
 	untargeted.releaseActiveFlowCount()
 	group.flowsMu.Lock()
 	count = group.activeFlows[alpha.Name()]
@@ -37,8 +37,8 @@ func TestVaneB2ActiveFlows(t *testing.T) {
 
 	// The snapshot must be a copy: mutating it must not touch the group state.
 	snapshot := group.VaneDiagnostics()
-	require.Equal(t, map[string]int{alpha.Name(): 2}, snapshot.Runtime.B2ActiveFlows)
-	snapshot.Runtime.B2ActiveFlows[alpha.Name()] = 99
+	require.Equal(t, map[string]int{alpha.Name(): 2}, snapshot.Runtime.ActiveFlows)
+	snapshot.Runtime.ActiveFlows[alpha.Name()] = 99
 	group.flowsMu.Lock()
 	count = group.activeFlows[alpha.Name()]
 	group.flowsMu.Unlock()

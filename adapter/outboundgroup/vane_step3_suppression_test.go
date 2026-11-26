@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// B2-STEP3-004 (test lock, no production change): a race that produces no
+// STEP3-004 (test lock, no production change): a race that produces no
 // winner still installs the 30s no-winner suppression, so one slow flow cannot
 // re-run an empty race on every low window. Step 3 gives this path a second
 // way to end with no candidates — every challenger excluded by its loss record
 // — so the behaviour is pinned here.
-func TestVaneB2Step3EmptySnapshotInstallsSuppression(t *testing.T) {
+func TestVaneStep3EmptySnapshotInstallsSuppression(t *testing.T) {
 	group, clock, _, beta, gamma := newVaneRacingEvidenceGroup(t)
 	var probes atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -25,12 +25,12 @@ func TestVaneB2Step3EmptySnapshotInstallsSuppression(t *testing.T) {
 		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 80_000_000, capHit: true}
 	}
 
-	request := newVaneB2Step3RaceRequest(t, group)
+	request := newVaneStep3RaceRequest(t, group)
 	for _, proxy := range []*vaneTestProxy{beta, gamma} {
-		member := seedVaneB2CandidateEvidence(t, group, proxy, 8_000_000)
+		member := seedVaneCandidateEvidence(t, group, proxy, 8_000_000)
 		// Every challenger is over the loss line, so the snapshot comes back
 		// empty exactly the way Step 3 intends.
-		seedVaneB2FailureState(t, group, request, member, func(state *vaneTargetFailureState) {
+		seedVaneFailureState(t, group, request, member, func(state *vaneTargetFailureState) {
 			state.lossEMA, state.lossSamples = 0.50, 8
 		})
 	}
