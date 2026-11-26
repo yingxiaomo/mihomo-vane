@@ -566,9 +566,9 @@ type vaneMetrics struct {
 	response   vaneDualMetric
 	throughput vaneDualMetric
 	jitter     vaneJitterTracker
-	// p5 carries the passive percentile/peak/hourly profile (round6 item 1).
+	// profile carries the passive percentile/peak/hourly throughput distribution.
 	// It feeds on the raw sample below; scoring never reads it.
-	p5 vaneP5
+	profile vaneThroughputProfile
 }
 
 func (m *vaneMetrics) observeFailure(now time.Time, failed bool) {
@@ -591,9 +591,9 @@ func (m *vaneMetrics) observeResponse(now time.Time, elapsed time.Duration) {
 
 func (m *vaneMetrics) observeThroughput(now time.Time, bitsPerSecond float64) {
 	m.throughput.observe(vaneMetricThroughput, now, vaneLogClamp(bitsPerSecond, 8_192, 1_000_000_000), 1)
-	// P5 (round6 item 1) takes the raw sample — the log clamp stays a scoring
+	// The profile takes the raw sample — the log clamp stays a scoring
 	// concern only.
-	m.p5.observe(now, bitsPerSecond)
+	m.profile.observe(now, bitsPerSecond)
 }
 
 func durationMillis(elapsed time.Duration) float64 {

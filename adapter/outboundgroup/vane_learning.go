@@ -79,9 +79,9 @@ type vanePersistedMetrics struct {
 	Response   vanePersistedDualMetric `json:"response"`
 	Throughput vanePersistedDualMetric `json:"throughput"`
 	Jitter     *vanePersistedJitter    `json:"jitter,omitempty"`
-	// P5 (round6 item 2) is passive per-node telemetry; its presence never
+	// The throughput profile is passive telemetry; its presence never
 	// affects node validity on restore.
-	P5 *vanePersistedP5 `json:"p5,omitempty"`
+	Profile *vanePersistedProfile `json:"profile,omitempty"`
 }
 
 type vanePersistedNode struct {
@@ -589,9 +589,9 @@ func restoreVaneMetrics(metrics vanePersistedMetrics, now time.Time) (vaneMetric
 	response, responseValid, responseInvalid := restoreVaneDualMetric(metrics.Response, now)
 	throughput, throughputValid, throughputInvalid := restoreVaneDualMetric(metrics.Throughput, now)
 	jitter, jitterValid, jitterInvalid := restoreVaneJitter(metrics.Jitter, now)
-	// P5 restores but never decides validity: a node kept alive only by its
-	// P5 profile would resurrect selection state from telemetry.
-	return vaneMetrics{failure: failure, connect: connect, response: response, throughput: throughput, jitter: jitter, p5: restoreVaneP5(metrics.P5, now)},
+	// The profile restores but never decides validity: a node kept alive only by its
+	// profile would resurrect selection state from telemetry.
+	return vaneMetrics{failure: failure, connect: connect, response: response, throughput: throughput, jitter: jitter, profile: restoreVaneThroughputProfile(metrics.Profile, now)},
 		failureValid || connectValid || responseValid || throughputValid || jitterValid,
 		failureInvalid || connectInvalid || responseInvalid || throughputInvalid || jitterInvalid
 }
@@ -672,7 +672,7 @@ func persistVaneMetrics(metrics vaneMetrics, now time.Time) vanePersistedMetrics
 		Response:   persistVaneDualMetric(metrics.response),
 		Throughput: persistVaneDualMetric(metrics.throughput),
 		Jitter:     persistVaneJitter(metrics.jitter),
-		P5:         persistVaneP5(&metrics.p5, now),
+		Profile:    persistVaneThroughputProfile(&metrics.profile, now),
 	}
 }
 

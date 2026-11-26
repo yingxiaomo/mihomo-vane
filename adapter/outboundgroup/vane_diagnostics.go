@@ -140,20 +140,20 @@ type VaneDiagnosticRuntime struct {
 	// §A (§12.3 step 1): the per-target capability observation tally. Pairs is
 	// how many (target, candidate) records hold at least one settlement sample;
 	// Samples is the total count. Record-only — no selection path reads them.
-	TargetCapabilities      int                             `json:"targetCapabilities"`
-	TargetCapabilitySamples int64                           `json:"targetCapabilitySamples"`
-	ActiveFlows             map[string]int                  `json:"activeFlows,omitempty"`
-	P5Nodes                 map[string]VaneDiagnosticP5Node `json:"p5Nodes,omitempty"`
+	TargetCapabilities      int                                        `json:"targetCapabilities"`
+	TargetCapabilitySamples int64                                      `json:"targetCapabilitySamples"`
+	ActiveFlows             map[string]int                             `json:"activeFlows,omitempty"`
+	ThroughputProfiles      map[string]VaneDiagnosticThroughputProfile `json:"throughputProfiles,omitempty"`
 }
 
-// VaneDiagnosticP5Node is the passive per-node throughput profile (round6
+// VaneDiagnosticThroughputProfile is the passive per-node throughput profile (round6
 // item 1). Only nodes that have seen throughput samples appear in the map.
-type VaneDiagnosticP5Node struct {
-	TCP VaneDiagnosticP5Transport `json:"tcp"`
-	UDP VaneDiagnosticP5Transport `json:"udp"`
+type VaneDiagnosticThroughputProfile struct {
+	TCP VaneDiagnosticTransportProfile `json:"tcp"`
+	UDP VaneDiagnosticTransportProfile `json:"udp"`
 }
 
-type VaneDiagnosticP5Transport struct {
+type VaneDiagnosticTransportProfile struct {
 	P10BPS  float64   `json:"p10Bps,omitempty"`
 	PeakBPS float64   `json:"peakBps,omitempty"`
 	PeakAt  time.Time `json:"peakAt,omitempty"`

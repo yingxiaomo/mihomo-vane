@@ -8,16 +8,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func vaneP5Time(hour int) time.Time {
+func vaneThroughputProfileTime(hour int) time.Time {
 	// Local wall clock so the hourly bucket lands deterministically.
 	return time.Date(2026, 11, 18, hour, 0, 0, 0, time.Local)
 }
 
-// P5-P10-001: the 32-sample ring feeds the 10th percentile over a 6h window;
+// PROFILE-P10-001: the 32-sample ring feeds the 10th percentile over a 6h window;
 // expired samples drop, illegal samples never enter, and reads stay pure.
-func TestVaneP5Percentile10(t *testing.T) {
-	now := vaneP5Time(10)
-	var p vaneP5
+func TestVaneThroughputProfilePercentile10(t *testing.T) {
+	now := vaneThroughputProfileTime(10)
+	var p vaneThroughputProfile
 	_, ok := p.percentile10(now)
 	require.False(t, ok, "an empty ring has no percentile")
 
@@ -39,15 +39,15 @@ func TestVaneP5Percentile10(t *testing.T) {
 	require.Equal(t, p10, again)
 
 	// Expired samples (older than 6h) drop out of the read.
-	stale := now.Add(-vaneP5RingWindow - time.Minute)
-	fresh := &vaneP5{}
+	stale := now.Add(-vaneThroughputProfileRingWindow - time.Minute)
+	fresh := &vaneThroughputProfile{}
 	fresh.observe(stale, 999*1_000_000)
 	fresh.observe(now, 10*1_000_000)
 	p10, _ = fresh.percentile10(now)
 	require.Equal(t, 10*1_000_000.0, p10, "the stale sample must not participate")
 
 	// Illegal samples are rejected before touching any statistic.
-	guard := &vaneP5{}
+	guard := &vaneThroughputProfile{}
 	guard.observe(now, 5*1_000_000)
 	for _, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 0, -1} {
 		guard.observe(now, bad)
@@ -58,10 +58,10 @@ func TestVaneP5Percentile10(t *testing.T) {
 	require.Equal(t, 5*1_000_000.0, peak)
 }
 
-// P5-PEAK-001: the peak tracks the maximum within 24h and expires afterwards.
-func TestVaneP5Peak(t *testing.T) {
-	now := vaneP5Time(10)
-	var p vaneP5
+// PROFILE-PEAK-001: the peak tracks the maximum within 24h and expires afterwards.
+func TestVaneThroughputProfilePeak(t *testing.T) {
+	now := vaneThroughputProfileTime(10)
+	var p vaneThroughputProfile
 	p.observe(now, 10*1_000_000)
 	peak, ok := p.peak(now)
 	require.True(t, ok)
@@ -86,11 +86,11 @@ func TestVaneP5Peak(t *testing.T) {
 	require.Equal(t, 20*1_000_000.0, peak)
 }
 
-// P5-HOURLY-001: each local hour keeps its own count-decaying EMA, first
+// PROFILE-HOURLY-001: each local hour keeps its own count-decaying EMA, first
 // sample = estimate, same alpha shape as the loss EMA.
-func TestVaneP5HourlyProfile(t *testing.T) {
-	now := vaneP5Time(10)
-	var p vaneP5
+func TestVaneThroughputProfileHourlyProfile(t *testing.T) {
+	now := vaneThroughputProfileTime(10)
+	var p vaneThroughputProfile
 	p.observe(now, 10*1_000_000)
 	profile := p.hourProfile()
 	require.Equal(t, 10*1_000_000.0, profile[10])
@@ -98,18 +98,18 @@ func TestVaneP5HourlyProfile(t *testing.T) {
 
 	p.observe(now.Add(time.Minute), 20*1_000_000)
 	profile = p.hourProfile()
-	alpha := vaneP5AlphaBase / (1 + vaneP5AlphaDecay)
+	alpha := vaneThroughputProfileAlphaBase / (1 + vaneThroughputProfileAlphaDecay)
 	require.InDelta(t, 10*1_000_000.0+alpha*(20*1_000_000.0-10*1_000_000.0), profile[10], 1e-6)
 
 	// A different hour lands in its own bucket.
-	p.observe(vaneP5Time(11), 30*1_000_000)
+	p.observe(vaneThroughputProfileTime(11), 30*1_000_000)
 	profile = p.hourProfile()
 	require.Equal(t, 30*1_000_000.0, profile[11])
 }
 
-// P5-DIAG-001: P5Nodes only lists nodes with throughput samples and never
+// PROFILE-DIAG-001: ThroughputProfiles only lists nodes with throughput samples and never
 // mutates their state.
-func TestVaneP5Diagnostics(t *testing.T) {
+func TestVaneThroughputProfileDiagnostics(t *testing.T) {
 	group, clock, alpha, _, _ := newVaneRacingEvidenceGroup(t)
 	group.mu.Lock()
 	group.ensureProxyNodeLocked(alpha, clock.Now())
@@ -119,7 +119,7 @@ func TestVaneP5Diagnostics(t *testing.T) {
 
 	// No throughput yet: the node must not appear.
 	snapshot := group.VaneDiagnostics()
-	require.Empty(t, snapshot.Runtime.P5Nodes)
+	require.Empty(t, snapshot.Runtime.ThroughputProfiles)
 
 	// Feed raw samples through the observe path for TCP only. The observer
 	// takes its own locks — call it bare.
@@ -127,36 +127,36 @@ func TestVaneP5Diagnostics(t *testing.T) {
 	group.observeThroughputEpochIdentity(alpha.Name(), alpha.identity, alphaState.epoch, vaneTransportTCP, clock.Now().Add(time.Minute), 60*1_000_000)
 
 	snapshot = group.VaneDiagnostics()
-	node, ok := snapshot.Runtime.P5Nodes[alpha.Name()]
+	node, ok := snapshot.Runtime.ThroughputProfiles[alpha.Name()]
 	require.True(t, ok, "a node with throughput samples must appear")
 	require.NotZero(t, node.TCP.P10BPS)
 	require.Equal(t, 60*1_000_000.0, node.TCP.PeakBPS)
-	require.Len(t, node.TCP.Hours, vaneP5BucketCount)
+	require.Len(t, node.TCP.Hours, vaneThroughputProfileBucketCount)
 	require.Zero(t, node.UDP.P10BPS, "udp transport without samples stays empty")
 	require.Zero(t, node.UDP.PeakBPS)
 
 	// The read must not change the ring: repeat and compare.
 	again := group.VaneDiagnostics()
-	require.Equal(t, node.TCP.P10BPS, again.Runtime.P5Nodes[alpha.Name()].TCP.P10BPS)
+	require.Equal(t, node.TCP.P10BPS, again.Runtime.ThroughputProfiles[alpha.Name()].TCP.P10BPS)
 }
 
-// P5-PERSIST-001: the profile survives a persist→restore round trip, expired
+// PROFILE-PERSIST-001: the profile survives a persist→restore round trip, expired
 // samples drop, bucket counts halve once, old snapshots without the field
-// restore empty, and P5 never decides node validity.
-func TestVaneP5Persistence(t *testing.T) {
-	now := vaneP5Time(10)
+// restore empty, and the profile never decides node validity.
+func TestVaneThroughputProfilePersistence(t *testing.T) {
+	now := vaneThroughputProfileTime(10)
 
 	t.Run("round trip keeps p10, peak and buckets", func(t *testing.T) {
 		// Anchor 20 minutes past the hour so every sample sits in the past:
 		// the restore must reject anything beyond now+skew by contract.
-		now := vaneP5Time(10).Add(20 * time.Minute)
-		var source vaneP5
+		now := vaneThroughputProfileTime(10).Add(20 * time.Minute)
+		var source vaneThroughputProfile
 		for index := 0; index < 20; index++ {
 			source.observe(now.Add(-time.Duration(20-index)*time.Minute), float64(40+index)*1_000_000)
 		}
 		source.observe(now.Add(-time.Minute), 80*1_000_000) // peak
 
-		restored := restoreVaneP5(persistVaneP5(&source, now), now)
+		restored := restoreVaneThroughputProfile(persistVaneThroughputProfile(&source, now), now)
 		p10, ok := restored.percentile10(now)
 		require.True(t, ok)
 		expected, _ := source.percentile10(now)
@@ -170,34 +170,34 @@ func TestVaneP5Persistence(t *testing.T) {
 	})
 
 	t.Run("expired samples drop at persist, future skew drops at restore", func(t *testing.T) {
-		var source vaneP5
-		source.observe(now.Add(-vaneP5RingWindow-time.Hour), 5*1_000_000)
+		var source vaneThroughputProfile
+		source.observe(now.Add(-vaneThroughputProfileRingWindow-time.Hour), 5*1_000_000)
 		source.observe(now, 50*1_000_000)
-		persisted := persistVaneP5(&source, now)
+		persisted := persistVaneThroughputProfile(&source, now)
 		require.Len(t, persisted.Ring, 1, "the expired sample must not persist")
 
-		restored := restoreVaneP5(persisted, now)
+		restored := restoreVaneThroughputProfile(persisted, now)
 		require.Equal(t, 1, restored.ringLen)
 		p10, ok := restored.percentile10(now)
 		require.True(t, ok)
 		require.Equal(t, 50*1_000_000.0, p10)
 
-		future := &vanePersistedP5{Ring: []vanePersistedP5RingSample{
+		future := &vanePersistedProfile{Ring: []vanePersistedProfileRingSample{
 			{BPS: 1, At: now.Add(2 * vaneLearningFutureSkew)},
 			{BPS: 2, At: time.Time{}},
 			{BPS: -3, At: now},
 			{BPS: math.NaN(), At: now},
 		}}
-		empty := restoreVaneP5(future, now)
+		empty := restoreVaneThroughputProfile(future, now)
 		require.Zero(t, empty.ringLen, "future-skewed, zero-time and illegal samples all drop")
 	})
 
 	t.Run("bad buckets clear, sane buckets halve", func(t *testing.T) {
-		persisted := &vanePersistedP5{
-			BucketEMA: [vaneP5BucketCount]float64{10: 1_000_000, 20: -1, 21: math.NaN()},
-			BucketN:   [vaneP5BucketCount]int64{10: 64, 20: 5, 21: 5},
+		persisted := &vanePersistedProfile{
+			BucketEMA: [vaneThroughputProfileBucketCount]float64{10: 1_000_000, 20: -1, 21: math.NaN()},
+			BucketN:   [vaneThroughputProfileBucketCount]int64{10: 64, 20: 5, 21: 5},
 		}
-		restored := restoreVaneP5(persisted, now)
+		restored := restoreVaneThroughputProfile(persisted, now)
 		require.Equal(t, 1_000_000.0, restored.buckets[10].ema)
 		require.Equal(t, int64(32), restored.buckets[10].samples)
 		require.Zero(t, restored.buckets[20].ema, "a negative estimate clears its bucket")
@@ -205,20 +205,20 @@ func TestVaneP5Persistence(t *testing.T) {
 		require.Zero(t, restored.buckets[21].ema)
 	})
 
-	t.Run("old snapshots without p5 restore empty", func(t *testing.T) {
+	t.Run("old snapshots without a profile restore empty", func(t *testing.T) {
 		legacy := vanePersistedMetrics{}
 		metrics, _, _ := restoreVaneMetrics(legacy, now)
-		require.False(t, metrics.p5.hasData())
-		require.Zero(t, metrics.p5.peakBPS)
+		require.False(t, metrics.profile.hasData())
+		require.Zero(t, metrics.profile.peakBPS)
 	})
 
-	t.Run("p5 never decides node validity", func(t *testing.T) {
+	t.Run("the profile never decides node validity", func(t *testing.T) {
 		node := vanePersistedNode{
 			Name: "alpha", Identity: "test:alpha", LastSeen: now,
-			TCP: vanePersistedMetrics{P5: persistVaneP5(&vaneP5{ringLen: 1, peakBPS: 9, peakAt: now}, now)},
+			TCP: vanePersistedMetrics{Profile: persistVaneThroughputProfile(&vaneThroughputProfile{ringLen: 1, peakBPS: 9, peakAt: now}, now)},
 		}
 		_, ok, invalid := restoreVaneNode(node, now)
-		require.False(t, ok, "a node kept alive only by P5 must not resurrect")
+		require.False(t, ok, "a node kept alive only by its profile must not resurrect")
 		require.False(t, invalid)
 	})
 }
