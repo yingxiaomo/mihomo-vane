@@ -138,7 +138,14 @@ func (a *Vane) targetScopeForKey(target string, port uint16) (vaneTargetKey, boo
 }
 
 // vaneStickyTTL is how long a host stays on one exit after a pick.
-const vaneStickyTTL = 60 * time.Second
+// It spans the gap between two segments of the same stream: a player that
+// rebuilds its connection while the buffer refills must land on the same exit,
+// not on whatever scored highest at that instant. A 60s window re-picked on
+// every buffering gap, so the same target bounced across the pool as the
+// scores drifted between picks. Five minutes covers a normal refill; a real
+// switch still renews the choice through rememberStickyLocked, so a dead node
+// is not pinned longer than the switch that replaces it.
+const vaneStickyTTL = 300 * time.Second
 
 // vaneStickySwitchWindow is the sliding window that bounds switchCount.
 const vaneStickySwitchWindow = 30 * time.Minute

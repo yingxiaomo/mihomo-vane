@@ -27,9 +27,9 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 	choices = append(choices, group.pick(meta, vaneTransportTCP, true, true).Name())
 	group.recordDialFailure(context.Background(), meta, vaneTransportTCP, b, errors.New("replay failure"), clock.Now())
 	choices = append(choices, group.pick(meta, vaneTransportTCP, true, true).Name())
-	// STICKY: the per-host sticky choice lasts 60s. After it expires the
-	// pick re-ranks from scratch, so the faster connector (beta) wins.
-	clock.Advance(2 * time.Minute)
+	// STICKY: the per-host sticky choice lasts vaneStickyTTL. After it expires
+	// the pick re-ranks from scratch, so the faster connector (beta) wins.
+	clock.Advance(2 * vaneStickyTTL)
 	choices = append(choices, group.pick(meta, vaneTransportTCP, true, true).Name())
 	scores := []int64{}
 	var metrics vaneMetrics
@@ -48,4 +48,40 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 	require.Equal(t, []string{"alpha", "alpha", "alpha", "beta"}, choices)
 	// Absolute scores shift by the neutral profile blend; the ordering is the contract.
 	require.Equal(t, []int64{346692}, scores)
+}
+
+// TestVaneSegmentGapsKeepTheSameExit pins the sticky window to the player's
+// behaviour rather than to a wall clock: a player drops and rebuilds its
+// connection while the buffer refills, and every rebuild used to re-pick from
+// the current scores. A gap shorter than vaneStickyTTL must land on the exit the
+// host was already using, even when another node has become the better
+// connector; only a gap past the window may re-rank.
+//
+// Each gap is measured from the moment the host was pinned, not from the
+// previous pick: a player's gaps overlap the same buffer refill, they do not
+// chain into one longer silence.
+func TestVaneSegmentGapsKeepTheSameExit(t *testing.T) {
+	clock := newVaneConnTestClock()
+	a := newVaneTestProxy("alpha", true, true)
+	b := newVaneTestProxy("beta", true, true)
+	group, _ := newVaneGroupForTest(clock, 100, time.Hour, a, b)
+	defer group.Close()
+	meta := &C.Metadata{NetWork: C.TCP, Host: "rr1---sn-gap.googlevideo.com", DstPort: 443}
+
+	require.Equal(t, "alpha", group.pick(meta, vaneTransportTCP, true, true).Name())
+	base := clock.Now()
+
+	// beta becomes the better connector on the path both picks are ranked on.
+	group.observeConnect("alpha", vaneTransportTCP, base, 900*time.Millisecond)
+	group.observeConnect("beta", vaneTransportTCP, base, 100*time.Millisecond)
+
+	for _, gap := range []time.Duration{30 * time.Second, time.Minute, 4 * time.Minute} {
+		clock.Advance(base.Add(gap).Sub(clock.Now()))
+		require.Equal(t, "alpha", group.pick(meta, vaneTransportTCP, true, false).Name(),
+			"a buffering gap of %s must not re-pick", gap)
+	}
+
+	// Past the window the faster connector is allowed to take over.
+	clock.Advance(base.Add(vaneStickyTTL + time.Second).Sub(clock.Now()))
+	require.Equal(t, "beta", group.pick(meta, vaneTransportTCP, true, false).Name())
 }
