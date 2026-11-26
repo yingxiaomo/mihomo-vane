@@ -269,7 +269,13 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.Equal(t, failure, group.targetFailures[failureKey], "capBPS and telemetry unchanged")
 				require.Equal(t, lease, group.targetHandoffs[key])
 				require.True(t, lease.expiresAt.After(clock.Now()), "the untrusted window arrives while the claimed lease is still valid")
-				require.Equal(t, slowCount, len(vaneCooledNodesLocked(group)))
+				// VERIFY-STALL: in "on" mode a synthetic stall on the landing is
+				// evidence about that node, so it may add exactly one cooldown.
+				if mode == vaneRacingOn && source == "watchdog" {
+					require.Equal(t, slowCount+1, len(vaneCooledNodesLocked(group)))
+				} else {
+					require.Equal(t, slowCount, len(vaneCooledNodesLocked(group)))
+				}
 				if mode == vaneRacingShadow {
 					// A tolerated stall only observes in shadow mode; in "on"
 					// mode it is a real switch and legitimately cools the node.

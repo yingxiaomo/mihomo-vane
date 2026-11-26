@@ -476,3 +476,37 @@ func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {
 	flow.mu.Unlock()
 	require.Equal(t, group.flow.lowWindows, streak, "the synthetic trigger must reach the commit path")
 }
+
+func TestVaneSyntheticStallPenalizesLanding(t *testing.T) {
+	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+
+	flow.mu.Lock()
+	flow.lowWindows = 2
+	targetKey, candidate := flow.targetKey, flow.candidate
+	flow.mu.Unlock()
+
+	group.mu.Lock()
+	group.ledger[targetKey] = vaneSwitchLedger{
+		windowFrom: clock.Now(),
+		lastSwitch: clock.Now(),
+		verifyNode: candidate,
+		verifyAt:   clock.Now(),
+	}
+	group.mu.Unlock()
+
+	// A silent flow cannot supply throughput evidence, but it is still evidence
+	// about the node it landed on.
+	flow.observe(vaneThroughputObservation{
+		BitsPerSecond: 1,
+		synthetic:     true,
+		untrusted:     true,
+		TotalBytes:    0,
+		Age:           2 * time.Minute,
+	})
+
+	group.mu.Lock()
+	cooling := group.nodeCoolingLocked(candidate, clock.Now())
+	group.mu.Unlock()
+	require.True(t, cooling, "a landing that returns nothing must be cooled")
+}

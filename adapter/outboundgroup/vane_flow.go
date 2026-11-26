@@ -844,6 +844,13 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 		}
 	}
 	untrusted := sample.untrusted || graceReason != ""
+	// VERIFY-STALL: a flow that goes silent right after a switch is evidence about
+	// the node it landed on, even though the synthetic window itself cannot be used
+	// as throughput evidence. Without this a landing that returns zero bytes was
+	// never cooled, so the next connection was steered onto it again.
+	if untrusted && targetScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.racing.mode == vaneRacingOn {
+		f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
+	}
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
 	if !untrusted && targetScopedFlow {
 		// VERIFY: real bytes only. A node we just landed on that keeps tripping
@@ -1385,6 +1392,10 @@ const (
 	// VERIFY: a landing is judged on real bytes, not the probe.
 	vaneVerifyPenaltyLowWindows = 2
 	vaneVerifyPenaltyCooldown   = 10 * time.Minute
+	// vaneVerifyPenaltyWindow is how long a landing stays under verification.
+	// A zero-sample flow only trips its own branch after 90 s of silence, so a
+	// 60 s window would miss the exact case this penalty exists for.
+	vaneVerifyPenaltyWindow = 5 * time.Minute
 )
 
 type vaneSwitchLedger struct {
@@ -1489,7 +1500,7 @@ func (a *Vane) coolNodeLocked(name string, until time.Time) {
 func (a *Vane) penalizeSlowLanding(targetKey vaneFlowKey, candidate string, now time.Time) {
 	a.mu.Lock()
 	ledger, ok := a.ledger[targetKey]
-	if !ok || ledger.verifyNode != candidate || now.Sub(ledger.verifyAt) > vaneSwitchThrottle {
+	if !ok || ledger.verifyNode != candidate || now.Sub(ledger.verifyAt) > vaneVerifyPenaltyWindow {
 		a.mu.Unlock()
 		return
 	}
