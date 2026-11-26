@@ -1126,3 +1126,44 @@ func TestVaneNodeCooldownDoesNotFollowAReusedName(t *testing.T) {
 	require.True(t, held, "the cooldown holds for the endpoint that earned it")
 	require.False(t, reused, "a different endpoint under the same name must not inherit it")
 }
+
+// LOW-VOLUME-01: a phone video can stall below the min-bytes gate and never
+// reach it. Once the socket has been fully silent long enough the flow must
+// still be judged, otherwise the screen sits on a spinner forever.
+func TestVaneLowVolumeStallStillJudged(t *testing.T) {
+	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	dropVaneRecordedEvents(group)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+
+	response := flow.observe(vaneThroughputObservation{
+		BitsPerSecond: 1,
+		untrusted:     true,
+		synthetic:     true,
+		TotalBytes:    512 * 1024,
+		Age:           60 * time.Second,
+	})
+	require.NotZero(t, countVaneEvents(group, "race-scheduled", "")+countVaneEvents(group, "reconnect-suppressed", ""),
+		"a silent low-volume flow must still reach the switch decision, action=%v", response)
+}
+
+// LOW-VOLUME-02: the exemption is for a socket that went silent, not for any
+// small flow. A live SSE heartbeat must not be judged on volume alone, so the
+// synthetic flag is part of the condition.
+func TestVaneLowVolumeNeedsASyntheticWindow(t *testing.T) {
+	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	dropVaneRecordedEvents(group)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+
+	// Four windows also clear the credit gate, so the min-bytes gate is the
+	// only thing left that can refuse this flow.
+	for i := 0; i < 4; i++ {
+		flow.observe(vaneThroughputObservation{
+			BitsPerSecond: 1,
+			untrusted:     true,
+			TotalBytes:    512 * 1024,
+			Age:           60 * time.Second,
+		})
+	}
+	require.Zero(t, countVaneEvents(group, "race-scheduled", "")+countVaneEvents(group, "reconnect-suppressed", ""),
+		"a live small flow must stay below the min-bytes gate")
+}

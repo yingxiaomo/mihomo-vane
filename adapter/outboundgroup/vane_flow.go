@@ -72,6 +72,17 @@ const (
 	// low rate says anything about the node. A 30 KB API reply is not slow,
 	// it is small, and switching it burns the race budget the video needs.
 	vaneSwitchMinBytes = int64(8 * 1024 * 1024)
+	// LOW-VOLUME: a phone video can stall below the 2 MiB gate and never reach
+	// it. The YouTube app pulls a small SABR segment first; if that segment is
+	// slow the connection sits at a few hundred kilobytes forever, so the
+	// min-bytes gate keeps the watchdog from ever judging it while the screen
+	// is stuck on a spinner. A synthetic window means the socket went fully
+	// silent for at least the stall tolerance, so the flow is not merely young:
+	// after this long, with this much read, a byte gate measured on lifetime
+	// total must not veto the verdict. The synthetic requirement keeps a live
+	// but small connection (SSE heartbeat, keepalive) out of this branch.
+	vaneLowVolumeAge   = 45 * time.Second
+	vaneLowVolumeBytes = int64(256 * 1024)
 	vaneWatchdogTick   = 5 * time.Second
 	// BACKLOG-STREAK: how long one backlog sighting excuses low windows.
 	// A backgrounded player (browser tab, phone screen off) throttles or
@@ -803,7 +814,15 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 			f.group.settleTargetHandoff(handoff, member, sample)
 		}
 	}
-	if lowWindows < config.lowWindows || sample.Age < config.minAge || sample.TotalBytes < config.minBytes {
+	if lowWindows < config.lowWindows || sample.Age < config.minAge {
+		return nil
+	}
+	// LOW-VOLUME: see the constant block. A socket that has gone fully silent
+	// for at least the stall tolerance may be judged on less lifetime traffic
+	// than min-bytes asks for; otherwise a phone segment that stalls at a few
+	// hundred kilobytes can never be switched away from.
+	stalledLowVolume := sample.synthetic && sample.Age >= vaneLowVolumeAge && sample.TotalBytes >= vaneLowVolumeBytes
+	if sample.TotalBytes < config.minBytes && !stalledLowVolume {
 		return nil
 	}
 	creditBits := float64(sample.TotalBytes)*8 - config.demandBPS*sample.Age.Seconds()
