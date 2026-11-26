@@ -862,6 +862,11 @@ func vaneThroughputCost(logBPS, lowBPS, highBPS float64) float64 {
 type vaneCandidateScore struct {
 	name        string
 	scoreMicros int64
+	// switchAway is how often this node has been left behind by a switch
+	// without serving a full term (SWITCH-SCORE). It only breaks ties: the
+	// score still decides, because a node that is merely unlucky must not lose
+	// to one that is slow.
+	switchAway int
 }
 
 func compareVaneCandidateScores(left, right vaneCandidateScore) int {
@@ -869,6 +874,16 @@ func compareVaneCandidateScores(left, right vaneCandidateScore) int {
 		return -1
 	}
 	if left.scoreMicros > right.scoreMicros {
+		return 1
+	}
+	// SWITCH-SCORE: equal scores are common when most candidates have no
+	// throughput sample, so a node that keeps getting replaced should lose the
+	// tie. A single switch is not evidence, so only a gap of two or more counts
+	// (otherwise two fresh nodes would just take turns).
+	if left.switchAway+1 < right.switchAway {
+		return -1
+	}
+	if right.switchAway+1 < left.switchAway {
 		return 1
 	}
 	return strings.Compare(left.name, right.name)

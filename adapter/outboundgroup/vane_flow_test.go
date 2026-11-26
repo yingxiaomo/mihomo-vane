@@ -1196,3 +1196,46 @@ func TestVaneStarvingFlowIgnoresSwitchThrottle(t *testing.T) {
 	require.Empty(t, group.ledgerThrottleReasonLocked(key, true, now.Add(10*time.Second)),
 		"a starving flow must not wait out the observation window")
 }
+
+func TestVaneSwitchAwayExtendsTheRest(t *testing.T) {
+	group, clock, _, _, _ := newTargetGroupForTest(t)
+	now := clock.Now()
+	group.mu.Lock()
+	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown))
+	first := group.nodes["alpha"]
+	require.Equal(t, 1, first.switchAway, "one switch is one strike")
+	require.Equal(t, now.Add(vaneSwitchAwayCooldown), first.cooldown, "the first rest is the caller's")
+
+	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown))
+	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown))
+	second := group.nodes["alpha"]
+	require.Equal(t, 3, second.switchAway)
+	require.Equal(t, now.Add(2*vaneSwitchAwayCooldown), second.cooldown, "SWITCH-SCORE: a repeat offender rests twice as long")
+	group.mu.Unlock()
+}
+
+func TestVaneSuccessfulServicePaysBackTheDebt(t *testing.T) {
+	group, _, _, _, _ := newTargetGroupForTest(t)
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	state := &vaneNodeState{name: "alpha"}
+	state.switchAway = 3
+	state.recordSample(group.clock.Now(), true)
+	require.Equal(t, 2, state.switchAway, "a good sample erodes one strike")
+	state.switchAway = 0
+	state.recordSample(group.clock.Now(), true)
+	require.Equal(t, 0, state.switchAway, "the debt never goes negative")
+}
+
+func TestVaneSwitchAwayBreaksOnlyRealTies(t *testing.T) {
+	fast := vaneCandidateScore{name: "alpha", scoreMicros: 100, switchAway: 0}
+	slower := vaneCandidateScore{name: "beta", scoreMicros: 200, switchAway: 9}
+	require.Less(t, compareVaneCandidateScores(fast, slower), 0, "the score decides first")
+
+	oneStrike := vaneCandidateScore{name: "alpha", scoreMicros: 100, switchAway: 1}
+	fresh := vaneCandidateScore{name: "beta", scoreMicros: 100, switchAway: 0}
+	require.Less(t, compareVaneCandidateScores(oneStrike, fresh), 0, "a single switch is not evidence, the name decides")
+
+	cronically := vaneCandidateScore{name: "alpha", scoreMicros: 100, switchAway: 4}
+	require.Greater(t, compareVaneCandidateScores(cronically, fresh), 0, "SWITCH-SCORE: a chronic offender loses the tie")
+}

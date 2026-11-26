@@ -1539,6 +1539,19 @@ func (a *Vane) coolNodeLocked(name string, until time.Time) {
 		state = &vaneNodeState{name: name, identity: a.nodeIdentities[name]}
 		a.nodes[name] = state
 	}
+	// SWITCH-SCORE: every switch away extends the next rest, so a chronic
+	// offender spends longer out of the pool than a node that failed once.
+	state.switchAway++
+	base := until.Sub(a.clock.Now())
+	if base > 0 {
+		extra := state.switchAway / 2
+		if extra > 3 {
+			extra = 3
+		}
+		if extended := a.clock.Now().Add(base + time.Duration(extra)*base); extended.After(until) {
+			until = extended
+		}
+	}
 	if until.After(state.cooldown) {
 		state.cooldown = until
 	}

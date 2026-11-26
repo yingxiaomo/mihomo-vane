@@ -94,6 +94,10 @@ type vaneNodeState struct {
 	latencyMs      float64
 	latencySamples uint64
 	latencyAt      time.Time
+	// switchAway counts how often a flow was switched away from this node
+	// without it serving a full term (SWITCH-SCORE). Unlike cooldown, which
+	// expires, this is a reputation that good service erodes.
+	switchAway int
 	// cooldown is the single node-level penalty of the simplified kernel (v3).
 	// It replaces slowCooldowns and the per-target reconnects: when a
 	// flow is switched away from this node, the node rests for 30 minutes.
@@ -120,10 +124,24 @@ const vaneFutureStampTolerance = 5 * time.Minute
 func (s *vaneNodeState) recordSample(now time.Time, success bool) {
 	if success {
 		s.successCount++
+		// SWITCH-SCORE: a node that serves pays its debt back one step at a
+		// time, so a single bad minute does not label it forever.
+		if s.switchAway > 0 {
+			s.switchAway--
+		}
 	} else {
 		s.failureCount++
 	}
 	s.countersAt = now
+}
+
+// switchAwayOfLocked reports a node's switch-away debt (SWITCH-SCORE).
+// Callers hold a.mu, which is where every mutation of a.nodes happens.
+func (a *Vane) switchAwayOfLocked(name string) int {
+	if state := a.nodes[name]; state != nil {
+		return state.switchAway
+	}
+	return 0
 }
 
 func (s *vaneNodeState) recordMaxRate(now time.Time, bitsPerSecond float64) {
@@ -1176,6 +1194,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			vaneCandidateScore: vaneCandidateScore{
 				name:        proxy.Name(),
 				scoreMicros: parts.total,
+				switchAway:  a.switchAwayOfLocked(proxy.Name()),
 			},
 			parts:                  parts,
 			cooldownUntil:          until,
