@@ -39,17 +39,7 @@ type ReuseTransport struct {
 }
 
 func (rt *ReuseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := rt.entry.transport.RoundTrip(req)
-	if err != nil {
-		// The pooled connection behind this entry is gone (HTTP/2 GOAWAY,
-		// idle timeout, reset by the edge). Without this the entry stays
-		// reusable forever: leftRequests defaults to 1<<30-1 and
-		// unreusableAt is zero unless xmux limits are configured, so every
-		// later request on this client would be handed the same dead
-		// connection and time out until the process restarts.
-		rt.entry.close()
-	}
-	return resp, err
+	return rt.entry.transport.RoundTrip(req)
 }
 
 func (rt *ReuseTransport) Close() error {
