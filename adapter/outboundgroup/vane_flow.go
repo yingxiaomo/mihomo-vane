@@ -253,13 +253,6 @@ func vaneNodeKeyFor(targetKey vaneFlowKey, candidate string) vaneNodeKey {
 	return vaneNodeKey{vaneFlowKey: targetKey, candidate: candidate}
 }
 
-// vaneSameOrigin reports whether two node names look like the same server
-// behind different transports. SAME-ORIGIN: one provider exposes
-// "自建-mx1-德国-xhttp", "…-xhttp隧道" and "…-tuic" for the same box, and
-// switching between them closes the connection and lands on the same IP. The
-// shared part is the first three dash-separated segments, which is what those
-// names have in common and what ordinary node names (provider-country-city)
-// keep apart.
 func vaneSameOrigin(a, b string) bool {
 	if a == "" || b == "" || a == b {
 		return false
@@ -1676,12 +1669,6 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 	for _, item := range health {
 		proxy := item.proxy
 		if proxy.Name() == current || !item.alive {
-			continue
-		}
-		// SAME-ORIGIN: one provider can expose the same server through several
-		// transports (xhttp, xhttp-tunnel, tuic). They share an IP, so switching
-		// between them tears the connection down and lands in the same place.
-		if vaneSameOrigin(proxy.Name(), current) {
 			continue
 		}
 		challengerIdentity := vaneProxyPersistentIdentity(proxy)
