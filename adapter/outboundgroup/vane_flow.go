@@ -931,18 +931,12 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	if lowWindows < config.lowWindows || sample.Age < config.minAge {
 		return nil
 	}
-	// LOW-VOLUME: see the constant block. A socket that has gone fully silent
-	// for at least the stall tolerance may be judged on less lifetime traffic
-	// than min-bytes asks for; otherwise a phone segment that stalls at a few
-	// hundred kilobytes can never be switched away from.
-	stalledLowVolume := sample.synthetic && sample.Age >= vaneLowVolumeAge && sample.TotalBytes >= vaneLowVolumeBytes
-	// ZERO-SAMPLE: a flow that never cleared one sample carries no bytes at
-	// all, so it can only be judged on the longer zero-sample silence.
-	// ZERO-SAMPLE: the synthetic window itself already proves the silence
-	// reached its threshold (90 s untouched, 25 s after a few bytes), so the
-	// gate must not re-demand the longest one.
-	stalledEmptyFlow := sample.synthetic && sample.TotalBytes < vaneLowVolumeBytes
-	stalledSmallFlow := stalledLowVolume || stalledEmptyFlow
+	// SMALL-FLOW: a flow under min-bytes carries little evidence either way,
+	// so it only counts as stalled after the long partial-silence window. The
+	// ordinary synthetic window is ten seconds of zero bytes, which is a
+	// keep-alive going idle, not a stall - judging a telegram API socket or a
+	// thumbnail request on it switched those flows every dozen seconds.
+	stalledSmallFlow := sample.synthetic && sample.Age >= vaneLowVolumeAge
 	if sample.TotalBytes < config.minBytes && !stalledSmallFlow {
 		return nil
 	}
