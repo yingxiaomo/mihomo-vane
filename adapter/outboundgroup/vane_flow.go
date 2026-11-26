@@ -82,11 +82,6 @@ const (
 	// total must not veto the verdict. The synthetic requirement keeps a live
 	// but small connection (SSE heartbeat, keepalive) out of this branch.
 	vaneLowVolumeAge = 45 * time.Second
-	// 32 KiB is exactly the sample payload floor (vaneThroughputMinPayload):
-	// reaching it proves the flow really carried data, so a low rate is the
-	// node being slow rather than the request being tiny. Anything above this
-	// would re-introduce the byte gate this branch exists to bypass.
-	vaneLowVolumeBytes = int64(32 * 1024)
 	// ZERO-SAMPLE: a connection that opened and then delivered fewer bytes than
 	// one sample (32 KiB) stays invisible to a sample-driven watchdog forever.
 	// Age it from the flow's start instead, but demand a much longer silence:
@@ -241,21 +236,6 @@ type vaneCandidateKey struct {
 	vaneFlowKey
 	candidate string
 	identity  string
-}
-
-// vaneNodeKey scopes a cooldown or budget to (target, node) instead of the
-// whole target. NODE-SCOPE: one slow node must be punished alone — a target is
-// usually shared by many concurrent player connections, and a domain-wide
-// quota let one bad node burn the whole budget for every other connection on
-// the same target (the field symptom: five rejections with reason
-// budget-exhausted while three connections sat dead on one node).
-type vaneNodeKey struct {
-	vaneFlowKey
-	candidate string
-}
-
-func vaneNodeKeyFor(targetKey vaneFlowKey, candidate string) vaneNodeKey {
-	return vaneNodeKey{vaneFlowKey: targetKey, candidate: candidate}
 }
 
 func vaneSameOrigin(a, b string) bool {

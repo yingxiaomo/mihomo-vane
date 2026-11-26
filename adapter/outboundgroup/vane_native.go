@@ -631,10 +631,6 @@ func FlushVaneNativeCollectorsContext(ctx context.Context) error {
 	return nil
 }
 
-func FlushVaneNativeCollectors() error {
-	return FlushVaneNativeCollectorsContext(context.Background())
-}
-
 type vaneNativeAttempt struct {
 	collector        *vaneNativeCollector
 	id               string

@@ -11,7 +11,6 @@ import (
 
 const (
 	VaneDiagnosticsSchemaVersion = 3
-	vaneDiagnosticsOldestSchema  = 1
 
 	// vaneBaselineTokenIDBase offsets baseline reconnect token IDs far away
 	// from the race task ID space (nextTaskID counts up from 1), so a stale
