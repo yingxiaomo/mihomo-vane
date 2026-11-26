@@ -1361,7 +1361,14 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		for _, candidate := range ranked {
 			if candidate.name == stickyName && !candidate.cooldownUntil.After(now) &&
 				(stickyIdentity == "" || a.nodeIdentityIsCurrentLocked(stickyName, stickyIdentity)) {
-				chosen = candidate
+				// STICKY-SCORE: holding the host must not cost throughput. When
+				// the sticky node has fallen behind the best candidate by more
+				// than the margin, this pick follows the fastest node instead —
+				// "last successful" alone would let a slow-but-alive node keep
+				// the stream indefinitely.
+				if candidate.scoreMicros-ranked[0].scoreMicros <= vaneStickyScoreMargin {
+					chosen = candidate
+				}
 				break
 			}
 		}

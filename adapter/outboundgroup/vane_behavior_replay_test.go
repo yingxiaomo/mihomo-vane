@@ -50,6 +50,32 @@ func TestVaneRenameBehaviorReplay(t *testing.T) {
 	require.Equal(t, []int64{346692}, scores)
 }
 
+// TestVaneStickyYieldsToAFasterNode keeps the sticky window from turning into
+// liveness: a node that is still reachable but has fallen well behind on
+// throughput must lose the host on the next pick, or the group degrades to
+// "any node that answers stays".
+func TestVaneStickyYieldsToAFasterNode(t *testing.T) {
+	clock := newVaneConnTestClock()
+	a := newVaneTestProxy("alpha", true, true)
+	b := newVaneTestProxy("beta", true, true)
+	group, _ := newVaneGroupForTest(clock, 100, time.Hour, a, b)
+	defer group.Close()
+	meta := &C.Metadata{NetWork: C.TCP, Host: "rr1---sn-gap.googlevideo.com", DstPort: 443}
+
+	require.Equal(t, "alpha", group.pick(meta, vaneTransportTCP, true, true).Name())
+
+	group.observeConnect("alpha", vaneTransportTCP, clock.Now(), 200*time.Millisecond)
+	group.observeConnect("beta", vaneTransportTCP, clock.Now(), 100*time.Millisecond)
+	group.mu.Lock()
+	group.nodes["alpha"].tcp.observeThroughput(clock.Now(), 2_000_000)
+	group.nodes["beta"].tcp.observeThroughput(clock.Now(), 60_000_000)
+	group.mu.Unlock()
+
+	clock.Advance(10 * time.Second)
+	require.Equal(t, "beta", group.pick(meta, vaneTransportTCP, true, false).Name(),
+		"a sticky node that fell behind the best by more than the margin must lose the host")
+}
+
 // TestVaneSegmentGapsKeepTheSameExit pins the sticky window to the player's
 // behaviour rather than to a wall clock: a player drops and rebuilds its
 // connection while the buffer refills, and every rebuild used to re-pick from

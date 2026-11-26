@@ -145,6 +145,11 @@ func (a *Vane) targetScopeForKey(target string, port uint16) (vaneTargetKey, boo
 // bad has to lose the host on the next pick, not after a five minute wait.
 const vaneStickyTTL = 60 * time.Second
 
+// vaneStickyScoreMargin is how far the sticky node may fall behind the best
+// candidate before a pick follows the fastest node instead. The score is in
+// micro-units (1.0 = 1_000_000), so this is a 5% gap.
+const vaneStickyScoreMargin = 50_000
+
 // vaneStickySwitchWindow is the sliding window that bounds switchCount.
 const vaneStickySwitchWindow = 30 * time.Minute
 
