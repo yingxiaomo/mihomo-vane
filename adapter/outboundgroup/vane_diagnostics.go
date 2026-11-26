@@ -104,7 +104,7 @@ type VaneDiagnosticConfig struct {
 	ExplorationEnabled            bool     `json:"explorationEnabled"`
 	ExplorationInterval           int      `json:"explorationInterval"`
 	GrayFailureObservationEnabled bool     `json:"grayFailureObservationEnabled"`
-	RacingMode                    string   `json:"racingMode"`
+	SwitchMode                    string   `json:"switchMode"`
 	RacingURL                     string   `json:"racingUrl,omitempty"`
 	RacingBudgetBytesHour         int64    `json:"racingBudgetBytesHour"`
 }

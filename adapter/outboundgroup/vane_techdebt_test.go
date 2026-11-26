@@ -456,7 +456,7 @@ func newTargetGroupForTest3(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestP
 	gamma := newVaneTestProxy("gamma", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com", "DOMAIN-SUFFIX,interactive.example")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	return group, clock, alpha, beta, gamma, metadata
 }
@@ -677,7 +677,7 @@ func TestVaneUnwrappedWriterDrainsPendingAction(t *testing.T) {
 func TestVaneRaceQualifiesNodeWithoutLiveState(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
-	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 	suppressColdPickProbeForTest(t, group, metadata)
 	plan := prepareTargetHandoffForTest(t, group, metadata, alpha)
 	request := vaneRaceRequest{
@@ -820,7 +820,7 @@ func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
 // merely-slow flow, but must not freeze one that is starving past the credit
 // guard — that is exactly the switched-to node dying minutes after the switch.
 func TestVaneStarvedFlowBypassesReconnectCooldown(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	group.mu.Lock()
 	group.noteSwitchLocked(flow.targetKey, flow.candidate, clock.Now())
 	group.mu.Unlock()

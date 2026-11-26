@@ -34,7 +34,7 @@ func newVaneRacingEvidenceGroup(t *testing.T) (*Vane, *vaneConnTestClock, *vaneT
 	gamma := newVaneTestProxy("gamma", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	return group, clock, alpha, beta, gamma
 }
 

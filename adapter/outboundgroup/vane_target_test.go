@@ -70,7 +70,7 @@ func newTargetGroupForTest(t *testing.T) (*Vane, *vaneConnTestClock, *vaneTestPr
 	beta := newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com", "DOMAIN-SUFFIX,interactive.example")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	return group, clock, alpha, beta, metadata
 }

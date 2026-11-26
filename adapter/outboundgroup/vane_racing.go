@@ -51,26 +51,35 @@ const (
 	vaneRacingProbeWarmup = int64(1024 * 1024)
 )
 
-type vaneRacingMode uint8
+type vaneSwitchMode uint8
 
 const (
-	vaneRacingShadow vaneRacingMode = iota
-	vaneRacingOn
+	vaneSwitchObserve vaneSwitchMode = iota
+	vaneSwitchLive
 )
 
-func (m vaneRacingMode) String() string {
+func (m vaneSwitchMode) String() string {
 	switch m {
-	case vaneRacingShadow:
+	case vaneSwitchObserve:
 		return "shadow"
-	case vaneRacingOn:
+	case vaneSwitchLive:
 		return "on"
 	default:
 		return "unknown"
 	}
 }
 
+// vaneSwitchMode records whether the group acts on its own decisions. It is
+// derived from the group's "vane" flag and is not a racing knob: it gates
+// the paths that close a connection or cool a node.
+func vaneSwitchModeFor(option VaneOption) vaneSwitchMode {
+	if option.Vane != nil && !*option.Vane {
+		return vaneSwitchObserve
+	}
+	return vaneSwitchLive
+}
+
 type vaneRacingConfig struct {
-	mode            vaneRacingMode
 	url             *url.URL
 	budgetBytesHour int64
 	probe           vaneProbeFunc
@@ -149,10 +158,7 @@ type vaneRacingRuntime struct {
 }
 
 func newVaneRacingConfig(option VaneOption) (vaneRacingConfig, error) {
-	config := vaneRacingConfig{mode: vaneRacingOn, budgetBytesHour: vaneDefaultRacingBudgetMBHour * 1024 * 1024}
-	if option.Vane != nil && !*option.Vane {
-		config.mode = vaneRacingShadow
-	}
+	config := vaneRacingConfig{budgetBytesHour: vaneDefaultRacingBudgetMBHour * 1024 * 1024}
 	rawURL := strings.TrimSpace(option.RacingURL)
 	if rawURL == "" {
 		rawURL = vaneDefaultRacingURL

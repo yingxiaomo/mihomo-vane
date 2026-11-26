@@ -27,7 +27,7 @@ func suppressColdPickProbeForTest(t *testing.T, group *Vane, metadata *C.Metadat
 	group.mu.Unlock()
 }
 
-func newColdPickGroupForTest(t *testing.T, mode vaneRacingMode) (*Vane, *vaneConnTestClock, *vaneTestProxy, *vaneTestProxy, *C.Metadata) {
+func newColdPickGroupForTest(t *testing.T, mode vaneSwitchMode) (*Vane, *vaneConnTestClock, *vaneTestProxy, *vaneTestProxy, *C.Metadata) {
 	t.Helper()
 	clock := newVaneConnTestClock()
 	alpha := newVaneTestProxy("alpha", true, true)
@@ -37,7 +37,7 @@ func newColdPickGroupForTest(t *testing.T, mode vaneRacingMode) (*Vane, *vaneCon
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 2_000_000)
-	configureVaneRacingForTest(t, group, mode)
+	configureVaneSwitchForTest(t, group, mode)
 	metadata := &C.Metadata{Host: "rr-coldpick.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	return group, clock, alpha, beta, metadata
 }
@@ -45,7 +45,7 @@ func newColdPickGroupForTest(t *testing.T, mode vaneRacingMode) (*Vane, *vaneCon
 // COLD-PICK-01: a cold pick with probes 40M vs 6M selects the faster one and
 // both valid results land in the capability cache.
 func TestVaneColdPickSelectsFasterAndWritesCapability(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	alphaName := alpha.Name()
 	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
 		// alpha is the ranking choice; its 6M result ties the margin against
@@ -77,7 +77,7 @@ func TestVaneColdPickSelectsFasterAndWritesCapability(t *testing.T) {
 // COLD-PICK-02: both probes below the bar; the probe result still wins over
 // a better delay ranking when it is meaningfully faster.
 func TestVaneColdPickBeatsDelayRanking(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	alphaName := alpha.Name()
 	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
 		// alpha is the ranking choice; make it slower than beta.
@@ -98,7 +98,7 @@ func TestVaneColdPickBeatsDelayRanking(t *testing.T) {
 
 // COLD-PICK-03: both probes invalid -> ranking fallback, no cache writes.
 func TestVaneColdPickInvalidFallsBack(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{reason: "nil-connection"}
 	}
@@ -115,7 +115,7 @@ func TestVaneColdPickInvalidFallsBack(t *testing.T) {
 
 // COLD-PICK-04: budget denied -> no probe, ranking fallback.
 func TestVaneColdPickBudgetDeniedFallsBack(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	group.racingRuntime.mu.Lock()
 	group.racingRuntime.budget = vaneRacingBudget{startedAt: group.clock.Now(), used: 120 * 1024 * 1024}
 	group.racingRuntime.mu.Unlock()
@@ -149,7 +149,7 @@ func TestVaneColdPickBudgetDeniedFallsBack(t *testing.T) {
 // per-scope timestamp) never probes.
 func TestVaneColdPickWarmSkipsProbe(t *testing.T) {
 	t.Run("fresh capability", func(t *testing.T) {
-		group, _, alpha, beta, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+		group, _, alpha, beta, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 		now := group.clock.Now()
 		group.mu.Lock()
 		group.learning.mu.Lock()
@@ -170,7 +170,7 @@ func TestVaneColdPickWarmSkipsProbe(t *testing.T) {
 	})
 
 	t.Run("fresh per-scope timestamp", func(t *testing.T) {
-		group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+		group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 		suppressColdPickProbeForTest(t, group, metadata)
 		probeCalled := atomic.Bool{}
 		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -187,7 +187,7 @@ func TestVaneColdPickWarmSkipsProbe(t *testing.T) {
 // COLD-PICK-06: a generation change during the probe discards the results and
 // falls back to ranking.
 func TestVaneColdPickGenerationChangeDiscards(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	alphaName := alpha.Name()
 	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
 		// Simulate a reload mid-probe: bump the generation from the probe
@@ -213,7 +213,7 @@ func TestVaneColdPickGenerationChangeDiscards(t *testing.T) {
 // COLD-PICK-08: concurrent cold picks on the same scope — the second pick
 // fails open to ranking while the first probe is in flight.
 func TestVaneColdPickConcurrentFailsOpen(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	probeEntered := make(chan struct{})
 	releaseProbe := make(chan struct{})
 	var probeOnce sync.Once
@@ -258,7 +258,7 @@ func TestVaneColdPickConcurrentFailsOpen(t *testing.T) {
 // so the second pick would be cold again — only the exploration ownership
 // stands between it and another probe.
 func TestVaneColdPickExplorationPreempts(t *testing.T) {
-	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	group.exploration = vaneExplorationConfig{enabled: true, interval: 1}
 	var probeCalls atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -282,7 +282,7 @@ func TestVaneColdPickExplorationPreempts(t *testing.T) {
 
 // COLD-PICK-09: dry-run picks still warm the capability cache and honor throttle.
 func TestVaneColdPickDryRunThrottleRegression(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	var calls atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		calls.Add(1)
@@ -300,7 +300,7 @@ func TestVaneColdPickDryRunThrottleRegression(t *testing.T) {
 // after clearing the in-flight flag — the flag must not leak, and the next
 // pick on the same scope probes again.
 func TestVaneColdPickPanickingProbeClearsInflight(t *testing.T) {
-	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	scope := group.targetScopeKey(metadata.Host, metadata.DstPort).target
 	probeCalls := atomic.Int32{}
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -333,7 +333,7 @@ func TestVaneColdPickPanickingProbeClearsInflight(t *testing.T) {
 // the in-flight flag — stage (c) is skipped entirely, and a leaked flag would
 // freeze cold-pick for this scope until restart.
 func TestVaneColdPickBudgetDeniedClearsInflight(t *testing.T) {
-	group, clock, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, clock, _, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	scope := group.targetScopeKey(metadata.Host, metadata.DstPort).target
 	group.racingRuntime.mu.Lock()
 	group.racingRuntime.budget = vaneRacingBudget{startedAt: clock.Now(), used: 120 * 1024 * 1024}
@@ -364,7 +364,7 @@ func TestVaneColdPickBudgetDeniedClearsInflight(t *testing.T) {
 // on the reserved subset instead of indexing past the slice and crashing the
 // process on the dial goroutine.
 func TestVaneColdPickPartialBudgetDoesNotPanic(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	// available = 64KB + 512B: one reservation fits, the remainder is below
 	// the minimum reservation — reserveRaceBudget returns exactly 1 limit.
 	group.racingRuntime.mu.Lock()
@@ -387,7 +387,7 @@ func TestVaneColdPickPartialBudgetDoesNotPanic(t *testing.T) {
 // the recover path — the leaked reservation would otherwise block the hourly
 // reset (gated on reserved == 0) and deny every later probe until reload.
 func TestVaneColdPickPanickedProbeReleasesBudget(t *testing.T) {
-	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		panic("probe exploded")
 	}
@@ -407,7 +407,7 @@ func TestVaneColdPickPanickedProbeReleasesBudget(t *testing.T) {
 // another target must NOT rewrite the scene-global anchor — the same guard
 // the normal commit path enforces.
 func TestVaneColdPickProbeWinRespectsAnchorGuard(t *testing.T) {
-	group, clock, alpha, beta, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, clock, alpha, beta, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	// alpha is the ranking choice (better delay + the seeded anchor); the
 	// probe elects beta anyway.
 	alpha.delay = 10
@@ -444,7 +444,7 @@ func TestVaneColdPickProbeWinRespectsAnchorGuard(t *testing.T) {
 // timestamp or cache one-sided results — the race path writes nothing on
 // cancel, and cold-pick now mirrors that.
 func TestVaneColdPickCanceledProbeWritesNothing(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	alphaName := alpha.Name()
 	block := make(chan struct{})
 	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
@@ -486,7 +486,7 @@ func TestVaneColdPickCanceledProbeWritesNothing(t *testing.T) {
 // when a measured-fast node is already on record. This is what keeps the first
 // video connection off a low-bandwidth node.
 func TestVaneColdPickInflightPrefersMeasuredBandwidth(t *testing.T) {
-	group, _, alpha, beta, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, beta, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	now := group.clock.Now()
 	group.mu.Lock()
 	group.learning.mu.Lock()

@@ -42,12 +42,13 @@ func (p *vaneNetworkTestProxy) DialContext(ctx context.Context, metadata *C.Meta
 	return outbound.NewConn(raw, p), nil
 }
 
-func configureVaneRacingForTest(t *testing.T, group *Vane, mode vaneRacingMode) {
+func configureVaneSwitchForTest(t *testing.T, group *Vane, mode vaneSwitchMode) {
 	t.Helper()
-	enabled := mode == vaneRacingOn
+	enabled := mode == vaneSwitchLive
 	config, err := newVaneRacingConfig(VaneOption{Vane: &enabled})
 	require.NoError(t, err)
 	group.racing = config
+	group.switchMode = mode
 }
 
 // RACE-CONFIG-001: omitted means enabled; false is diagnostic-only.
@@ -55,8 +56,8 @@ func TestVaneRacingConfig(t *testing.T) {
 	fallback := newVaneTestProxy("fallback", true, false)
 	group, err := NewVane(GroupCommonOption{Name: "vane"}, VaneOption{}, fallback, nil)
 	require.NoError(t, err)
-	require.Equal(t, vaneRacingOn, group.racing.mode)
-	require.Equal(t, "unknown", vaneRacingMode(255).String())
+	require.Equal(t, vaneSwitchLive, group.switchMode)
+	require.Equal(t, "unknown", vaneSwitchMode(255).String())
 	require.Equal(t, vaneDefaultRacingURL, group.racing.url.String())
 	require.Equal(t, int64(64*1024*1024), group.racing.budgetBytesHour)
 
@@ -88,7 +89,7 @@ func TestVaneRacingConfig(t *testing.T) {
 		"vane": false, "racing-url": "https://example.com/probe",
 	}, proxyMap, map[string]P.ProxyProvider{}, nil, nil)
 	require.NoError(t, err)
-	require.Equal(t, vaneRacingShadow, parsed.(*Vane).racing.mode)
+	require.Equal(t, vaneSwitchObserve, parsed.(*Vane).switchMode)
 	require.Equal(t, int64(64*1024*1024), parsed.(*Vane).racing.budgetBytesHour)
 }
 
@@ -320,7 +321,7 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 		gamma := newVaneTestProxy("gamma", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-		configureVaneRacingForTest(t, group, vaneRacingOn)
+		configureVaneSwitchForTest(t, group, vaneSwitchLive)
 		group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
 			if proxy.Name() == "beta" {
 				return vaneProbeResult{valid: true, reason: "read-timeout", bytes: 256 * 1024, duration: 500 * time.Millisecond, lowerBoundBPS: 4_000_000}
@@ -341,7 +342,7 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-		configureVaneRacingForTest(t, group, vaneRacingOn)
+		configureVaneSwitchForTest(t, group, vaneSwitchLive)
 		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 			return vaneProbeResult{valid: true, reason: "read-timeout", bytes: 64 * 1024, duration: 400 * time.Millisecond, lowerBoundBPS: 1_500_000}
 		}
@@ -393,7 +394,7 @@ func TestVaneRacingEngineFirstQualifiedWinsAndCancelsPeer(t *testing.T) {
 	gamma := newVaneTestProxy("gamma", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 
 	betaCanceled := make(chan struct{})
 	group.racing.probe = func(ctx context.Context, proxy C.Proxy, _ *url.URL, limit int64) vaneProbeResult {
@@ -430,7 +431,7 @@ func TestVaneRacingIdentityRejectsSameNameReplacement(t *testing.T) {
 	beta.identity = "beta-old"
 	group, provider := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -471,7 +472,7 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 		gamma := newVaneTestProxy("gamma", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-		configureVaneRacingForTest(t, group, vaneRacingOn)
+		configureVaneSwitchForTest(t, group, vaneSwitchLive)
 		group.racing.budgetBytesHour = vaneRacingProbeByteCap
 		var calls atomic.Int32
 		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -498,7 +499,7 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 		beta := newVaneTestProxy("beta", true, true)
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-		configureVaneRacingForTest(t, group, vaneRacingOn)
+		configureVaneSwitchForTest(t, group, vaneSwitchLive)
 		started := make(chan struct{})
 		var once sync.Once
 		group.racing.probe = func(ctx context.Context, _ C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
@@ -522,8 +523,8 @@ func TestVaneRacingBudgetAndLifecycle(t *testing.T) {
 }
 
 // RACE-MODE-001: shadow never changes baseline selection or policy state.
-func TestVaneRacingModeTruthTable(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+func TestVaneSwitchModeTruthTable(t *testing.T) {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			clock := newVaneConnTestClock()
 			alpha := newVaneTestProxy("alpha", true, true)
@@ -531,7 +532,7 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 			beta.delay = 10
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 			configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-			configureVaneRacingForTest(t, group, mode)
+			configureVaneSwitchForTest(t, group, mode)
 			// CHAIN-01: the shadow baseline close needs challenger evidence. The
 			// helper's demand=1/low=3M with a 1 Mbps sample makes any evidence
 			// >= 3M knownGood, and a knownGood plan never races, so the
@@ -558,7 +559,7 @@ func TestVaneRacingModeTruthTable(t *testing.T) {
 			require.Nil(t, flow.observe(sample))
 			baselineAction := flow.observe(sample)
 
-			if mode == vaneRacingShadow {
+			if mode == vaneSwitchObserve {
 				// CHAIN-01: without challenger evidence the baseline close is
 				// vetoed (no-evidence-candidate) and the flow is not closed;
 				// the race still runs and records would-handoff.
@@ -603,7 +604,7 @@ func TestVaneRacingProbeCancellationChargesReadBytes(t *testing.T) {
 	clock := newVaneConnTestClock()
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{reason: "canceled", bytes: 12345, duration: time.Millisecond}
 	}
@@ -626,7 +627,7 @@ func TestVaneRacingNoWinnerDoesNotCommitPolicyState(t *testing.T) {
 	clock := newVaneConnTestClock()
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true))
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 1, capHit: true}
 	}
@@ -656,7 +657,7 @@ func TestVaneRacingCapabilityPrune(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 
 	t.Run("ttl expiry removes stale capability", func(t *testing.T) {
 		lease := vaneMemberLease{name: "stale", identity: "stale-id", epoch: 1}
@@ -725,7 +726,7 @@ func TestVaneRacingBudgetSettle(t *testing.T) {
 	alpha := newVaneTestProxy("alpha", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	group.racing.budgetBytesHour = vaneRacingProbeByteCap * 4
 
 	t.Run("normal settle", func(t *testing.T) {
@@ -803,7 +804,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 	}
 
 	t.Run("closed group rejects", func(t *testing.T) {
-		configureVaneRacingForTest(t, group, vaneRacingShadow)
+		configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 		group.racingRuntime.mu.Lock()
 		group.racingRuntime.closed = true
 		group.racingRuntime.mu.Unlock()
@@ -817,7 +818,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 	})
 
 	t.Run("in-flight rejects second race", func(t *testing.T) {
-		configureVaneRacingForTest(t, group, vaneRacingShadow)
+		configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 		group.racingRuntime.mu.Lock()
 		group.racingRuntime.inFlight = true
 		group.racingRuntime.mu.Unlock()
@@ -831,7 +832,7 @@ func TestVaneRacingScheduleGuards(t *testing.T) {
 	})
 
 	t.Run("no-winner suppression window rejects", func(t *testing.T) {
-		configureVaneRacingForTest(t, group, vaneRacingShadow)
+		configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 		key := vaneTargetKey{transport: vaneTransportTCP, targetScope: "googlevideo.com", port: 443}
 		group.racingRuntime.mu.Lock()
 		group.racingRuntime.noWinnerUntil[key] = clock.Now().Add(time.Minute)

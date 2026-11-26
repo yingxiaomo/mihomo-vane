@@ -18,7 +18,7 @@ func TestVaneShadowObserveDiscardsAction(t *testing.T) {
 			alpha.dialConn = underlying
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 			configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-			configureVaneRacingForTest(t, group, vaneRacingShadow)
+			configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 			t.Cleanup(func() { _ = group.Close() })
 			seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)
 			metadata := &C.Metadata{Host: "rr-shadow.googlevideo.com", DstPort: 443, NetWork: C.TCP}

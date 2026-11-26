@@ -35,7 +35,7 @@ func TestVaneStalledFlowSubmitsItsPlan(t *testing.T) {
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	t.Cleanup(func() { _ = group.Close() })
 	seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)
 

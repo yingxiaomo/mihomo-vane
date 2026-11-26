@@ -1042,7 +1042,7 @@ func TestVaneVerifyPenaltyCoolsSlowLanding(t *testing.T) {
 }
 
 func TestVanePruneDropsExpiredTargetScopedState(t *testing.T) {
-	group, clock, _ := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, _ := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	now := clock.Now()
 	key := vaneFlowKey{target: "rr-prune.example", port: 443}
@@ -1131,7 +1131,7 @@ func TestVaneNodeCooldownDoesNotFollowAReusedName(t *testing.T) {
 // reach it. Once the socket has been fully silent long enough the flow must
 // still be judged, otherwise the screen sits on a spinner forever.
 func TestVaneLowVolumeStallStillJudged(t *testing.T) {
-	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	dropVaneRecordedEvents(group)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 
@@ -1150,7 +1150,7 @@ func TestVaneLowVolumeStallStillJudged(t *testing.T) {
 // small flow. A live SSE heartbeat must not be judged on volume alone, so the
 // synthetic flag is part of the condition.
 func TestVaneLowVolumeNeedsASyntheticWindow(t *testing.T) {
-	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	dropVaneRecordedEvents(group)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 

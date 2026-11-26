@@ -61,7 +61,7 @@ func chain01Prepare(t *testing.T, group *Vane, metadata *C.Metadata, current *va
 
 // CHAIN-01-01: cold start with delay-only challengers must not close the flow.
 func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingOn, vaneRacingShadow} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchLive, vaneSwitchObserve} {
 		t.Run(mode.String(), func(t *testing.T) {
 			clock := newVaneConnTestClock()
 			alpha := newVaneTestProxy("alpha", true, true)
@@ -70,7 +70,7 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 			configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 			chain01ProductionValues(t, group, 2_000_000)
-			configureVaneRacingForTest(t, group, mode)
+			configureVaneSwitchForTest(t, group, mode)
 			var probeCalls atomic.Int64
 			group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 				probeCalls.Add(1)
@@ -312,7 +312,7 @@ func TestVaneChain01TargetEvidenceWinnerCommits(t *testing.T) {
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 		chain01ProductionValues(t, group, 2_000_000)
-		configureVaneRacingForTest(t, group, vaneRacingOn)
+		configureVaneSwitchForTest(t, group, vaneSwitchLive)
 		group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 			return vaneProbeResult{reason: "zero-bytes"}
 		}

@@ -484,7 +484,7 @@ func (a *Vane) targetCapabilityLocked(key vaneTargetKey, member vaneMemberLease,
 }
 
 func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, now time.Time, claimHandoff bool) (C.Proxy, *vaneHandoffToken, string) {
-	if a.racing.mode != vaneRacingOn {
+	if a.switchMode != vaneSwitchLive {
 		return nil, nil, ""
 	}
 	find := func(member vaneMemberLease) C.Proxy {
@@ -841,7 +841,7 @@ func (a *Vane) discardTargetHandoff(token *vaneHandoffToken) {
 }
 
 func (a *Vane) refreshTargetPreference(key vaneTargetKey, member vaneMemberLease, bitsPerSecond float64) {
-	if a.racing.mode != vaneRacingOn || bitsPerSecond <= 0 {
+	if a.switchMode != vaneSwitchLive || bitsPerSecond <= 0 {
 		return
 	}
 	now := a.clock.Now()
@@ -861,7 +861,7 @@ func (a *Vane) refreshTargetPreference(key vaneTargetKey, member vaneMemberLease
 }
 
 func (a *Vane) invalidateTargetPreference(key vaneTargetKey, member vaneMemberLease) {
-	if a.racing.mode != vaneRacingOn {
+	if a.switchMode != vaneSwitchLive {
 		return
 	}
 	a.mu.Lock()

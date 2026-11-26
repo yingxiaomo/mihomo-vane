@@ -38,7 +38,7 @@ func coldPickProbeReason(t *testing.T, group *Vane) string {
 
 // PROBE-TIMEOUT-01: both probes read-timeout -> ranking fallback, nothing cached.
 func TestVaneColdPickProbeTimeoutBothExcluded(t *testing.T) {
-	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{valid: true, reason: "read-timeout", bytes: 2_800_000, duration: 4 * time.Second, lowerBoundBPS: 5_660_000}
@@ -56,7 +56,7 @@ func TestVaneColdPickProbeTimeoutBothExcluded(t *testing.T) {
 
 // PROBE-TIMEOUT-02: a read-timeout burst (5.66M) must lose to a clean cap-hit (4M).
 func TestVaneColdPickProbeTimeoutLosesToCleanProbe(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	alphaName := alpha.Name()
 	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
@@ -75,7 +75,7 @@ func TestVaneColdPickProbeTimeoutLosesToCleanProbe(t *testing.T) {
 
 // PROBE-TIMEOUT-03: a zero-byte read timeout is already invalid; unchanged.
 func TestVaneColdPickProbeTimeoutZeroBytesUnchanged(t *testing.T) {
-	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, _, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{valid: false, reason: "read-timeout"}
@@ -89,7 +89,7 @@ func TestVaneColdPickProbeTimeoutZeroBytesUnchanged(t *testing.T) {
 
 // PROBE-TIMEOUT-04: clean probes are unaffected — faster wins, both cached.
 func TestVaneColdPickProbeTimeoutCleanProbesStillWin(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	alphaName := alpha.Name()
 	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
@@ -107,7 +107,7 @@ func TestVaneColdPickProbeTimeoutCleanProbesStillWin(t *testing.T) {
 
 // PROBE-TIMEOUT-05: the diagnostic names the exclusion instead of claiming success.
 func TestVaneColdPickProbeTimeoutDiagnosticKind(t *testing.T) {
-	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+	group, _, alpha, _, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	alphaName := alpha.Name()
 	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {

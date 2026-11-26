@@ -44,11 +44,11 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 			group := parsed.(*Vane)
 			installVaneEventRecorder(group)
 			t.Cleanup(func() { _ = group.Close() })
-			wantMode := vaneRacingOn
+			wantMode := vaneSwitchLive
 			if setting == "false" {
-				wantMode = vaneRacingShadow
+				wantMode = vaneSwitchObserve
 			}
-			require.Equal(t, wantMode, group.racing.mode)
+			require.Equal(t, wantMode, group.switchMode)
 			group.clock, group.diagnostics.clock = clock, clock
 			// Three real low windows meet unchanged production age/size/credit gates.
 			var calls atomic.Int32
@@ -146,7 +146,7 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 	beta.dialConn = underlying
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 	t.Cleanup(func() { _ = group.Close() })
 	seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)
 	metadata := &C.Metadata{Host: "rr-known.googlevideo.com", DstPort: 443, NetWork: C.TCP}
@@ -173,7 +173,7 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 func TestVaneOffValveNeverSubmitsKnownGoodAction(t *testing.T) {
 	group, clock, _, _, gamma, flow, observed, underlying, metadata, _ := newValveRig(t, 2_000_000)
 	t.Cleanup(func() { _ = group.Close() })
-	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 	seedChain01Traffic(t, group, gamma.Name(), clock.Now(), 40_000_000)
 	key := group.targetScopeKey(metadata.Host, metadata.DstPort)
 	plan, reason := group.prepareReconnectForNodeDetailedSkipCooldown(key, metadata.Host, metadata.DstPort, flow.candidate, flow.identity, flow.nodeEpoch, flow.valveCurrentBPS, true)
@@ -206,7 +206,7 @@ func TestVaneOffValveNeverSubmitsKnownGoodAction(t *testing.T) {
 
 // GRACE-NO-EVIDENCE-01 / WATCHDOG-NO-EVIDENCE-01: pin every settlement residue.
 func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingOn, vaneRacingShadow} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchLive, vaneSwitchObserve} {
 		for _, source := range []string{"grace", "watchdog"} {
 			t.Run(mode.String()+"/"+source, func(t *testing.T) {
 				group, clock, _, beta, metadata := newTargetGroupForTest(t)
@@ -226,7 +226,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.Nil(t, flow.observe(fast))
 				// A just-claimed token waits for the next sample; it must be detached, not settled.
 				flow.handoff = decision.handoff
-				configureVaneRacingForTest(t, group, mode)
+				configureVaneSwitchForTest(t, group, mode)
 				member := decision.handoff.toLease
 				key := flow.targetStateKey
 				group.mu.Lock()
@@ -271,12 +271,12 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				require.True(t, lease.expiresAt.After(clock.Now()), "the untrusted window arrives while the claimed lease is still valid")
 				// VERIFY-STALL: in "on" mode a synthetic stall on the landing is
 				// evidence about that node, so it may add exactly one cooldown.
-				if mode == vaneRacingOn && source == "watchdog" {
+				if mode == vaneSwitchLive && source == "watchdog" {
 					require.Equal(t, slowCount+1, len(vaneCooledNodesLocked(group)))
 				} else {
 					require.Equal(t, slowCount, len(vaneCooledNodesLocked(group)))
 				}
-				if mode == vaneRacingShadow {
+				if mode == vaneSwitchObserve {
 					// A tolerated stall only observes in shadow mode; in "on"
 					// mode it is a real switch and legitimately cools the node.
 					require.False(t, group.nodeCoolingLocked(flow.candidate, clock.Now()))
@@ -321,7 +321,7 @@ func TestVaneOffProbeDeletedSourceContract(t *testing.T) {
 
 // SHADOW-KEPT-01: a capability-backed, non-knownGood plan still runs the race.
 func TestVaneOffObserveCapabilityPlanStaysDryRun(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingShadow)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchObserve)
 	member := vaneMemberLease{name: "beta", identity: group.nodeIdentities["beta"]}
 	seedChain01Capability(t, group, member, 40_000_000, clock.Now())
 	plan, reason := group.prepareReconnectForNodeDetailed(flow.targetKey, flow.target, flow.port, flow.candidate, flow.identity, flow.nodeEpoch, 1_000_000)

@@ -50,7 +50,7 @@ func TestVaneFlowLowWindowSignalUnion(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, flow := newVaneObservationRig(t, vaneRacingOn)
+			_, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 			sample := healthy
 			tc.mutate(&sample)
 			require.Nil(t, flow.observe(sample))
@@ -62,7 +62,7 @@ func TestVaneFlowLowWindowSignalUnion(t *testing.T) {
 // METRIC-LATENCY-RACE: a latency-only degradation must reach the normal
 // streak → prepare/race chain, not just bump a counter.
 func TestVaneLatencyOnlyStreakReachesRace(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	slowRTT := vaneThroughputObservation{
 		BitsPerSecond:    10_000_000,
 		TotalBytes:       8 * 1024 * 1024,

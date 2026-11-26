@@ -14,7 +14,7 @@ import (
 // BACKLOG-01: an injected backlog stamp suppresses low-window counting.
 // (Injection tests the gate; BACKLOG-08 covers the real collection path.)
 func TestVaneBacklogStampSuppressesLowWindow(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	flow.mu.Lock()
 	flow.backloggedAt = clock.Now()
@@ -36,7 +36,7 @@ func TestVaneBacklogStampSuppressesLowWindow(t *testing.T) {
 
 // BACKLOG-02: the synthetic watchdog window is subject to the same gate.
 func TestVaneBacklogStampSuppressesSyntheticWindow(t *testing.T) {
-	_, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	_, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() {
 		if group := flow.group; group != nil {
 			dropVaneRecordedEvents(group)
@@ -58,7 +58,7 @@ func TestVaneBacklogStampSuppressesSyntheticWindow(t *testing.T) {
 
 // BACKLOG-03: no backlog -> low windows keep accumulating.
 func TestVaneBacklogAbsentKeepsCounting(t *testing.T) {
-	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	for i := 0; i < 3; i++ {
 		require.Nil(t, flow.observe(vaneObservationLowSample()))
@@ -72,7 +72,7 @@ func TestVaneBacklogAbsentKeepsCounting(t *testing.T) {
 
 // BACKLOG-04: the stamp expires after two watchdog ticks; counting resumes.
 func TestVaneBacklogStampExpires(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	flow.mu.Lock()
 	flow.backloggedAt = clock.Now()
@@ -124,7 +124,7 @@ func TestVaneBacklogCountReader(t *testing.T) {
 
 // BACKLOG-06: a flow with no probe wired behaves exactly as before.
 func TestVaneBacklogUnwiredFlow(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	flow.mu.Lock()
 	require.Nil(t, flow.backlogFunc, "the rig never wires a connection")
@@ -148,7 +148,7 @@ func TestVaneBacklogWiredThroughDialContext(t *testing.T) {
 	}
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	chain01ProductionValues(t, group, 1_000_000)
 	t.Cleanup(func() { _ = group.Close() })
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
@@ -191,7 +191,7 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 	}
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	chain01ProductionValues(t, group, 1_000_000)
 	t.Cleanup(func() { _ = group.Close() })
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
@@ -230,7 +230,7 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 // to outlive that gap and clear the streak, otherwise a healthy node is closed
 // after a few minutes in the background and the player spins on return.
 func TestVaneBacklogExcusesBackgroundBursts(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 
 	for i := 0; i < 2; i++ {

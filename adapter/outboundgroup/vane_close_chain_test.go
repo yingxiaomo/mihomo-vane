@@ -133,7 +133,7 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 
 	probeEntered := make(chan struct{})
 	releaseProbe := make(chan struct{})
@@ -227,7 +227,7 @@ func TestVaneRaceRoundRecoversAfterCleanFinish(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 
 	var probeCalls atomic.Int32
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
@@ -298,7 +298,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-		configureVaneRacingForTest(t, group, vaneRacingOn)
+		configureVaneSwitchForTest(t, group, vaneSwitchLive)
 
 		probeEntered := make(chan struct{})
 		releaseProbe := make(chan struct{})
@@ -374,7 +374,7 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 		beta.delay = 10
 		group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 		configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-		configureVaneRacingForTest(t, group, vaneRacingOn)
+		configureVaneSwitchForTest(t, group, vaneSwitchLive)
 		group.flow.lowThroughputBPS = 5_000_000
 		group.flow.demandBPS = 2_000_000
 		group.flow.maxLowWindows = 3
@@ -431,7 +431,7 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingShadow)
+	configureVaneSwitchForTest(t, group, vaneSwitchObserve)
 
 	probeEntered := make(chan struct{})
 	releaseProbe := make(chan struct{})
@@ -574,7 +574,7 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{
 			valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
@@ -646,7 +646,7 @@ func TestVaneRaceTokenReleasedWhenEngineHasNoWinner(t *testing.T) {
 	beta.delay = 10
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 
 	probeEntered := make(chan struct{})
 	releaseProbe := make(chan struct{})

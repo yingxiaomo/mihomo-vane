@@ -59,7 +59,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, demand)
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 
 	// The race probe only targets beta (alpha is the current node and is
 	// excluded from the race), so dispatch by proxy name: beta gets the
@@ -224,7 +224,7 @@ func TestVaneChain01E2ERescueBeatsDemand(t *testing.T) {
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, demand)
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		// A 6 Mbps probe clears the 5 Mbps slow line and the 1.25x ratio for
 		// this starving flow, so the gate must let it through.

@@ -320,6 +320,7 @@ type Vane struct {
 	clock              vaneClock
 	flow               vaneFlowConfig
 	racing             vaneRacingConfig
+	switchMode         vaneSwitchMode
 	racingRuntime      vaneRacingRuntime
 	exploration        vaneExplorationConfig
 	collectorSpec      *vaneNativeCollectorSpec
@@ -436,6 +437,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 	group.hashRules = hashRules
 	group.flow = flowCfg
 	group.racing = racing
+	group.switchMode = vaneSwitchModeFor(vaneOption)
 	group.exploration = exploration
 	group.collectorSpec = collectorSpec
 	group.gray = newVaneGrayObserver(vaneOption.GrayFailureObservation, group.clock, group.diagnostics)
@@ -480,7 +482,8 @@ func newVaneWithClock(
 		maxStates:         maxStates,
 		clock:             clock,
 		flow:              defaultVaneFlowConfig(),
-		racing:            vaneRacingConfig{mode: vaneRacingOn},
+		racing:            vaneRacingConfig{},
+		switchMode:        vaneSwitchLive,
 		racingRuntime:     newVaneRacingRuntime(),
 		explorationSince:  clock.Now().UTC(),
 		diagnostics:       newVaneDiagnostics(option.Name, clock),
@@ -775,11 +778,11 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 			}
 		})
 	if observed, ok := controlled.(*vaneObservedConn); ok {
-		if a.racing.mode == vaneRacingOn {
+		if a.switchMode == vaneSwitchLive {
 			observed.enableDirectPolicy()
 		}
 		// Dry-run also observes undelivered windows; observe returns no action.
-		if a.racing.mode == vaneRacingShadow {
+		if a.switchMode == vaneSwitchObserve {
 			observed.enableShadowObserve()
 		}
 		if activeFlow != nil {
@@ -934,7 +937,7 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 		ExplorationEnabled:            a.exploration.enabled,
 		ExplorationInterval:           int(a.exploration.interval),
 		GrayFailureObservationEnabled: a.gray.isEnabled(),
-		RacingMode:                    a.racing.mode.String(),
+		SwitchMode:                    a.switchMode.String(),
 		RacingURL:                     racingURL,
 		RacingBudgetBytesHour:         a.racing.budgetBytesHour,
 	}

@@ -275,7 +275,7 @@ func TestVaneHashPinSurvivesExplorationAndColdPick(t *testing.T) {
 	})
 
 	t.Run("cold pick", func(t *testing.T) {
-		group, _, _, beta, metadata := newColdPickGroupForTest(t, vaneRacingShadow)
+		group, _, _, beta, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
 		t.Cleanup(func() { dropVaneRecordedEvents(group) })
 
 		var probeCalls atomic.Int64

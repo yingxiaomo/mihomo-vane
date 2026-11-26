@@ -32,7 +32,7 @@ func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *v
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta, gamma)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, demandBPS)
-	configureVaneRacingForTest(t, group, vaneRacingOn)
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	metadata := &C.Metadata{Host: "rr-valve.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	suppressColdPickProbeForTest(t, group, metadata)
 	scopeKey := group.targetScopeKey(metadata.Host, metadata.DstPort)

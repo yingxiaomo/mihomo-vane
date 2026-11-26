@@ -15,13 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newVaneObservationRig(t *testing.T, mode vaneRacingMode) (*Vane, *vaneConnTestClock, *vaneFlow) {
+func newVaneObservationRig(t *testing.T, mode vaneSwitchMode) (*Vane, *vaneConnTestClock, *vaneFlow) {
 	t.Helper()
 	clock := newVaneConnTestClock()
 	alpha, beta := newVaneTestProxy("alpha", true, true), newVaneTestProxy("beta", true, true)
 	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
-	configureVaneRacingForTest(t, group, mode)
+	configureVaneSwitchForTest(t, group, mode)
 	chain01ProductionValues(t, group, 1_000_000)
 	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
 		return vaneProbeResult{reason: "test-no-winner"}
@@ -55,7 +55,7 @@ func stallToleranceForTest(t *testing.T, flow *vaneFlow) time.Duration {
 // switch forever. The grace only decides when the switch fires, it no longer
 // freezes the counter (STALL-STREAK).
 func TestVaneFastGraceDefersStreak(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			group, clock, flow := newVaneObservationRig(t, mode)
 			require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
@@ -75,7 +75,7 @@ func TestVaneFastGraceDefersStreak(t *testing.T) {
 
 // FAST-GRACE-02: grace expires exactly at 30s; triggering still reaches the race.
 func TestVaneFastGraceExpiresAndCloses(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			group, clock, flow := newVaneObservationRig(t, mode)
 			require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
@@ -99,7 +99,7 @@ func TestVaneFastGraceExpiresAndCloses(t *testing.T) {
 
 // FAST-GRACE-03: never-fast flows still trigger on the third low window.
 func TestVaneFastGraceInactiveWithoutFastSample(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			group, _, flow := newVaneObservationRig(t, mode)
 			for i := 0; i < 3; i++ {
@@ -113,7 +113,7 @@ func TestVaneFastGraceInactiveWithoutFastSample(t *testing.T) {
 
 // WATCHDOG-01: 10s silence adds a positive synthetic low and reaches prepare/race.
 func TestVaneStallWatchdogSynthesizesWindows(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			group, clock, flow := newVaneObservationRig(t, mode)
 			require.Nil(t, flow.observe(vaneObservationLowSample()))
@@ -141,7 +141,7 @@ func TestVaneStallWatchdogSynthesizesWindows(t *testing.T) {
 
 // WATCHDOG-02: closed, aborted, never-sampled and zero-clock flows are untouched.
 func TestVaneStallWatchdogSkipsInactiveFlows(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		for _, state := range []string{"never-sampled", "closed", "aborted", "zero-clock"} {
 			t.Run(mode.String()+"/"+state, func(t *testing.T) {
 				group, clock, flow := newVaneObservationRig(t, mode)
@@ -183,7 +183,7 @@ func TestVaneStallWatchdogSkipsInactiveFlows(t *testing.T) {
 // grace records the window but no longer freezes the streak (STALL-STREAK), so
 // a single synthetic window counts once instead of vanishing.
 func TestVaneStallWatchdogRespectsGrace(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			group, clock, flow := newVaneObservationRig(t, mode)
 			require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
@@ -201,7 +201,7 @@ func TestVaneStallWatchdogRespectsGrace(t *testing.T) {
 
 // WATCHDOG lifecycle: exercise the real 5s ticker, unregister and cancellation.
 func TestVaneStallWatchdogRealTickerLifecycle(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			label := t.Name()
 			var group *Vane
@@ -239,7 +239,7 @@ func TestVaneStallWatchdogRealTickerLifecycle(t *testing.T) {
 
 // FAST-GRACE-02/03: preserve the original actionable-plan assertion with trusted evidence.
 func TestVaneFastGraceKnownGoodContract(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		for _, history := range []string{"expired", "never-fast"} {
 			t.Run(mode.String()+"/"+history, func(t *testing.T) {
 				group, clock, flow := newVaneObservationRig(t, mode)
@@ -251,7 +251,7 @@ func TestVaneFastGraceKnownGoodContract(t *testing.T) {
 				require.Nil(t, flow.observe(vaneObservationLowSample()))
 				require.Nil(t, flow.observe(vaneObservationLowSample()))
 				action := flow.observe(vaneObservationLowSample())
-				if mode == vaneRacingOn {
+				if mode == vaneSwitchLive {
 					require.NotNil(t, action, "three trusted lows still produce an executable known-good plan")
 					require.True(t, action())
 					require.True(t, flow.policyAborted())
@@ -268,7 +268,7 @@ func TestVaneFastGraceKnownGoodContract(t *testing.T) {
 
 // Untrusted high samples must not refresh a preference, either.
 func TestVaneUntrustedHighSampleDoesNotRefreshPreference(t *testing.T) {
-	for _, mode := range []vaneRacingMode{vaneRacingShadow, vaneRacingOn} {
+	for _, mode := range []vaneSwitchMode{vaneSwitchObserve, vaneSwitchLive} {
 		t.Run(mode.String(), func(t *testing.T) {
 			group, clock, flow := newVaneObservationRig(t, mode)
 			member := vaneMemberLease{name: flow.candidate, identity: flow.identity, epoch: flow.nodeEpoch}
@@ -291,7 +291,7 @@ func TestVaneUntrustedHighSampleDoesNotRefreshPreference(t *testing.T) {
 // This is the live rr4 case: a 30Mbps burst every 30s kept the flow graced for
 // minutes while the stream itself never resumed.
 func TestVaneFlowPulsingNodeStillTriggers(t *testing.T) {
-	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	fast := vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}
 	for i := 0; i < 2; i++ {
 		require.Nil(t, flow.observe(fast))
@@ -310,7 +310,7 @@ func TestVaneFlowPulsingNodeStillTriggers(t *testing.T) {
 // downloaded a lot early shows a large negative credit once it goes silent, and
 // the old gate read that as "buffer still has slack" and waited forever.
 func TestVaneFlowSyntheticWindowIgnoresBufferCredit(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	// 2MiB in 20s is far below the 1Mbps demand, so creditBits is negative.
 	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 1_000_000, TotalBytes: 2 * 1024 * 1024, Age: 20 * time.Second}))
 	flow.mu.Lock()
@@ -332,7 +332,7 @@ func TestVaneFlowSyntheticWindowIgnoresBufferCredit(t *testing.T) {
 // download can be rescued the same way a video flow is. It is still kept out of
 // the target-scoped bookkeeping (no count, no target evidence).
 func TestVaneUntargetedFlowWatchedAndCanSwitch(t *testing.T) {
-	group, _, _ := newVaneObservationRig(t, vaneRacingOn)
+	group, _, _ := newVaneObservationRig(t, vaneSwitchLive)
 	dropVaneRecordedEvents(group)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 
@@ -363,7 +363,7 @@ func TestVaneUntargetedFlowWatchedAndCanSwitch(t *testing.T) {
 // already-read bytes cover, so a DASH gap on a big flow is ignored while a
 // flow that died early is switched quickly.
 func TestVaneStallToleranceScalesWithBufferedBytes(t *testing.T) {
-	_, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	_, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	flow.mu.Lock()
 	flow.lastSample = vaneThroughputObservation{TotalBytes: 500 * 1024 * 1024}
 	huge := flow.stallToleranceLocked()
@@ -377,7 +377,7 @@ func TestVaneStallToleranceScalesWithBufferedBytes(t *testing.T) {
 // SWITCH-EVIDENCE-01: a non-flow that moved very little data never
 // triggers a switch, no matter how low its measured rate looks.
 func TestVaneUntargetedFlowNeedsEnoughBytesToSwitch(t *testing.T) {
-	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	flow.mu.Lock()
 	flow.targetScoped = false
@@ -395,7 +395,7 @@ func TestVaneUntargetedFlowNeedsEnoughBytesToSwitch(t *testing.T) {
 // rule set scopes them into the same bucket. Without this, a switch could leave
 // the page on one exit and the video on another — two IPs for one account.
 func TestVaneStickyIsScopedByRuleSetFamily(t *testing.T) {
-	group, clock, _ := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, _ := newVaneObservationRig(t, vaneSwitchLive)
 	now := clock.Now()
 	group.mu.Lock()
 	group.rememberStickyLocked("www.googlevideo.com", 443, "alpha", now)
@@ -407,7 +407,7 @@ func TestVaneStickyIsScopedByRuleSetFamily(t *testing.T) {
 }
 
 func TestVaneSyntheticWindowRespectsClientBacklog(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	dropVaneRecordedEvents(group)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	// BACKLOG-FIRST: two low windows are on the streak when the client stops
@@ -429,7 +429,7 @@ func TestVaneSyntheticWindowRespectsClientBacklog(t *testing.T) {
 }
 
 func TestVaneSmallFlowStallStillSwitches(t *testing.T) {
-	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	dropVaneRecordedEvents(group)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	// LOW-VOLUME: a phone stops at a few dozen KiB, far below the 2 MiB sample
@@ -454,7 +454,7 @@ func TestVaneSmallFlowStallStillSwitches(t *testing.T) {
 }
 
 func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {
-	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	dropVaneRecordedEvents(group)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	// ZERO-SAMPLE: a connection that never produced a single 32 KiB window is
@@ -478,7 +478,7 @@ func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {
 }
 
 func TestVaneSyntheticStallPenalizesLanding(t *testing.T) {
-	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 
 	flow.mu.Lock()

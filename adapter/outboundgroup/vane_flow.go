@@ -674,7 +674,7 @@ func (f *vaneFlow) submitPolicyAction(action vanePolicyAction, delivered bool) {
 	if f == nil || action == nil {
 		return
 	}
-	if f.group.racing.mode == vaneRacingShadow {
+	if f.group.switchMode == vaneSwitchObserve {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind: "handoff-would-commit", reason: "dry-run", target: f.target,
 			bucket: f.targetKey.target, port: f.port, from: f.candidate,
@@ -848,7 +848,7 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// the node it landed on, even though the synthetic window itself cannot be used
 	// as throughput evidence. Without this a landing that returns zero bytes was
 	// never cooled, so the next connection was steered onto it again.
-	if untrusted && targetScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.racing.mode == vaneRacingOn {
+	if untrusted && targetScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.switchMode == vaneSwitchLive {
 		f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
 	}
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
@@ -954,13 +954,13 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// recheck, which only guards against a burst that arrives before the close.
 	starving := lowWindows >= config.maxLowWindows && creditBits < guardBits
 	plan, reason := f.group.prepareReconnectForNodeDetailedSkipCooldown(f.targetKey, f.target, f.port, f.candidate, f.identity, f.nodeEpoch, sample.BitsPerSecond, starving)
-	mode := f.group.racing.mode
+	mode := f.group.switchMode
 	if reason != "" && reason != "no-challenger" && reason != "no-evidence-candidate" {
 		f.recordReconnectSuppressed(reason, sample, lowWindows)
 		return nil
 	}
 
-	if mode == vaneRacingShadow {
+	if mode == vaneSwitchObserve {
 		if reason == "" {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "handoff-would-commit", reason: "baseline", target: f.target,
@@ -1058,7 +1058,7 @@ func (f *vaneFlow) scheduleRace(sample vaneThroughputObservation, lowWindows int
 			})
 			return
 		}
-		if f.group.racing.mode == vaneRacingShadow {
+		if f.group.switchMode == vaneSwitchObserve {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "handoff-would-commit", reason: result.source, handoffID: result.taskID,
 				leaseID: vaneRaceLeaseID(result.request.generation, result.taskID), target: f.target,
@@ -1068,7 +1068,7 @@ func (f *vaneFlow) scheduleRace(sample vaneThroughputObservation, lowWindows int
 			})
 			return
 		}
-		if f.group.racing.mode != vaneRacingOn {
+		if f.group.switchMode != vaneSwitchLive {
 			return
 		}
 		plan := vaneReconnectPlan{

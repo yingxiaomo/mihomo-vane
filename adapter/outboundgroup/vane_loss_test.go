@@ -26,7 +26,7 @@ func TestVaneLossTelemetry(t *testing.T) {
 		t.Helper()
 		group, clock, alpha, _, _ := newVaneRacingEvidenceGroup(t)
 		if !withRacing {
-			group.racing.mode = vaneRacingShadow
+			group.switchMode = vaneSwitchObserve
 		}
 		group.mu.Lock()
 		group.ensureProxyNodeLocked(alpha, clock.Now())
