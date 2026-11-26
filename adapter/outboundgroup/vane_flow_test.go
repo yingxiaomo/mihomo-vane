@@ -1050,15 +1050,12 @@ func TestVanePruneDropsExpiredTargetScopedState(t *testing.T) {
 	group.mu.Lock()
 	group.ledger[key] = vaneSwitchLedger{windowFrom: now.Add(-2 * vaneSwitchBudgetWindow), lastSwitch: now.Add(-time.Hour), count: 3}
 	group.stickiness[stickyKey] = vaneStickyChoice{name: "alpha", expiresAt: now.Add(-time.Second)}
-	group.lastPickProbeAt["rr-prune.example"] = now.Add(-3 * vaneRacingCapabilityTTL)
 	group.pruneFlowStateLocked(now)
 	_, hasSwitch := group.ledger[key]
 	_, hasSticky := group.stickiness[stickyKey]
-	_, hasProbe := group.lastPickProbeAt["rr-prune.example"]
 	group.mu.Unlock()
 	require.False(t, hasSwitch, "expired target switch budget must be pruned")
 	require.False(t, hasSticky, "expired sticky choice must be pruned")
-	require.False(t, hasProbe, "stale cold-pick timestamp must be pruned")
 }
 
 // AUDIT-LOW-LINE: an out-of-range low-throughput-bps is rejected at
@@ -1086,24 +1083,6 @@ func TestVaneReconnectFloorFollowsTheSlowLine(t *testing.T) {
 	group.flow.lowThroughputBPS = 1_000_000
 	require.Equal(t, float64(5_000_000), group.reconnectFloorLocked(),
 		"a slow line below the default never lowers the floor")
-}
-
-// AUDIT-INFLIGHT: a leaked cold-pick in-flight flag is pruned like the other
-// per-scope maps instead of holding its scope forever.
-func TestVanePruneDropsStaleInflightProbe(t *testing.T) {
-	clock := newVaneConnTestClock()
-	alpha := newVaneTestProxy("alpha", true, true)
-	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha)
-	now := clock.Now()
-	group.pickProbeInflight["stale.example"] = now.Add(-3 * vaneRacingCapabilityTTL)
-	group.pickProbeInflight["fresh.example"] = now
-
-	group.pruneFlowStateLocked(now)
-
-	_, stale := group.pickProbeInflight["stale.example"]
-	_, fresh := group.pickProbeInflight["fresh.example"]
-	require.False(t, stale, "stale in-flight flag is pruned")
-	require.True(t, fresh, "a fresh in-flight flag survives")
 }
 
 // NODE-COOL-IDENTITY: a cooldown belongs to the endpoint that earned it, not to

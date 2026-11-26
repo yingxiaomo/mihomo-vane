@@ -358,11 +358,6 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 
 func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) vaneRaceRequest {
 	t.Helper()
-	// COLD-PICK: suppress the cold-pick probe so the pick does not consume
-	// budget or write capability evidence; race tests measure the race probe.
-	group.mu.Lock()
-	group.lastPickProbeAt[group.targetScopeKey(metadata.Host, metadata.DstPort).target] = group.clock.Now()
-	group.mu.Unlock()
 	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())

@@ -2217,21 +2217,9 @@ func (a *Vane) pruneFlowStateLocked(now time.Time) {
 			delete(a.valveLastRun, key)
 		}
 	}
-	for scope, at := range a.pickProbeInflight {
-		if now.Sub(at) >= 2*vaneRacingCapabilityTTL {
-			delete(a.pickProbeInflight, scope)
-		}
-	}
 	for key, choice := range a.stickiness {
 		if !choice.expiresAt.After(now) {
 			delete(a.stickiness, key)
-		}
-	}
-	// PRUNE: the per-scope cold-pick timestamp is only useful for one
-	// capability TTL; drop it long after it can matter.
-	for key, at := range a.lastPickProbeAt {
-		if now.Sub(at) >= 2*vaneRacingCapabilityTTL {
-			delete(a.lastPickProbeAt, key)
 		}
 	}
 }

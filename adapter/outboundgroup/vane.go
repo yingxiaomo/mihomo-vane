@@ -369,8 +369,6 @@ type Vane struct {
 	// Cold-pick probe throttle (COLD-PICK): per target scope. Both maps are
 	// guarded by a.mu and only touched in pickInternalDecision's (a)/(c)
 	// stages — never inside racingRuntime.mu (see snapshotFreshCapabilities).
-	pickProbeInflight map[string]time.Time
-	lastPickProbeAt   map[string]time.Time
 	// §E: the per-target valve throttle — a target re-runs its prepare at most
 	// once per vaneValveThrottle, regardless of how many flows ask.
 	// Guarded by a.mu.
@@ -515,8 +513,6 @@ func newVaneWithClock(
 		targetPreferences: make(map[vaneTargetKey]vaneTargetPreference),
 		targetEvidence:    make(map[vaneTargetEvidenceKey]vaneTargetEvidence),
 		targetFailures:    make(map[vaneTargetFailureKey]vaneTargetFailureState),
-		pickProbeInflight: make(map[string]time.Time),
-		lastPickProbeAt:   make(map[string]time.Time),
 		valveLastRun:      make(map[vaneTargetKey]time.Time),
 		nodes:             make(map[string]*vaneNodeState),
 		nodeControls:      make(map[string]*vaneNodeControlState),
@@ -1108,9 +1104,6 @@ func (a *Vane) pickDecision(ctx context.Context, metadata *C.Metadata, transport
 }
 
 func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, transport vaneTransport, touch, commit, claimHandoff bool) vanePickDecision {
-	// COLD-PICK stage (a0): capability snapshot before any lock. This helper
-	// only takes racingRuntime.mu (see its lock-order comment).
-	freshCaps := a.snapshotFreshCapabilities(a.clock.Now())
 	proxies := a.GetProxies(touch)
 	if commit {
 		a.refreshNodeIdentities(proxies)
@@ -1408,170 +1401,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		a.pruneLocked(now, proxies)
 		a.learning.markDirtyLocked(now)
 	}
-	// COLD-PICK stage (a): while still holding a.mu, decide whether the cold
-	// pick probe should run. Anything other than a cold ranking fallback
-	// keeps the normal commit path. inflightRejected marks a pick that lost
-	// the in-flight race on this scope: it fails open to ranking and records
-	// pick-probe-selected reason=inflight for observability.
-	coldPickScope := ""
-	coldPickInflightRejected := false
-	var coldPick *coldPickProbe
-	var coldPickTop2 []vaneRankedProxy
-	if commit && transport == vaneTransportTCP &&
-		explorationSelection == nil && pinned == nil && claimHandoff {
-		if targetKey, ok := a.targetScopeForKey(target, port); ok {
-			coldPickScope = targetKey.targetScope
-		} else {
-			// PHASE2: a non-target scope still gets a cold-pick probe; the
-			// target string itself is the per-scope throttle key.
-			coldPickScope = target
-		}
-		if coldPickScope != "" && len(ranked) >= 2 {
-			top2 := []vaneRankedProxy{ranked[0], ranked[1]}
-			if a.coldPickGateLocked(freshCaps, coldPickScope, top2, now) {
-				coldPickTop2 = top2
-				a.pickProbeInflight[coldPickScope] = now
-			} else if _, ok := a.pickProbeInflight[coldPickScope]; ok {
-				coldPickInflightRejected = true
-				// INFLIGHT-BW: another cold pick on this scope is still
-				// probing, so this pick cannot wait for a fresh
-				// measurement. Falling back to plain delay ranking is what
-				// lands the first video connection on a low-bandwidth node,
-				// so reuse whatever capability records already exist and
-				// take the fastest ranked candidate among them.
-				if fastest, ok := a.coldPickInflightChoiceLocked(freshCaps, ranked, now); ok {
-					chosen = fastest
-					selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
-					if explorationSelection == nil && pinned == nil && (!anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name) {
-						a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
-						a.rememberStickyLocked(target, port, chosen.name, now)
-					}
-				}
-			}
-		}
-	}
-	if coldPickTop2 != nil {
-		candidates := make([]pickProbeCandidate, 0, len(coldPickTop2))
-		for _, candidate := range coldPickTop2 {
-			member := a.memberLeaseLocked(candidate.proxy.Name(), vaneProxyPersistentIdentity(candidate.proxy))
-			if member.epoch == 0 {
-				if epoch := a.learning.nodeEpochs[vaneLearningNodeKey(member.name, member.identity)]; epoch != 0 {
-					member.epoch = epoch
-				}
-			}
-			candidates = append(candidates, pickProbeCandidate{proxy: candidate.proxy, member: member})
-		}
-		coldPick = &coldPickProbe{
-			scope:      coldPickScope,
-			candidates: candidates,
-			baseline:   chosen.proxy,
-			generation: a.learningGeneration,
-		}
-	}
-	a.learning.mu.Unlock()
-	a.mu.Unlock()
-
-	// COLD-PICK: an in-flight rejection fails open without probing.
-	if coldPickInflightRejected {
-		a.diagnostics.record(vaneDiagnosticRecord{
-			kind: "pick-probe-selected", reason: "inflight",
-			target: coldPickScope, bucket: coldPickScope, to: chosen.name,
-		})
-		decision := vanePickDecision{proxy: chosen.proxy}
-		decision.reportedAliveAtSelection = hasAlive
-		if selectedState != nil {
-			decision.identity = selectedState.identity
-			decision.nodeEpoch = selectedState.epoch
-		}
-		if explorationSelection != nil {
-			decision.exploration = a.diagnostics.recordExplorationSelection(*explorationSelection)
-		}
-		return decision
-	}
-
-	// COLD-PICK stage (b): probe outside every lock. The context is the
-	// caller's, so a canceled dial cancels the probe too.
-	var coldPickOutcomes []pickProbeOutcome
-	probed := false
-	if coldPick != nil {
-		var budgetDenied, canceled bool
-		func() {
-			// §J + the budget-denied leak Hermes flagged: the in-flight flag
-			// must clear as soon as the probe stage has run. A budget denial
-			// or a re-surfaced probe panic skips stage (c) entirely — a leaked
-			// flag would freeze cold-pick for this scope until restart. The
-			// panic itself still propagates; only the flag is touched here.
-			defer func() {
-				a.mu.Lock()
-				delete(a.pickProbeInflight, coldPick.scope)
-				a.mu.Unlock()
-			}()
-			coldPickOutcomes, budgetDenied, canceled = a.runColdPickProbe(ctx, *coldPick)
-		}()
-		probed = !budgetDenied && !canceled
-	}
-
-	// COLD-PICK stage (c): re-validate under a.mu and fold the outcome into
-	// the commit path. The ranking choice and the normal commit bookkeeping
-	// already ran under the original lock hold; only the probe verdict can
-	// still replace the chosen proxy.
-	if probed {
-		now = a.clock.Now()
-		a.mu.Lock()
-		a.learning.mu.Lock()
-		probed := coldPickOutcomes != nil && len(coldPickOutcomes) > 0
-		if probed {
-			a.lastPickProbeAt[coldPick.scope] = now
-		}
-		// The in-flight flag was cleared when stage (b) returned (§J).
-		var winner pickProbeCandidate
-		var cacheOutcomes []pickProbeOutcome
-		reason := "ranked-fallback"
-		if probed {
-			winner, cacheOutcomes, reason = a.settleColdPickProbeLocked(coldPick.scope, *coldPick, coldPickOutcomes, now)
-		}
-		if reason == "probe" {
-			for _, candidate := range ranked {
-				if candidate.proxy.Name() == winner.proxy.Name() {
-					chosen = candidate
-					break
-				}
-			}
-			// The probe replaces the ranking choice; run the same commit
-			// bookkeeping the normal path would have run — including the
-			// anchor guard (P2, audit 2026-11-22): a target-scoped failure is
-			// a one-off bypass, not evidence that the scene's healthy global
-			// preference should change for every target.
-			if !anchorCoolingAnywhere || anchor.name == "" || chosen.name == anchor.name {
-				a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
-				a.rememberStickyLocked(target, port, chosen.name, now)
-			}
-			selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
-			a.pruneLocked(now, proxies)
-			a.learning.markDirtyLocked(now)
-		}
-		if commit {
-			a.recordPickScored(transport, target, port, chosen, ranked, anchor)
-		}
-		a.diagnostics.record(vaneDiagnosticRecord{
-			kind: "pick-probe-selected", reason: reason,
-			target: coldPick.scope, bucket: coldPick.scope, to: chosen.name,
-		})
-		decision := vanePickDecision{proxy: chosen.proxy}
-		decision.reportedAliveAtSelection = hasAlive
-		if selectedState != nil {
-			decision.identity = selectedState.identity
-			decision.nodeEpoch = selectedState.epoch
-		}
-		a.learning.mu.Unlock()
-		a.mu.Unlock()
-		// Capability cache write happens after releasing a.mu — a.mu and
-		// racingRuntime.mu must never nest (CHAIN-01 lock-order rule).
-		if len(cacheOutcomes) > 0 {
-			a.writeColdPickCapabilityLocked(cacheOutcomes, now)
-		}
-		return decision
-	}
 	if commit {
 		a.recordPickScored(transport, target, port, chosen, ranked, anchor)
 	}
@@ -1584,6 +1413,11 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	if explorationSelection != nil {
 		decision.exploration = a.diagnostics.recordExplorationSelection(*explorationSelection)
 	}
+	// The cold-pick stages used to be the only place that released these locks
+	// on the plain commit path; without them the pick would keep a.mu and
+	// learning.mu forever and the next observe() would deadlock on f.mu.
+	a.learning.mu.Unlock()
+	a.mu.Unlock()
 	return decision
 }
 

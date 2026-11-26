@@ -4,11 +4,8 @@ package outboundgroup
 // page and its video stream never leave on two different IPs.
 
 import (
-	"context"
 	"fmt"
 	"hash/fnv"
-	"net/url"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -272,43 +269,6 @@ func TestVaneHashPinSurvivesExplorationAndColdPick(t *testing.T) {
 				"exploration must not move a pinned rule set")
 		}
 		require.Zero(t, countVaneEvents(group, "exploration-selected", ""))
-	})
-
-	t.Run("cold pick", func(t *testing.T) {
-		group, _, _, beta, metadata := newColdPickGroupForTest(t, vaneSwitchObserve)
-		t.Cleanup(func() { dropVaneRecordedEvents(group) })
-
-		var probeCalls atomic.Int64
-		group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
-			probeCalls.Add(1)
-			bps := 6_000_000.0
-			if proxy.Name() == beta.Name() {
-				bps = 40_000_000
-			}
-			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: bps, capHit: true}
-		}
-
-		// Control: without hash rules the probe runs and its winner is selected.
-		decision := group.pickInternalDecision(t.Context(), metadata, vaneTransportTCP, false, true, true)
-		require.Positive(t, probeCalls.Load(), "the control pick must really probe")
-		require.Equal(t, beta.Name(), decision.proxy.Name())
-		require.Equal(t, 1, countVaneEvents(group, "pick-probe-selected", "probe"))
-
-		// The control pick armed the per-scope probe throttle; clear it so the
-		// pinned pick below would really probe if the guard were missing.
-		group.hashRules = []vaneFamilyRule{{kind: vaneRuleDomain, value: metadata.Host}}
-		group.mu.Lock()
-		// Clear both gates the control pick armed: the per-scope throttle and
-		// the capability cache that would make the pin look redundant.
-		group.lastPickProbeAt = make(map[string]time.Time)
-		group.racingRuntime.mu.Lock()
-		group.racingRuntime.capabilities = make(map[vaneMemberLease]vaneCapabilityRecord)
-		group.racingRuntime.mu.Unlock()
-		group.mu.Unlock()
-		probeCalls.Store(0)
-		pinnedDecision := group.pickInternalDecision(t.Context(), metadata, vaneTransportTCP, false, true, true)
-		require.NotNil(t, pinnedDecision.proxy)
-		require.Zero(t, probeCalls.Load(), "a pinned pick must not spend probe budget")
 	})
 }
 

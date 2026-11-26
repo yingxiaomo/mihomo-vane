@@ -78,12 +78,6 @@ func TestVaneChain01ColdStartDoesNotCloseWithoutEvidence(t *testing.T) {
 			}
 
 			metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-			// COLD-PICK: suppress the cold-pick probe so the pick itself does
-			// not write capability evidence; this test is about the gate on
-			// the slow-flow path, not about the pick probe.
-			group.mu.Lock()
-			group.lastPickProbeAt[group.targetScopeKey(metadata.Host, metadata.DstPort).target] = clock.Now()
-			group.mu.Unlock()
 			decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 			flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 			require.NotNil(t, flow)
