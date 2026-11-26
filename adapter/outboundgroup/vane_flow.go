@@ -93,7 +93,12 @@ const (
 	// a slow first byte and a dead connection are indistinguishable before TLS
 	// and the request have completed, so this branch trades patience for reach.
 	vaneZeroSampleSilence = 90 * time.Second
-	vaneWatchdogTick      = 5 * time.Second
+	// vanePartialSilence is the same idea for a flow that did deliver some
+	// bytes and then stopped. A googlevideo connection that answers with a few
+	// hundred bytes and goes quiet is not a slow start, so it does not need the
+	// full zero-sample patience.
+	vanePartialSilence = 25 * time.Second
+	vaneWatchdogTick   = 5 * time.Second
 	// BACKLOG-STREAK: how long one backlog sighting excuses low windows.
 	// A backgrounded player (browser tab, phone screen off) throttles or
 	// stops reading, so its delivery rate collapses while the node is fine.
@@ -515,8 +520,23 @@ func (f *vaneFlow) observeSyntheticStall(now time.Time) {
 		// demand a much longer silence, because a slow first byte and a dead
 		// connection look identical from socket level.
 		started := f.createdAt
+		probe := f.lastReadFunc
 		f.mu.Unlock()
-		if started.IsZero() || now.Sub(started) < vaneZeroSampleSilence {
+		if started.IsZero() {
+			return
+		}
+		// PARTIAL-SILENCE: a flow that returned a few hundred bytes and then
+		// went quiet is not a slow first byte; a player stares at it for as long
+		// as the watchdog lets it. Age from the last byte once anything arrived.
+		threshold := vaneZeroSampleSilence
+		since := started
+		if probe != nil {
+			if at := probe(); !at.IsZero() && at.After(since) {
+				since = at
+				threshold = vanePartialSilence
+			}
+		}
+		if now.Sub(since) < threshold {
 			return
 		}
 		synthetic := vaneThroughputObservation{
@@ -918,7 +938,10 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	stalledLowVolume := sample.synthetic && sample.Age >= vaneLowVolumeAge && sample.TotalBytes >= vaneLowVolumeBytes
 	// ZERO-SAMPLE: a flow that never cleared one sample carries no bytes at
 	// all, so it can only be judged on the longer zero-sample silence.
-	stalledEmptyFlow := sample.synthetic && sample.TotalBytes < vaneLowVolumeBytes && sample.Age >= vaneZeroSampleSilence
+	// ZERO-SAMPLE: the synthetic window itself already proves the silence
+	// reached its threshold (90 s untouched, 25 s after a few bytes), so the
+	// gate must not re-demand the longest one.
+	stalledEmptyFlow := sample.synthetic && sample.TotalBytes < vaneLowVolumeBytes
 	stalledSmallFlow := stalledLowVolume || stalledEmptyFlow
 	if sample.TotalBytes < config.minBytes && !stalledSmallFlow {
 		return nil

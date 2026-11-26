@@ -531,3 +531,28 @@ func TestVaneSyntheticStallPenalizesLanding(t *testing.T) {
 	group.mu.Unlock()
 	require.True(t, cooling, "a landing that returns nothing must be cooled")
 }
+
+// PARTIAL-SILENCE: a connection that delivered a few hundred bytes and then
+// went quiet used to sit untouched for the full zero-sample patience. A player
+// staring at a spinner is exactly that shape, so it is judged much sooner.
+func TestVanePartialSilenceJudgesStalledRead(t *testing.T) {
+	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+
+	now := clock.Now()
+	flow.mu.Lock()
+	flow.createdAt = now.Add(-3 * time.Minute)
+	flow.lowWindows = 2
+	flow.mu.Unlock()
+	flow.setLastReadFunc(func() time.Time { return now.Add(-vanePartialSilence - time.Second) })
+
+	group.runFlowWatchdogTick(now)
+
+	armed := countVaneEvents(group, "race-scheduled", "") + countVaneEvents(group, "reconnect-suppressed", "")
+	require.Positive(t, armed, "a stalled read must reach the reconnect path")
+
+	flow.mu.Lock()
+	streak := flow.lowWindows
+	flow.mu.Unlock()
+	require.Equal(t, group.flow.lowWindows, streak, "the trigger must reach the commit path")
+}
