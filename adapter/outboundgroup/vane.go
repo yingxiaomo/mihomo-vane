@@ -785,6 +785,9 @@ func (a *Vane) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		if activeFlow != nil {
 			activeFlow.setPolicySubmitter(observed.submitPolicyAction)
 			activeFlow.setBacklogFunc(observed.pendingBacklog)
+			// LAST-READ: the watchdog ages a silent window on the last byte
+			// that arrived, not on the last qualified sample.
+			activeFlow.setLastReadFunc(observed.lastReadTime)
 			// §E: the switched-to flow counts empty windows on its own
 			// connection; other connections on the same hint never arm it.
 			observed.setOnEmptyWindow(activeFlow.noteEmptyWindow)
@@ -1326,12 +1329,16 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	chosen := ranked[0]
 	if pinned != nil {
 		chosen = *pinned
-	} else if stickyName, ok := a.stickyChoiceLocked(target, port, now); ok {
+	} else if stickyName, stickyIdentity, ok := a.stickyChoiceLocked(target, port, now); ok {
 		// STICKY: a host keeps one exit for 60s so a burst of connections to the
 		// same site does not fan out across the pool. This replaces the old
 		// per-scene anchor, which made every site share one sticky slot.
+		// STICKY-IDENTITY: the name alone is not enough — a provider reload can
+		// reuse it for a different endpoint, and the sticky record remembers
+		// which endpoint it meant.
 		for _, candidate := range ranked {
-			if candidate.name == stickyName && !candidate.cooldownUntil.After(now) {
+			if candidate.name == stickyName && !candidate.cooldownUntil.After(now) &&
+				(stickyIdentity == "" || a.nodeIdentityIsCurrentLocked(stickyName, stickyIdentity)) {
 				chosen = candidate
 				break
 			}

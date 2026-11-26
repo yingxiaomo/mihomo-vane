@@ -165,12 +165,15 @@ func (a *Vane) stickyKeyFor(target string, port uint16) vaneTargetKey {
 	return vaneStickyKeyFor(target, port)
 }
 
-func (a *Vane) stickyChoiceLocked(target string, port uint16, now time.Time) (string, bool) {
+func (a *Vane) stickyChoiceLocked(target string, port uint16, now time.Time) (string, string, bool) {
 	choice, ok := a.stickiness[a.stickyKeyFor(target, port)]
 	if !ok || choice.name == "" || !choice.expiresAt.After(now) {
-		return "", false
+		return "", "", false
 	}
-	return choice.name, true
+	// STICKY-IDENTITY: return the identity the choice was made for. A provider
+	// reload can reuse a name for a different endpoint, so the caller must not
+	// pin by name alone.
+	return choice.name, choice.identity, true
 }
 
 // rememberStickyLocked pins this host to name for vaneStickyTTL and bumps the
@@ -677,9 +680,13 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	// RESCUE: a handoff counts as a gain when it beats the flow it replaced,
 	// not when it already reaches demand.
 	required := token.previousBPS * a.flow.challengerRatio
-	// RESCUE-FLOOR: 5M slow line, not the demand-inflated lowThroughputBPS.
-	if floor := a.reconnectFloorLocked(); required < floor {
-		required = floor
+	// RESCUE-FLOOR: the settlement asks "did the landing beat the flow it
+	// replaced", so its floor is the absolute rescue line (5M), not the
+	// configured low line. Using the configured line here made a 6-9 Mbps
+	// landing count as no-gain while the flow it replaced ran at 1 bps, and
+	// no-gain cools that node for thirty minutes.
+	if required < float64(vaneDefaultLowThroughputBPS) {
+		required = float64(vaneDefaultLowThroughputBPS)
 	}
 	kind := "handoff-no-gain"
 	a.mu.Lock()
@@ -710,13 +717,15 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	signalOK := sample.TotalBytes >= a.flow.minBytes && sample.Delivered
 	// STABLE-WINDOW (audit 2026-11-26): a verdict must not rest on a short
 	// burst. A 200 ms window can report 50 Mbps from a few hundred kilobytes;
-	// that is not evidence of sustained bandwidth, yet the verdict pins a
-	// preference for ten minutes. Require the window to span the same age the
-	// low-window line uses, so the transfer dominates the measurement and a
-	// brief speed spike cannot promote a slow landing.
-	windowOK := sample.Age >= vaneMinVerdictWindow
-	improved := windowOK && sample.BitsPerSecond >= required &&
-		sample.BitsPerSecond >= a.flow.lowThroughputBPS &&
+	// that is not evidence of sustained bandwidth. A window that is too short
+	// is not a verdict in EITHER direction — it must not pin a preference and
+	// must not cool the node — so it returns before the improved/no-gain split
+	// instead of falling into no-gain, which cools the node for 30 minutes.
+	if sample.Age < vaneMinVerdictWindow {
+		a.mu.Unlock()
+		return
+	}
+	improved := sample.BitsPerSecond >= required &&
 		(!signalOK || !sample.LossSupported || sample.LossRate <= vaneDefaultHighLossRate) &&
 		(!signalOK || !sample.LatencySupported || sample.Latency <= vaneDefaultHighLatency)
 	if improved {
@@ -724,9 +733,20 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 			to: member, expiresAt: now.Add(vaneTargetPreferenceTTL), updatedAt: now,
 		}
 		a.clearTargetFailureLocked(token.targetKey, member)
+		// LANDING-CLEAR: the switch landed well, so the verify marker that
+		// penalizeSlowLanding arms must be dropped. Without this the marker
+		// survived until the 60 s observe window expired, and any low window
+		// in between cooled the node we had just proven fast for ten minutes.
+		a.clearLandingLocked(vaneFlowKey{target: token.targetKey.targetScope, port: token.targetKey.port}, member.name)
 		kind = "handoff-improved"
 	} else {
-		delete(a.targetPreferences, token.targetKey)
+		// PREFERENCE-SCOPE: only drop the preference this member owns. The old
+		// unconditional delete let one no-gain landing erase a preference another
+		// member had already proven — the same asymmetry the improved and no-gain
+		// clears fixed elsewhere in this file.
+		if preference, ok := a.targetPreferences[token.targetKey]; ok && preference.to == member {
+			delete(a.targetPreferences, token.targetKey)
+		}
 		legacyKey := vaneCandidateKey{
 			vaneFlowKey: vaneFlowKey{target: token.targetKey.targetScope, port: token.targetKey.port},
 			candidate:   member.name,

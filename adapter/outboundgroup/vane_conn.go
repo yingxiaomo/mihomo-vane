@@ -149,8 +149,14 @@ type vaneObservedConn struct {
 	// wired to the flow's valve counter. Registered post-construction.
 	onEmptyWindow func()
 
-	mu               sync.Mutex
-	createdAt        time.Time
+	mu        sync.Mutex
+	createdAt time.Time
+	// LAST-READ: the wall time of the last non-zero read, updated on every
+	// read (not only on a qualified 5-second sample). The flow watchdog needs
+	// it to tell "no data arrived" from "data trickled in below the sample
+	// payload floor"; aging on the last sample instead made every low-bitrate
+	// stream look stalled.
+	lastReadAt       time.Time
 	firstWriteAt     time.Time
 	pendingWrites    int
 	provisionalRead  time.Time
@@ -397,6 +403,17 @@ func (c *vaneObservedConn) pendingBacklog() int64 {
 	return c.readBytes - c.deliveredBytes
 }
 
+// LAST-READ: the zero value means "nothing has arrived yet", which the flow
+// watchdog reports as such instead of pretending the flow is fresh.
+func (c *vaneObservedConn) lastReadTime() time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastReadAt
+}
+
 func (c *vaneObservedConn) UnwrapReader() (io.Reader, []N.CountFunc) {
 	return &vaneCountReader{conn: c}, []N.CountFunc{func(read int64) {
 		if read > 0 {
@@ -589,6 +606,7 @@ func (c *vaneObservedConn) observeRead(now time.Time, count int64, delivered boo
 
 	c.mu.Lock()
 	c.totalReadBytes += count
+	c.lastReadAt = now
 	if delivered {
 		c.deliveredBytes += count
 	}

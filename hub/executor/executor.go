@@ -542,12 +542,19 @@ func Shutdown() {
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := outboundgroup.FlushVaneLearningStatesContext(ctx); err != nil {
+	// FLUSH-BUDGET: each flush gets its own deadline. They used to share one
+	// five-second context, so a slow node-state flush left the native flush
+	// with zero budget; FlushVaneNativeCollectorsContext returns on a cancelled
+	// context before the collectors drain and write their file footer, and the
+	// process exits right after this function.
+	learningCtx, learningCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer learningCancel()
+	if err := outboundgroup.FlushVaneLearningStatesContext(learningCtx); err != nil {
 		log.Warnln("flush Vane node state on shutdown failed: %s", err.Error())
 	}
-	if err := outboundgroup.FlushVaneNativeCollectorsContext(ctx); err != nil {
+	nativeCtx, nativeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer nativeCancel()
+	if err := outboundgroup.FlushVaneNativeCollectorsContext(nativeCtx); err != nil {
 		log.Warnln("flush Vane native collector on shutdown failed: %s", err.Error())
 	}
 

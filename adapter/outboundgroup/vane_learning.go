@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	VaneLearningSchemaVersion      = 2
+	VaneLearningSchemaVersion      = 3
 	vaneLearningRegistryLimit      = 256
 	vaneLearningPersistInterval    = 30 * time.Second
 	vaneLearningFutureSkew         = 5 * time.Minute

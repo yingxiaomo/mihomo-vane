@@ -646,7 +646,11 @@ func TestVaneHandoffVerdictNeedsAStableWindow(t *testing.T) {
 	key, _ := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	group.mu.Lock()
 	_, preferred := group.targetPreferences[key]
+	cooled := group.nodeCoolingLocked(beta.Name(), group.clock.Now())
 	group.mu.Unlock()
 	require.False(t, preferred, "a sub-second burst must not pin a preference")
-	require.Equal(t, uint64(1), group.VaneDiagnostics().Counters.HandoffNoGain)
+	// STABLE-WINDOW: a window that is too short is not a verdict in either
+	// direction — it must not count as no-gain and must not cool the node.
+	require.Equal(t, uint64(0), group.VaneDiagnostics().Counters.HandoffNoGain)
+	require.False(t, cooled, "a short window must not cool the node")
 }

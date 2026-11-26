@@ -81,9 +81,19 @@ const (
 	// after this long, with this much read, a byte gate measured on lifetime
 	// total must not veto the verdict. The synthetic requirement keeps a live
 	// but small connection (SSE heartbeat, keepalive) out of this branch.
-	vaneLowVolumeAge   = 45 * time.Second
-	vaneLowVolumeBytes = int64(256 * 1024)
-	vaneWatchdogTick   = 5 * time.Second
+	vaneLowVolumeAge = 45 * time.Second
+	// 32 KiB is exactly the sample payload floor (vaneThroughputMinPayload):
+	// reaching it proves the flow really carried data, so a low rate is the
+	// node being slow rather than the request being tiny. Anything above this
+	// would re-introduce the byte gate this branch exists to bypass.
+	vaneLowVolumeBytes = int64(32 * 1024)
+	// ZERO-SAMPLE: a connection that opened and then delivered fewer bytes than
+	// one sample (32 KiB) stays invisible to a sample-driven watchdog forever.
+	// Age it from the flow's start instead, but demand a much longer silence:
+	// a slow first byte and a dead connection are indistinguishable before TLS
+	// and the request have completed, so this branch trades patience for reach.
+	vaneZeroSampleSilence = 90 * time.Second
+	vaneWatchdogTick      = 5 * time.Second
 	// BACKLOG-STREAK: how long one backlog sighting excuses low windows.
 	// A backgrounded player (browser tab, phone screen off) throttles or
 	// stops reading, so its delivery rate collapses while the node is fine.
@@ -277,6 +287,9 @@ type vaneFlow struct {
 	port           uint16
 	targetKey      vaneFlowKey
 	targetStateKey vaneTargetKey
+	// CREATED-AT: the zero-sample watchdog branch ages silence from here,
+	// because a flow that never produced a sample has no lastSampleAt.
+	createdAt time.Time
 
 	mu         sync.Mutex
 	lowWindows int
@@ -314,6 +327,9 @@ type vaneFlow struct {
 	// the client, not the node, was the bottleneck.
 	backloggedAt time.Time
 	backlogFunc  func() int64
+	// LAST-READ: the connection's last non-zero read, so a silent window ages
+	// on data arrival instead of on qualified samples.
+	lastReadFunc func() time.Time
 }
 
 // flowStarted and flowEnded maintain the per-node live flow
@@ -374,7 +390,7 @@ func newVaneFlow(group *Vane, candidate string, metadata *C.Metadata, handoff ..
 		// "invalid-target" and burned the race budget.
 		targetStateKey = vaneTargetKey{transport: vaneTransportTCP, targetScope: target, port: port}
 	}
-	flow := &vaneFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey, targetScoped: targetScoped}
+	flow := &vaneFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey, targetScoped: targetScoped, createdAt: group.clock.Now()}
 	if len(handoff) > 0 && handoff[0] != nil {
 		flow.handoff = handoff[0]
 		// §E: this flow is the one the switch was made for — arm the
@@ -475,17 +491,52 @@ func (f *vaneFlow) observeSyntheticStall(now time.Time) {
 		return
 	}
 	f.mu.Lock()
-	if f.closed || f.aborted || !f.hasSample || f.lastSampleAt.IsZero() {
+	if f.closed || f.aborted {
 		f.mu.Unlock()
 		return
 	}
-	silence := now.Sub(f.lastSampleAt)
-	if silence < f.stallToleranceLocked() {
+	if !f.hasSample {
+		// ZERO-SAMPLE: a flow that never produced a qualified sample has no
+		// lastSampleAt to age from, so it used to be invisible to this watchdog
+		// forever — a connection that opened and then delivered nothing stayed
+		// open until the player gave up on its own. Age it from startedAt and
+		// demand a much longer silence, because a slow first byte and a dead
+		// connection look identical from socket level.
+		started := f.createdAt
 		f.mu.Unlock()
+		if started.IsZero() || now.Sub(started) < vaneZeroSampleSilence {
+			return
+		}
+		synthetic := vaneThroughputObservation{
+			BitsPerSecond: 1,
+			untrusted:     true,
+			synthetic:     true,
+			TotalBytes:    0,
+			Age:           now.Sub(started),
+		}
+		if action := f.observe(synthetic); action != nil {
+			f.submitPolicyAction(action, vaneActionIsImmediate(synthetic))
+		}
 		return
 	}
+	// LAST-READ: silence has to be measured from the last byte that arrived,
+	// not from the last qualified sample. A low-bitrate stream (voice, a
+	// throttled download) never clears the 32 KiB / 1 s sample floor, so aging
+	// on lastSampleAt judged a healthy trickling flow as stalled every window.
 	last := f.lastSample
+	lastRead := f.lastSampleAt
+	probe := f.lastReadFunc
+	tolerance := f.stallToleranceLocked()
 	f.mu.Unlock()
+	if probe != nil {
+		if at := probe(); at.After(lastRead) {
+			lastRead = at
+		}
+	}
+	silence := now.Sub(lastRead)
+	if silence < tolerance {
+		return
+	}
 	// BPS must stay positive: observe() treats <= 0 as "no sample". The byte
 	// total is the last real cumulative total (nothing arrived since), and
 	// the age advances by the silence so the age/min-bytes gates see truth.
@@ -565,6 +616,17 @@ func (f *vaneFlow) setBacklogFunc(probe func() int64) {
 	}
 	f.mu.Lock()
 	f.backlogFunc = probe
+	f.mu.Unlock()
+}
+
+// LAST-READ: registered post-construction for the same reason as the backlog
+// probe — the flow is already inside the watchdog set by then.
+func (f *vaneFlow) setLastReadFunc(probe func() time.Time) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	f.lastReadFunc = probe
 	f.mu.Unlock()
 }
 
@@ -685,18 +747,22 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 		// forever, so a flow that stalled between bursts never reached the
 		// switch threshold and the player stayed stuck on a half-dead node.
 		switch {
+		// BACKLOG-FIRST: a client that is not reading (background tab, paused
+		// player, phone screen off) also goes socket-silent, which is exactly
+		// what makes the watchdog synthesize a window. Testing the synthetic
+		// case first made this exemption unreachable, so a backgrounded player
+		// was judged on its own silence and switched off a healthy node.
+		case !f.backloggedAt.IsZero() && now.Sub(f.backloggedAt) < vaneBacklogGrace:
+			graceReason = "client-backlog"
+			// BACKLOG-STREAK: a client that is not reading produces low delivery
+			// windows that say nothing about the node, so the streak is cleared
+			// and a return to the foreground starts from zero.
+			f.lowWindows = 0
 		case sample.synthetic:
 			// STALL-TOLERANCE: a silent window says nothing about the node's
 			// rate; the watchdog only synthesizes one after the flow outlived
 			// its buffered playback time. It must not touch the streak.
 			graceReason = ""
-		case !f.backloggedAt.IsZero() && now.Sub(f.backloggedAt) < vaneBacklogGrace:
-			graceReason = "client-backlog"
-			// BACKLOG-STREAK: a client that is not reading (background tab,
-			// paused player, phone screen off) produces low delivery windows
-			// that say nothing about the node, so the streak is cleared and a
-			// return to the foreground starts from zero.
-			f.lowWindows = 0
 		case !f.lastNonLowAt.IsZero() && now.Sub(f.lastNonLowAt) < vaneFastGrace:
 			graceReason = "recently-fast"
 			f.lowWindows++
@@ -723,7 +789,10 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	f.lastSample = sample
 	f.hasSample = true
 	lowWindows := f.lowWindows
-	if sample.synthetic {
+	// BACKLOG-FIRST: a synthetic window that the backlog branch excused
+	// (graceReason == "client-backlog") must not drag the streak to the
+	// trigger line either, or a backgrounded player still switches itself.
+	if sample.synthetic && graceReason == "" {
 		// A tolerated stall is already proof the node stopped delivering, so
 		// the streak is not consulted: the flow goes straight to the trigger.
 		lowWindows = f.group.flow.lowWindows
@@ -822,7 +891,11 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// than min-bytes asks for; otherwise a phone segment that stalls at a few
 	// hundred kilobytes can never be switched away from.
 	stalledLowVolume := sample.synthetic && sample.Age >= vaneLowVolumeAge && sample.TotalBytes >= vaneLowVolumeBytes
-	if sample.TotalBytes < config.minBytes && !stalledLowVolume {
+	// ZERO-SAMPLE: a flow that never cleared one sample carries no bytes at
+	// all, so it can only be judged on the longer zero-sample silence.
+	stalledEmptyFlow := sample.synthetic && sample.TotalBytes < vaneLowVolumeBytes && sample.Age >= vaneZeroSampleSilence
+	stalledSmallFlow := stalledLowVolume || stalledEmptyFlow
+	if sample.TotalBytes < config.minBytes && !stalledSmallFlow {
 		return nil
 	}
 	creditBits := float64(sample.TotalBytes)*8 - config.demandBPS*sample.Age.Seconds()
@@ -837,7 +910,11 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// SWITCH-EVIDENCE: below this many bytes a low rate is the request being
 	// small, not the node being slow. Target scopes keep the older, lower
 	// floor because a video flow proves itself by growing quickly.
-	if !f.targetScoped && sample.TotalBytes < vaneSwitchMinBytes {
+	// LOW-VOLUME: a phone segment can stall at a few hundred kilobytes before
+	// it ever gets a target scope, so the synthetic stall exemption has to
+	// bypass this gate as well — otherwise the 8 MiB floor alone keeps the
+	// mobile player stuck on a dead node.
+	if !f.targetScoped && sample.TotalBytes < vaneSwitchMinBytes && !stalledSmallFlow {
 		return nil
 	}
 	if !sample.synthetic && creditBits < guardBits && lowWindows < config.maxLowWindows {

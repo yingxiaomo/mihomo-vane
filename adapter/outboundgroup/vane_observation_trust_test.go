@@ -393,8 +393,73 @@ func TestVaneStickyIsScopedByRuleSetFamily(t *testing.T) {
 	now := clock.Now()
 	group.mu.Lock()
 	group.rememberStickyLocked("www.googlevideo.com", 443, "alpha", now)
-	name, ok := group.stickyChoiceLocked("rr1.googlevideo.com", 443, now)
+	name, identity, ok := group.stickyChoiceLocked("rr1.googlevideo.com", 443, now)
 	group.mu.Unlock()
 	require.True(t, ok, "the CDN host must inherit the family choice")
 	require.Equal(t, "alpha", name)
+	require.NotEmpty(t, identity, "the sticky record must carry the identity it was made for")
+}
+
+func TestVaneSyntheticWindowRespectsClientBacklog(t *testing.T) {
+	group, clock, flow := newVaneObservationRig(t, vaneRacingOn)
+	dropVaneRecordedEvents(group)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	// BACKLOG-FIRST: two low windows are on the streak when the client stops
+	// reading (tab backgrounded, player paused). The socket goes silent, so the
+	// watchdog synthesizes a window; it must be excused as client backlog, not
+	// counted toward the switch threshold.
+	flow.observe(vaneObservationLowSample())
+	flow.observe(vaneObservationLowSample())
+	flow.mu.Lock()
+	flow.backloggedAt = clock.Now()
+	flow.mu.Unlock()
+	clock.Advance(stallToleranceForTest(t, flow))
+	group.runFlowWatchdogTick(clock.Now())
+	flow.mu.Lock()
+	count := flow.lowWindows
+	flow.mu.Unlock()
+	require.Zero(t, count, "a synthetic window under client backlog must not fill the streak")
+	require.Zero(t, countVaneEvents(group, "race-scheduled", ""), "backlog silence must not schedule a race")
+}
+
+func TestVaneSmallFlowStallStillSwitches(t *testing.T) {
+	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	dropVaneRecordedEvents(group)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	// LOW-VOLUME: a phone stops at a few dozen KiB, far below the 2 MiB sample
+	// gate and below the 8 MiB initial-connection gate. A fully silent socket is
+	// still a dead connection.
+	flow.mu.Lock()
+	flow.lowWindows = 2
+	// The 8 MiB gate only applies to a flow that has never been switched, so the
+	// test has to model that: the rig's metadata resolves to a known family and
+	// would otherwise take the targetScoped path and skip the gate.
+	flow.targetScoped = false
+	flow.mu.Unlock()
+	flow.observe(vaneThroughputObservation{
+		BitsPerSecond: 1,
+		synthetic:     true,
+		untrusted:     true,
+		TotalBytes:    64 * 1024,
+		Age:           60 * time.Second,
+	})
+	signals := countVaneEvents(group, "race-scheduled", "") + countVaneEvents(group, "reconnect-suppressed", "")
+	require.NotZero(t, signals, "a small but silent flow must reach the switch decision")
+}
+
+func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {
+	group, _, flow := newVaneObservationRig(t, vaneRacingOn)
+	dropVaneRecordedEvents(group)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	// ZERO-SAMPLE: a connection that never produced a single 32 KiB window is
+	// invisible to the sample path. After a long silence it still counts.
+	flow.observe(vaneThroughputObservation{
+		BitsPerSecond: 1,
+		synthetic:     true,
+		untrusted:     true,
+		TotalBytes:    0,
+		Age:           vaneZeroSampleSilence + time.Second,
+	})
+	signals := countVaneEvents(group, "race-scheduled", "") + countVaneEvents(group, "reconnect-suppressed", "")
+	require.NotZero(t, signals, "a zero-sample flow must still be judged after a long silence")
 }
