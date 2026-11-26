@@ -128,7 +128,7 @@ func TestVaneStallWatchdogSynthesizesWindows(t *testing.T) {
 			clock.Advance(2 * time.Second)
 			group.runFlowWatchdogTick(clock.Now())
 			flow.mu.Lock()
-			require.Equal(t, 2, flow.lowWindows, "a tolerated stall must not pollute the streak")
+			require.Equal(t, group.flow.lowWindows, flow.lowWindows, "a tolerated stall promotes the streak to the trigger line")
 			require.Equal(t, float64(1), flow.lastSample.BitsPerSecond)
 			require.True(t, flow.lastSample.untrusted)
 			require.Equal(t, vaneObservationLowSample().TotalBytes, flow.lastSample.TotalBytes)
@@ -166,7 +166,13 @@ func TestVaneStallWatchdogSkipsInactiveFlows(t *testing.T) {
 				flow.mu.Lock()
 				count := flow.lowWindows
 				flow.mu.Unlock()
-				require.Equal(t, want, count)
+				if state == "zero-clock" {
+					// ZERO-SAMPLE: no sample ever existed, so the watchdog ages the
+					// flow from its creation and promotes the streak.
+					require.Equal(t, group.flow.lowWindows, count, "a zero-sample flow is judged after the silence")
+				} else {
+					require.Equal(t, want, count)
+				}
 				require.Zero(t, countVaneEvents(group, "race-scheduled", ""))
 			})
 		}
@@ -186,7 +192,7 @@ func TestVaneStallWatchdogRespectsGrace(t *testing.T) {
 			flow.mu.Lock()
 			count := flow.lowWindows
 			flow.mu.Unlock()
-			require.Equal(t, 0, count, "a tolerated stall is not a low window")
+			require.Equal(t, group.flow.lowWindows, count, "a tolerated stall promotes the streak to the trigger line")
 			require.Zero(t, countVaneEvents(group, "low-window-graced", "recently-fast"))
 			require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""), "a tolerated stall goes straight to the trigger")
 		})
@@ -317,7 +323,7 @@ func TestVaneFlowSyntheticWindowIgnoresBufferCredit(t *testing.T) {
 	require.Zero(t, countVaneEvents(group, "buffer-credit-deferred", ""),
 		"a synthetic window must not be deferred by stale credit")
 	flow.mu.Lock()
-	require.Equal(t, 2, flow.lowWindows, "a tolerated stall leaves the streak alone")
+	require.Equal(t, group.flow.lowWindows, flow.lowWindows, "a tolerated stall promotes the streak to the trigger line")
 	flow.mu.Unlock()
 }
 
@@ -462,4 +468,11 @@ func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {
 	})
 	signals := countVaneEvents(group, "race-scheduled", "") + countVaneEvents(group, "reconnect-suppressed", "")
 	require.NotZero(t, signals, "a zero-sample flow must still be judged after a long silence")
+	// STREAK-WRITEBACK: the commit path re-reads the flow's streak, so the
+	// synthetic trigger has to persist it instead of promoting a local copy —
+	// otherwise every attempt is rejected downstream as "flow-recovered".
+	flow.mu.Lock()
+	streak := flow.lowWindows
+	flow.mu.Unlock()
+	require.Equal(t, group.flow.lowWindows, streak, "the synthetic trigger must reach the commit path")
 }

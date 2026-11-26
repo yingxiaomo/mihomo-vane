@@ -257,8 +257,8 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 					// the grace only keeps the switch from firing on it.
 					require.Equal(t, 1, flow.lowWindows)
 				} else {
-					// A tolerated stall does not pollute the streak.
-					require.Equal(t, 1, flow.lowWindows)
+					// A tolerated stall promotes the streak to the trigger line.
+					require.Equal(t, group.flow.lowWindows, flow.lowWindows)
 					require.Equal(t, float64(1), flow.lastSample.BitsPerSecond)
 				}
 				require.Nil(t, flow.handoff, "摘取/清空仍执行；lease留到TTL")

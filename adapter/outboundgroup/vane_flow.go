@@ -796,6 +796,12 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 		// A tolerated stall is already proof the node stopped delivering, so
 		// the streak is not consulted: the flow goes straight to the trigger.
 		lowWindows = f.group.flow.lowWindows
+		// STREAK-WRITEBACK: the plan is committed later, and that last check
+		// compares the trigger line against the flow's live streak. Promoting
+		// only a local copy made every synthetic trigger look "recovered" at
+		// commit time, so a flow that never produced a sample could be judged
+		// and then never switched. Still inside the flow lock here.
+		f.lowWindows = lowWindows
 	}
 	handoff := f.handoff
 	f.handoff = nil
