@@ -589,7 +589,7 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	// §E: valve plans skip the cooldown they are re-evaluating (no valve plan
 	// reaches the target commit today, but the flag rides the shared plan).
 	if !plan.skipReconnectCooldown {
-		if reason := a.ledgerThrottleReasonLocked(plan.targetKey, now); reason != "" {
+		if reason := a.ledgerThrottleReasonLocked(plan.targetKey, plan.currentBPS < vaneStarvingBPS, now); reason != "" {
 			return reason
 		}
 	}

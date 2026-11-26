@@ -1422,6 +1422,11 @@ type vaneReconnectPlan struct {
 // not a candidate, so A->B->A cannot happen.
 const (
 	// SWITCH-THROTTLE: one switch per target per minute.
+	// vaneStarvingBPS marks a flow as dead rather than merely slow. Only a dead
+	// flow is exempt from the observation window; a slow one still waits it out,
+	// otherwise every low window would re-open the switch and the group would
+	// thrash again.
+	vaneStarvingBPS    = float64(1_000_000)
 	vaneSwitchThrottle = 60 * time.Second
 	// SWITCH-BUDGET: four switches per target per half hour.
 	vaneSwitchBudgetWindow = 30 * time.Minute
@@ -1458,7 +1463,12 @@ func (a *Vane) ledgerBudgetLocked() (int, time.Duration) {
 }
 
 // ledgerThrottleReasonLocked is the target-wide half of "may we switch".
-func (a *Vane) ledgerThrottleReasonLocked(targetKey vaneFlowKey, now time.Time) string {
+// ledgerThrottleReasonLocked reports the target-wide brake that applies right
+// now. A starving flow is exempt from the observation window: that window exists
+// so a fresh switch is not second-guessed, but a flow the switch did not rescue
+// is evidence the switch failed, and waiting out the window leaves the player
+// stalled. The per-window budget still applies.
+func (a *Vane) ledgerThrottleReasonLocked(targetKey vaneFlowKey, starving bool, now time.Time) string {
 	limit, window := a.ledgerBudgetLocked()
 	if limit <= 0 {
 		// SWITCH-BUDGET: a zero budget forbids switching at all.
@@ -1469,7 +1479,9 @@ func (a *Vane) ledgerThrottleReasonLocked(targetKey vaneFlowKey, now time.Time) 
 		return ""
 	}
 	if now.Sub(ledger.lastSwitch) < vaneSwitchThrottle {
-		return "switch-observing"
+		if !starving {
+			return "switch-observing"
+		}
 	}
 	if now.Sub(ledger.windowFrom) < window && ledger.count >= limit {
 		return "target-budget"
@@ -1677,7 +1689,7 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 	// hit was written by the very commit being re-evaluated.
 	// SWITCH-LEDGER: throttle and budget are the only target-wide gates left.
 	if !skipReconnectCooldown {
-		if reason := a.ledgerThrottleReasonLocked(targetKey, now); reason != "" {
+		if reason := a.ledgerThrottleReasonLocked(targetKey, currentBPS < vaneStarvingBPS, now); reason != "" {
 			return vaneReconnectPlan{}, reason
 		}
 	}
@@ -1878,7 +1890,7 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 		return "plan-expired"
 	}
 	if !plan.skipReconnectCooldown {
-		if reason := a.ledgerThrottleReasonLocked(plan.targetKey, now); reason != "" {
+		if reason := a.ledgerThrottleReasonLocked(plan.targetKey, plan.currentBPS < vaneStarvingBPS, now); reason != "" {
 			return reason
 		}
 	}

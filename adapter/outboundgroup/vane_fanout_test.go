@@ -67,7 +67,7 @@ func TestVaneNodeCooldownDoesNotFreezeTheTarget(t *testing.T) {
 
 	group.mu.Lock()
 	group.ledger[key] = vaneSwitchLedger{windowFrom: now, count: vaneSwitchBudgetMax, lastSwitch: now.Add(-vaneSwitchThrottle)}
-	reason := group.ledgerThrottleReasonLocked(key, now)
+	reason := group.ledgerThrottleReasonLocked(key, false, now)
 	group.mu.Unlock()
 	require.Equal(t, "target-budget", reason, "the budget is shared by every node behind the target")
 }

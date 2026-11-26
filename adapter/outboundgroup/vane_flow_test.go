@@ -963,11 +963,11 @@ func TestVaneTargetSwitchBudgetStopsPingPong(t *testing.T) {
 	group.mu.Lock()
 	defer group.mu.Unlock()
 	for i := 0; i < vaneSwitchBudgetMax; i++ {
-		require.Empty(t, group.ledgerThrottleReasonLocked(key, now))
+		require.Empty(t, group.ledgerThrottleReasonLocked(key, false, now))
 		group.noteSwitchLocked(key, "alpha", now)
 		now = now.Add(vaneSwitchThrottle + time.Second)
 	}
-	require.Equal(t, "target-budget", group.ledgerThrottleReasonLocked(key, now))
+	require.Equal(t, "target-budget", group.ledgerThrottleReasonLocked(key, false, now))
 }
 
 // Observe window: a fresh switch gets 60s to prove itself before it may be
@@ -981,8 +981,8 @@ func TestVaneSwitchObserveWindowBlocksImmediateReswitch(t *testing.T) {
 	group.mu.Lock()
 	defer group.mu.Unlock()
 	group.noteSwitchLocked(key, "alpha", now)
-	require.Equal(t, "switch-observing", group.ledgerThrottleReasonLocked(key, now.Add(10*time.Second)))
-	require.Empty(t, group.ledgerThrottleReasonLocked(key, now.Add(vaneSwitchThrottle+time.Second)))
+	require.Equal(t, "switch-observing", group.ledgerThrottleReasonLocked(key, false, now.Add(10*time.Second)))
+	require.Empty(t, group.ledgerThrottleReasonLocked(key, false, now.Add(vaneSwitchThrottle+time.Second)))
 }
 
 // PHASE2: a non-flow must still carry a concrete state scope, else the
@@ -1178,4 +1178,21 @@ func TestVaneSameOriginGroupsTransports(t *testing.T) {
 	require.False(t, vaneSameOrigin("赔钱-美国圣何塞07", "赔钱-美国05"))
 	require.False(t, vaneSameOrigin("alpha", "alpha"))
 	require.False(t, vaneSameOrigin("", "alpha"))
+}
+
+// STARVING-THROTTLE: the observation window exists so a fresh switch is not
+// second-guessed. It must not also hold a flow the switch failed to rescue.
+func TestVaneStarvingFlowIgnoresSwitchThrottle(t *testing.T) {
+	group, clock, _ := newVaneObservationRig(t, vaneSwitchLive)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	key := vaneFlowKey{target: "stall.example", port: 443}
+	now := clock.Now()
+
+	group.mu.Lock()
+	group.ledger[key] = vaneSwitchLedger{windowFrom: now, count: 1, lastSwitch: now}
+	group.mu.Unlock()
+
+	require.Equal(t, "switch-observing", group.ledgerThrottleReasonLocked(key, false, now.Add(10*time.Second)))
+	require.Empty(t, group.ledgerThrottleReasonLocked(key, true, now.Add(10*time.Second)),
+		"a starving flow must not wait out the observation window")
 }
