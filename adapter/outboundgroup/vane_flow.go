@@ -991,6 +991,9 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 			f.recordReconnectSuppressed(reason, sample, lowWindows)
 		}
 		if reason != "" || !plan.knownGood {
+			if smallFlow(sample, f.group.flow) {
+				return nil
+			}
 			f.scheduleRace(sample, lowWindows)
 		}
 		return nil
@@ -1003,8 +1006,28 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	if reason == "no-evidence-candidate" {
 		f.recordReconnectSuppressed(reason, sample, lowWindows)
 	}
+	// SMALL-FLOW: a flow carrying a few hundred bytes cannot fund a probe.
+	// The scores already carry real traffic, so rescue it with the ranked
+	// challenger instead of spending 8-12 MB to prove what they say. Without
+	// a ranked challenger, leave the small flow alone.
+	if smallFlow(sample, f.group.flow) {
+		if reason == "" {
+			f.completeReconnectPlan(&plan, sample, lowWindows)
+			return f.policyActionForPlan(plan, sample, lowWindows, true)
+		}
+		f.recordReconnectSuppressed("small-flow-no-known-good", sample, lowWindows)
+		return nil
+	}
 	f.scheduleRace(sample, lowWindows)
 	return nil
+}
+
+// smallFlow reports whether a flow has moved too few bytes for a probe to be
+// worth its bytes. One probe costs 8-12 MB across the candidates; a keep-alive
+// connection carrying a few hundred bytes cannot pay for that, and its score
+// already comes from the same real traffic.
+func smallFlow(sample vaneThroughputObservation, config vaneFlowConfig) bool {
+	return sample.TotalBytes < config.minBytes
 }
 
 func (f *vaneFlow) recordReconnectSuppressed(reason string, sample vaneThroughputObservation, lowWindows int) {

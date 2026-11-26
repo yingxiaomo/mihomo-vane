@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1222,4 +1223,62 @@ func TestVaneSwitchAwayBreaksOnlyRealTies(t *testing.T) {
 	require.Greater(t, compareVaneCandidateScores(b, c), 0)
 	require.Greater(t, compareVaneCandidateScores(a, c), 0, "the relation must be transitive")
 	require.Greater(t, compareVaneCandidateScores(a, fresh), 0, "SWITCH-SCORE: a chronic offender loses the tie")
+}
+
+// SMALL-FLOW: a keep-alive connection carrying a few hundred bytes must not
+// pay for a probe. Its score already comes from the same real traffic, so
+// spending 8-12 MB to prove what the scores say is pure waste.
+func TestVaneSmallFlowDoesNotPayForAProbe(t *testing.T) {
+	clock := newVaneConnTestClock()
+	fill := func(payload []byte) (int, error) {
+		for i := range payload {
+			payload[i] = 1
+		}
+		return len(payload), nil
+	}
+	alpha := newVaneTestProxy("alpha", true, true)
+	alpha.delay = 20
+	alpha.dialConn = &vaneConnTestConn{readFunc: fill}
+	beta := newVaneTestProxy("beta", true, true)
+	beta.delay = 10
+	group, _ := newVaneGroupForTest(clock, 10, time.Hour, alpha, beta)
+	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
+	configureVaneSwitchForTest(t, group, vaneSwitchLive)
+	chain01ProductionValues(t, group, 10_000_000)
+	t.Cleanup(func() { _ = group.Close() })
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	probes := 0
+	group.racing.probe = func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult {
+		probes++
+		return vaneProbeResult{
+			valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap,
+			duration: time.Second, lowerBoundBPS: 6_000_000, capHit: true,
+		}
+	}
+
+	metadata := &C.Metadata{Host: "rr-small.googlevideo.com", DstPort: 443, NetWork: C.TCP}
+	first, err := group.DialContext(t.Context(), metadata)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = first.Close() })
+	observed := first.(*vaneObservedConn)
+	reader, counters := observed.UnwrapReader()
+	payload := make([]byte, 64*1024)
+	// 20 s of 64 KiB/s: a keep-alive-sized flow (1.25 MiB, under the 2 MiB
+	// min-bytes bar) that has already accumulated its low windows.
+	for i := 0; i < 20; i++ {
+		clock.Advance(time.Second)
+		n, err := reader.Read(payload)
+		require.NoError(t, err)
+		for _, counter := range counters {
+			counter(int64(n))
+		}
+	}
+	// The flow also has to outlive its buffered playback before the watchdog
+	// may synthesize a silent window: 30 s of silence at demand 10M.
+	clock.Advance(vaneStallToleranceMin)
+	group.runFlowWatchdogTick(clock.Now())
+
+	require.Zero(t, countVaneEvents(group, "race-scheduled", ""),
+		"a keep-alive-sized flow must be rescued by its score, never by a probe")
+	require.Zero(t, probes, "no probe may be spent on a keep-alive-sized flow")
 }
