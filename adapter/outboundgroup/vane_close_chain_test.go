@@ -153,7 +153,6 @@ func TestVaneOldRaceResultCannotCloseNewRound(t *testing.T) {
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	// COLD-PICK: the probes below belong to the race under test.
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
@@ -242,7 +241,6 @@ func TestVaneRaceRoundRecoversAfterCleanFinish(t *testing.T) {
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	// COLD-PICK: the probes below belong to the race under test.
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
@@ -318,7 +316,6 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 
 		metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		// COLD-PICK: the probes below belong to the race under test.
-		suppressColdPickProbeForTest(t, group, metadata)
 		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
@@ -381,7 +378,6 @@ func TestVaneRace01RejectsTargetEvidenceOnBothPaths(t *testing.T) {
 
 		metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		// COLD-PICK: the probes below belong to the race under test.
-		suppressColdPickProbeForTest(t, group, metadata)
 		decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 		flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 		require.NotNil(t, flow)
@@ -451,7 +447,6 @@ func TestVaneNaturalCloseInvalidatesInFlightRace(t *testing.T) {
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	// COLD-PICK: the probes below belong to the race under test.
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
@@ -584,7 +579,6 @@ func TestVaneNaturalCloseWinsOverBlockedPolicySubmitter(t *testing.T) {
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	// COLD-PICK: the probes below belong to the race under test.
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)
@@ -663,7 +657,6 @@ func TestVaneRaceTokenReleasedWhenEngineHasNoWinner(t *testing.T) {
 
 	metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 	// COLD-PICK: the probes below belong to the race under test.
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)

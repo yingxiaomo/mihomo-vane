@@ -135,7 +135,6 @@ func TestVaneTargetCapabilityRecordsLatestSample(t *testing.T) {
 func TestVanePrepareAdmitsTargetTierEvidence(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
-	suppressColdPickProbeForTest(t, group, metadata)
 	group.mu.Lock()
 	group.learning.mu.Lock()
 	group.ensureProxyNodeLocked(alpha, clock.Now())
@@ -175,7 +174,6 @@ func TestVanePrepareAdmitsTargetTierEvidence(t *testing.T) {
 func TestVanePrepareRanksByEvidenceBeforeDelay(t *testing.T) {
 	group, clock, alpha, beta, gamma, metadata := newTargetGroupForTest3(t)
 	chain01ProductionValues(t, group, 2_000_000)
-	suppressColdPickProbeForTest(t, group, metadata)
 	group.mu.Lock()
 	group.learning.mu.Lock()
 	group.ensureProxyNodeLocked(alpha, clock.Now())
@@ -221,7 +219,6 @@ func TestVanePrepareRanksByEvidenceBeforeDelay(t *testing.T) {
 func TestVaneNoGainReleasesReconnectCooldown(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
-	suppressColdPickProbeForTest(t, group, metadata)
 	seedChain01Traffic(t, group, beta.Name(), clock.Now(), 12_000_000)
 
 	metadataKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
@@ -402,7 +399,6 @@ func TestVaneCommitTargetTierSurvivesNodeFloor(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 10_000_000)
 	group.flow.lowThroughputBPS = 10_000_000 // §L: the line follows demand
-	suppressColdPickProbeForTest(t, group, metadata)
 	group.mu.Lock()
 	group.learning.mu.Lock()
 	group.ensureProxyNodeLocked(alpha, clock.Now())
@@ -678,7 +674,6 @@ func TestVaneRaceQualifiesNodeWithoutLiveState(t *testing.T) {
 	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
 	chain01ProductionValues(t, group, 2_000_000)
 	configureVaneSwitchForTest(t, group, vaneSwitchObserve)
-	suppressColdPickProbeForTest(t, group, metadata)
 	plan := prepareTargetHandoffForTest(t, group, metadata, alpha)
 	request := vaneRaceRequest{
 		targetKey:   plan.targetStateKey,

@@ -27,7 +27,6 @@ func newSyncRecheckFlow(t *testing.T) (*Vane, *vaneConnTestClock, *vaneFlow, van
 	configureVaneFlowForTest(t, group, "DOMAIN-SUFFIX,googlevideo.com")
 	chain01ProductionValues(t, group, 2_000_000)
 	metadata := &C.Metadata{Host: "rr-recheck.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	suppressColdPickProbeForTest(t, group, metadata)
 
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())

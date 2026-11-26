@@ -34,7 +34,6 @@ func newValveRig(t *testing.T, demandBPS float64) (*Vane, *vaneConnTestClock, *v
 	chain01ProductionValues(t, group, demandBPS)
 	configureVaneSwitchForTest(t, group, vaneSwitchLive)
 	metadata := &C.Metadata{Host: "rr-valve.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	suppressColdPickProbeForTest(t, group, metadata)
 	scopeKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
 
 	// The original switch: alpha→beta, beta holds fresh node evidence.

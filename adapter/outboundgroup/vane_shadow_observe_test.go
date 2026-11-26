@@ -22,7 +22,6 @@ func TestVaneShadowObserveDiscardsAction(t *testing.T) {
 			t.Cleanup(func() { _ = group.Close() })
 			seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)
 			metadata := &C.Metadata{Host: "rr-shadow.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-			suppressColdPickProbeForTest(t, group, metadata)
 			wrapped, err := group.DialContext(t.Context(), metadata)
 			require.NoError(t, err)
 			conn := wrapped.(*vaneObservedConn)

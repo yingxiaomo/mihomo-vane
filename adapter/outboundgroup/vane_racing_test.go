@@ -358,7 +358,6 @@ func TestVaneRacingPartialLowerBoundGatesOnDemand(t *testing.T) {
 
 func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) vaneRaceRequest {
 	t.Helper()
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.Equal(t, "alpha", decision.proxy.Name())
 	key, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
@@ -543,7 +542,6 @@ func TestVaneSwitchModeTruthTable(t *testing.T) {
 				return vaneProbeResult{valid: true, reason: "cap-hit", bytes: vaneRacingProbeByteCap, duration: time.Second, lowerBoundBPS: 100_000_000, capHit: true}
 			}
 			metadata := &C.Metadata{Host: "rr.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-			suppressColdPickProbeForTest(t, group, metadata)
 			decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 			flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 			flow.identity, flow.nodeEpoch = decision.identity, decision.nodeEpoch

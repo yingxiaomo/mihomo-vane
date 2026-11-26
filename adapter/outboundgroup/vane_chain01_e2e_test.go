@@ -86,7 +86,6 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	// This test is about the CHAIN-01 evidence gate on the slow-flow path, not
 	// about the cold-pick probe: suppress the pick probe so the flow starts on
 	// alpha (the ranking choice) and the story stays gate-centric.
-	suppressColdPickProbeForTest(t, group, metadata)
 	first, err := group.DialContext(t.Context(), metadata)
 	require.NoError(t, err)
 	observed := first.(*vaneObservedConn)
@@ -263,6 +262,24 @@ func TestVaneChain01E2ERescueBeatsDemand(t *testing.T) {
 		if group.VaneDiagnostics().Counters.HandoffCommitted > 0 {
 			break
 		}
+	}
+
+	// PENDING-ACTION: a committed handoff arms the close as a pending action on
+	// the victim connection, and that action is only flushed by the next read or
+	// write. Drive one more read so the close assertion below does not race the
+	// flush.
+	for i := 0; i < 4; i++ {
+		if group.VaneDiagnostics().Counters.HandoffCommitted == 0 {
+			break
+		}
+		slowConn.mu.Lock()
+		closed := slowConn.closeCalls > 0
+		slowConn.mu.Unlock()
+		if closed {
+			break
+		}
+		clock.Advance(time.Second)
+		_, _ = reader.Read(payload)
 	}
 
 	snapshot := group.VaneDiagnostics()

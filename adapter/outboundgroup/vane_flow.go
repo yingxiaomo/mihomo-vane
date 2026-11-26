@@ -976,6 +976,19 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	}
 
 	if mode == vaneSwitchObserve {
+		// SMALL-FLOW: observe mode must still report what live mode would
+		// decide, but a window is recorded once. A small flow skips the probe,
+		// so its skip record replaces the generic suppression and carries the
+		// reason the live path would have acted on.
+		if smallFlow(sample, f.group.flow) && (reason != "" || !plan.knownGood) {
+			f.group.diagnostics.record(vaneDiagnosticRecord{
+				kind: "small-flow-probe-skipped", reason: reason, target: f.target,
+				bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
+				bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes, age: sample.Age,
+				lowWindows: lowWindows,
+			})
+			return nil
+		}
 		if reason == "" {
 			f.group.diagnostics.record(vaneDiagnosticRecord{
 				kind: "handoff-would-commit", reason: "baseline", target: f.target,
@@ -987,18 +1000,6 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 			f.recordReconnectSuppressed(reason, sample, lowWindows)
 		}
 		if reason != "" || !plan.knownGood {
-			if smallFlow(sample, f.group.flow) {
-				// SMALL-FLOW: observe mode must still report what live mode
-				// would decide. A small flow skips the probe, so record the
-				// skip instead of returning with no trace.
-				f.group.diagnostics.record(vaneDiagnosticRecord{
-					kind: "small-flow-probe-skipped", reason: reason, target: f.target,
-					bucket: f.targetKey.target, port: f.port, from: f.candidate, to: plan.challenger,
-					bps: sample.BitsPerSecond, totalBytes: sample.TotalBytes, age: sample.Age,
-					lowWindows: lowWindows,
-				})
-				return nil
-			}
 			f.scheduleRace(sample, lowWindows)
 		}
 		return nil

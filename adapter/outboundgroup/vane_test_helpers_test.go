@@ -3,7 +3,6 @@ package outboundgroup
 import (
 	"context"
 	"sort"
-	"testing"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -61,13 +60,4 @@ func vaneCoolNodeForTest(group *Vane, name string, until time.Time) {
 	group.mu.Lock()
 	defer group.mu.Unlock()
 	group.coolNodeLocked(name, until, true)
-}
-
-// suppressColdPickProbeForTest keeps the call sites in older tests readable:
-// the cold-pick probe is gone, so a pick no longer spends budget on
-// capability evidence and there is nothing left to suppress.
-func suppressColdPickProbeForTest(t *testing.T, group *Vane, metadata *C.Metadata) {
-	t.Helper()
-	_ = group
-	_ = metadata
 }

@@ -28,7 +28,6 @@ func newVaneObservationRig(t *testing.T, mode vaneSwitchMode) (*Vane, *vaneConnT
 	}
 	t.Cleanup(func() { _ = group.Close() })
 	metadata := &C.Metadata{Host: "rr-observe.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	flow := newVaneFlow(group, decision.proxy.Name(), metadata)
 	require.NotNil(t, flow)

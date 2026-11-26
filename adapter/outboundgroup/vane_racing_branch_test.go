@@ -209,7 +209,6 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 			group.targetPreferences[key] = vaneTargetPreference{to: lease, expiresAt: clock.Now().Add(time.Hour), updatedAt: clock.Now()}
 			group.mu.Unlock()
 
-			suppressColdPickProbeForTest(t, group, metadata)
 			decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 			require.NotEmpty(t, decision.proxy.Name(), "an unusable preference must fall back to normal scoring")
 			require.Nil(t, decision.handoff, "a rejected preference never hands out a token")
@@ -319,7 +318,6 @@ func TestVaneTargetSettleRejectsForeignAndExpiredTokens(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
 
@@ -809,7 +807,6 @@ func TestVaneHandoffLifecycleSharesOneDiagnosticID(t *testing.T) {
 	group, _, _, beta, metadata := newTargetGroupForTest(t)
 	plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 	require.Empty(t, group.commitTargetHandoff(plan))
-	suppressColdPickProbeForTest(t, group, metadata)
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
 	require.NotNil(t, decision.handoff)
 	id := decision.handoff.id

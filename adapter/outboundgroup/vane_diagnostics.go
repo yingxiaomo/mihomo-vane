@@ -66,12 +66,6 @@ type VaneDiagnosticCounters struct {
 	// ProbeInvalidReasons splits ProbeInvalid by probe failure reason, so a
 	// rotated event ring can no longer erase why probes failed.
 	ProbeInvalidReasons map[string]uint64 `json:"probeInvalidReasons,omitempty"`
-	// COLD-PICK: cold-first-pick probe counters. PickProbeBytes follows the
-	// same semantics as ProbeBytes (actual bytes, canceled included).
-	PickProbeCount   uint64 `json:"pickProbeCount"`
-	PickProbeSuccess uint64 `json:"pickProbeSuccess"`
-	PickProbeInvalid uint64 `json:"pickProbeInvalid"`
-	PickProbeBytes   uint64 `json:"pickProbeBytes"`
 }
 
 type VaneDiagnosticPersistence struct {
@@ -502,18 +496,6 @@ func (d *vaneDiagnostics) recordLocked(record vaneDiagnosticRecord) {
 		d.snapshotData.Counters.ProbeCount++
 		d.snapshotData.Counters.ProbeCanceled++
 		d.snapshotData.Counters.ProbeBytes += vaneDiagnosticBytes(record.totalBytes)
-	case "pick-probe-success":
-		d.snapshotData.Counters.PickProbeCount++
-		d.snapshotData.Counters.PickProbeSuccess++
-		d.snapshotData.Counters.PickProbeBytes += vaneDiagnosticBytes(record.totalBytes)
-	case "pick-probe-timeout":
-		// Excluded from evidence, but still a probe that spent bytes.
-		d.snapshotData.Counters.PickProbeCount++
-		d.snapshotData.Counters.PickProbeBytes += vaneDiagnosticBytes(record.totalBytes)
-	case "pick-probe-invalid":
-		d.snapshotData.Counters.PickProbeCount++
-		d.snapshotData.Counters.PickProbeInvalid++
-		d.snapshotData.Counters.PickProbeBytes += vaneDiagnosticBytes(record.totalBytes)
 	case "handoff-would-commit":
 		d.snapshotData.Counters.WouldHandoff++
 	case "handoff-committed":

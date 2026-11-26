@@ -67,7 +67,6 @@ func TestVaneConfigSwitchRunsActualRace(t *testing.T) {
 				}
 			}
 			metadata := &C.Metadata{Host: "rr-switch.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-			suppressColdPickProbeForTest(t, group, metadata)
 			conn, err := group.DialContext(t.Context(), metadata)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = conn.Close() })
@@ -150,7 +149,6 @@ func TestVaneOffObserveKnownGoodNeverCloses(t *testing.T) {
 	t.Cleanup(func() { _ = group.Close() })
 	seedChain01Traffic(t, group, "beta", clock.Now(), 40_000_000)
 	metadata := &C.Metadata{Host: "rr-known.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	suppressColdPickProbeForTest(t, group, metadata)
 	conn, err := group.DialContext(t.Context(), metadata)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
@@ -211,7 +209,6 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 			t.Run(mode.String()+"/"+source, func(t *testing.T) {
 				group, clock, _, beta, metadata := newTargetGroupForTest(t)
 				t.Cleanup(func() { _ = group.Close() })
-				suppressColdPickProbeForTest(t, group, metadata)
 				plan := prepareTargetHandoffForTest(t, group, metadata, beta)
 				plan.currentBPS = 4_000_000
 				require.Empty(t, group.commitTargetHandoff(plan))

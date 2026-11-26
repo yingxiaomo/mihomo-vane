@@ -153,7 +153,6 @@ func TestVaneBacklogWiredThroughDialContext(t *testing.T) {
 	t.Cleanup(func() { _ = group.Close() })
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	metadata := &C.Metadata{Host: "rr-backlog.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	suppressColdPickProbeForTest(t, group, metadata)
 
 	conn, err := group.DialContext(context.Background(), metadata)
 	require.NoError(t, err)
@@ -196,7 +195,6 @@ func TestVaneBacklogDrainedSlowFlowStillTriggers(t *testing.T) {
 	t.Cleanup(func() { _ = group.Close() })
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
 	metadata := &C.Metadata{Host: "rr-backlog-slow.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	suppressColdPickProbeForTest(t, group, metadata)
 
 	conn, err := group.DialContext(context.Background(), metadata)
 	require.NoError(t, err)

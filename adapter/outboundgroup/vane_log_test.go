@@ -122,5 +122,4 @@ func TestVaneLogCountersStay(t *testing.T) {
 	snapshot := diagnostics.snapshot()
 	require.Equal(t, uint64(1), snapshot.Counters.HandoffCommitted)
 	require.Equal(t, uint64(1), snapshot.Counters.HandoffImproved)
-	require.Zero(t, snapshot.Counters.PickProbeCount, "the cold-pick probe is gone, so the counter never moves")
 }
