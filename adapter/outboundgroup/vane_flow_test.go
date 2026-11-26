@@ -1167,3 +1167,15 @@ func TestVaneLowVolumeNeedsASyntheticWindow(t *testing.T) {
 	require.Zero(t, countVaneEvents(group, "race-scheduled", "")+countVaneEvents(group, "reconnect-suppressed", ""),
 		"a live small flow must stay below the min-bytes gate")
 }
+
+func TestVaneSameOriginGroupsTransports(t *testing.T) {
+	// SAME-ORIGIN: one server exposed through several transports must not be a
+	// switch target for itself.
+	require.True(t, vaneSameOrigin("自建-mx1-德国-xhttp", "自建-mx1-德国-xhttp隧道"))
+	require.True(t, vaneSameOrigin("自建-mx1-德国-tuic", "自建-mx1-德国-xhttp"))
+	// Ordinary provider-country-city names keep different cities apart.
+	require.False(t, vaneSameOrigin("free396-美国西部洛杉矶1-电信优化-高性能", "free396-美国西部洛杉矶2-移动优化-高性能"))
+	require.False(t, vaneSameOrigin("赔钱-美国圣何塞07", "赔钱-美国05"))
+	require.False(t, vaneSameOrigin("alpha", "alpha"))
+	require.False(t, vaneSameOrigin("", "alpha"))
+}

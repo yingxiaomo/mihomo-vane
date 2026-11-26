@@ -437,10 +437,9 @@ func TestVaneSmallFlowStallStillSwitches(t *testing.T) {
 	// still a dead connection.
 	flow.mu.Lock()
 	flow.lowWindows = 2
-	// The 8 MiB gate only applies to a flow that has never been switched, so the
-	// test has to model that: the rig's metadata resolves to a known family and
-	// would otherwise take the targetScoped path and skip the gate.
-	flow.targetScoped = false
+	// TARGET-SCOPED: only a flow the config named as a switch candidate owns the
+	// low-volume exception; an unconfigured flow keeps the 8 MiB gate (next test).
+	flow.targetScoped = true
 	flow.mu.Unlock()
 	flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 1,
@@ -451,6 +450,28 @@ func TestVaneSmallFlowStallStillSwitches(t *testing.T) {
 	})
 	signals := countVaneEvents(group, "race-scheduled", "") + countVaneEvents(group, "reconnect-suppressed", "")
 	require.NotZero(t, signals, "a small but silent flow must reach the switch decision")
+}
+
+func TestVaneUnscopedSmallFlowIsNotSwitched(t *testing.T) {
+	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
+	dropVaneRecordedEvents(group)
+	t.Cleanup(func() { dropVaneRecordedEvents(group) })
+	// TARGET-SCOPED: an API host on a keep-alive connection goes idle for a
+	// while; that silence is not a stalled segment, and reconnecting it would
+	// also tear down every sibling on the same connection.
+	flow.mu.Lock()
+	flow.lowWindows = 4
+	flow.targetScoped = false
+	flow.mu.Unlock()
+	flow.observe(vaneThroughputObservation{
+		BitsPerSecond: 1,
+		synthetic:     true,
+		untrusted:     true,
+		TotalBytes:    512 * 1024,
+		Age:           200 * time.Second,
+	})
+	signals := countVaneEvents(group, "race-scheduled", "") + countVaneEvents(group, "reconnect-suppressed", "")
+	require.Zero(t, signals, "an unconfigured flow must not be switched on a few hundred KiB")
 }
 
 func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {

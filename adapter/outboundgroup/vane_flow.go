@@ -253,6 +253,25 @@ func vaneNodeKeyFor(targetKey vaneFlowKey, candidate string) vaneNodeKey {
 	return vaneNodeKey{vaneFlowKey: targetKey, candidate: candidate}
 }
 
+// vaneSameOrigin reports whether two node names look like the same server
+// behind different transports. SAME-ORIGIN: one provider exposes
+// "自建-mx1-德国-xhttp", "…-xhttp隧道" and "…-tuic" for the same box, and
+// switching between them closes the connection and lands on the same IP. The
+// shared part is the first three dash-separated segments, which is what those
+// names have in common and what ordinary node names (provider-country-city)
+// keep apart.
+func vaneSameOrigin(a, b string) bool {
+	if a == "" || b == "" || a == b {
+		return false
+	}
+	pa := strings.SplitN(a, "-", 4)
+	pb := strings.SplitN(b, "-", 4)
+	if len(pa) < 3 || len(pb) < 3 {
+		return false
+	}
+	return pa[0] == pb[0] && pa[1] == pb[1] && pa[2] == pb[2]
+}
+
 // reconnectFloorLocked is the absolute floor a rescue candidate must clear.
 // It follows the configured low line, so a pool tuned with
 // low-throughput-bps: 10M does not hand a stalled flow to a 5M node and let it
@@ -927,7 +946,12 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// it ever gets a target scope, so the synthetic stall exemption has to
 	// bypass this gate as well — otherwise the 8 MiB floor alone keeps the
 	// mobile player stuck on a dead node.
-	if !f.targetScoped && sample.TotalBytes < vaneSwitchMinBytes && !stalledSmallFlow {
+	// TARGET-SCOPED: a flow the config never named as a switch candidate has no
+	// business being reconnected on a few hundred kilobytes. Its silence is a
+	// keep-alive going idle (HTTP/2 to an API host), not a stalled segment, and
+	// cutting it also tears down every sibling on the same connection. Only a
+	// configured target may use the low-volume exception.
+	if !f.targetScoped && sample.TotalBytes < vaneSwitchMinBytes {
 		return nil
 	}
 	if !sample.synthetic && creditBits < guardBits && lowWindows < config.maxLowWindows {
@@ -1652,6 +1676,12 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 	for _, item := range health {
 		proxy := item.proxy
 		if proxy.Name() == current || !item.alive {
+			continue
+		}
+		// SAME-ORIGIN: one provider can expose the same server through several
+		// transports (xhttp, xhttp-tunnel, tuic). They share an IP, so switching
+		// between them tears the connection down and lands in the same place.
+		if vaneSameOrigin(proxy.Name(), current) {
 			continue
 		}
 		challengerIdentity := vaneProxyPersistentIdentity(proxy)
