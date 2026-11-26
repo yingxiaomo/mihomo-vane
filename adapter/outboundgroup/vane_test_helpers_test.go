@@ -59,5 +59,5 @@ func vaneCooledNodesLocked(group *Vane) []string {
 func vaneCoolNodeForTest(group *Vane, name string, until time.Time) {
 	group.mu.Lock()
 	defer group.mu.Unlock()
-	group.coolNodeLocked(name, until)
+	group.coolNodeLocked(name, until, true)
 }

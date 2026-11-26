@@ -878,12 +878,13 @@ func compareVaneCandidateScores(left, right vaneCandidateScore) int {
 	}
 	// SWITCH-SCORE: equal scores are common when most candidates have no
 	// throughput sample, so a node that keeps getting replaced should lose the
-	// tie. A single switch is not evidence, so only a gap of two or more counts
-	// (otherwise two fresh nodes would just take turns).
-	if left.switchAway+1 < right.switchAway {
-		return -1
-	}
-	if right.switchAway+1 < left.switchAway {
+	// tie. This must be a total order for sort.Slice: the earlier +1 grace
+	// window compared neighbours only, so a=3, b=2, c=1 ranked a<b, b<c yet
+	// a>c - and the most-switched candidate could sort first.
+	if left.switchAway != right.switchAway {
+		if left.switchAway < right.switchAway {
+			return -1
+		}
 		return 1
 	}
 	return strings.Compare(left.name, right.name)

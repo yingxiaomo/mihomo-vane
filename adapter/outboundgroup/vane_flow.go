@@ -961,6 +961,11 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// keep-alive going idle (HTTP/2 to an API host), not a stalled segment, and
 	// cutting it also tears down every sibling on the same connection. Only a
 	// configured target may use the low-volume exception.
+	// TARGET-SCOPE: a flow with no configured domain scope carries too little
+	// evidence to justify tearing its connection down, and an API host that
+	// keeps a socket alive for minutes would otherwise read as stalled forever.
+	// Only a flow that has moved vaneSwitchMinBytes is worth acting on; the
+	// small-flow window above does not bypass this.
 	if !f.targetScoped && sample.TotalBytes < vaneSwitchMinBytes {
 		return nil
 	}
@@ -1522,7 +1527,7 @@ func (a *Vane) nodeCoolingLocked(name string, now time.Time) bool {
 }
 
 // coolNodeLocked puts a node on cooldown across every target.
-func (a *Vane) coolNodeLocked(name string, until time.Time) {
+func (a *Vane) coolNodeLocked(name string, until time.Time, switched bool) {
 	if name == "" {
 		return
 	}
@@ -1533,11 +1538,15 @@ func (a *Vane) coolNodeLocked(name string, until time.Time) {
 		state = &vaneNodeState{name: name, identity: a.nodeIdentities[name]}
 		a.nodes[name] = state
 	}
-	// SWITCH-SCORE: every switch away extends the next rest, so a chronic
-	// offender spends longer out of the pool than a node that failed once.
-	state.switchAway++
+	// SWITCH-SCORE: only a real switch away extends the next rest, so a
+	// chronic offender spends longer out of the pool than a node that failed
+	// once. A penalty (slow landing, slow settle) cools the node without
+	// adding debt, or the same failure would be counted three times.
+	if switched {
+		state.switchAway++
+	}
 	base := until.Sub(a.clock.Now())
-	if base > 0 {
+	if base > 0 && switched {
 		extra := state.switchAway / 2
 		if extra > 3 {
 			extra = 3
@@ -1567,7 +1576,7 @@ func (a *Vane) penalizeSlowLanding(targetKey vaneFlowKey, candidate string, now 
 		a.mu.Unlock()
 		return
 	}
-	a.coolNodeLocked(candidate, now.Add(vaneVerifyPenaltyCooldown))
+	a.coolNodeLocked(candidate, now.Add(vaneVerifyPenaltyCooldown), false)
 	a.mu.Unlock()
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind:   "verify-penalty",
@@ -1966,7 +1975,7 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 	}
 	// SWITCH-AWAY: the node we leave is not a candidate for five minutes on
 	// every target, which is what makes A->B->A impossible.
-	a.coolNodeLocked(plan.current, now.Add(vaneSwitchAwayCooldown))
+	a.coolNodeLocked(plan.current, now.Add(vaneSwitchAwayCooldown), true)
 	handoff := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
 		target:     plan.target,
 		bucket:     plan.targetKey.target,

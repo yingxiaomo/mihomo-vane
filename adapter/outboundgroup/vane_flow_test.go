@@ -1116,7 +1116,7 @@ func TestVaneNodeCooldownDoesNotFollowAReusedName(t *testing.T) {
 	group.mu.Lock()
 	group.nodeIdentities["beta"] = "endpoint-a"
 	group.ensureNodeIdentityLocked("beta", "endpoint-a", now)
-	group.coolNodeLocked("beta", now.Add(time.Minute))
+	group.coolNodeLocked("beta", now.Add(time.Minute), true)
 	held := group.nodeCoolingLocked("beta", now)
 	group.nodeIdentities["beta"] = "endpoint-b"
 	group.ensureNodeIdentityLocked("beta", "endpoint-b", now)
@@ -1201,13 +1201,13 @@ func TestVaneSwitchAwayExtendsTheRest(t *testing.T) {
 	group, clock, _, _, _ := newTargetGroupForTest(t)
 	now := clock.Now()
 	group.mu.Lock()
-	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown))
+	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown), true)
 	first := group.nodes["alpha"]
 	require.Equal(t, 1, first.switchAway, "one switch is one strike")
 	require.Equal(t, now.Add(vaneSwitchAwayCooldown), first.cooldown, "the first rest is the caller's")
 
-	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown))
-	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown))
+	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown), true)
+	group.coolNodeLocked("alpha", now.Add(vaneSwitchAwayCooldown), true)
 	second := group.nodes["alpha"]
 	require.Equal(t, 3, second.switchAway)
 	require.Equal(t, now.Add(2*vaneSwitchAwayCooldown), second.cooldown, "SWITCH-SCORE: a repeat offender rests twice as long")
@@ -1232,10 +1232,15 @@ func TestVaneSwitchAwayBreaksOnlyRealTies(t *testing.T) {
 	slower := vaneCandidateScore{name: "beta", scoreMicros: 200, switchAway: 9}
 	require.Less(t, compareVaneCandidateScores(fast, slower), 0, "the score decides first")
 
-	oneStrike := vaneCandidateScore{name: "alpha", scoreMicros: 100, switchAway: 1}
-	fresh := vaneCandidateScore{name: "beta", scoreMicros: 100, switchAway: 0}
-	require.Less(t, compareVaneCandidateScores(oneStrike, fresh), 0, "a single switch is not evidence, the name decides")
-
-	cronically := vaneCandidateScore{name: "alpha", scoreMicros: 100, switchAway: 4}
-	require.Greater(t, compareVaneCandidateScores(cronically, fresh), 0, "SWITCH-SCORE: a chronic offender loses the tie")
+	// Ties must be a total order. A neighbour-only grace window ranked a=3
+	// below b=2 and b=2 below c=1 but a=3 above c=1, so sort.Slice could place
+	// the most-switched candidate first.
+	a := vaneCandidateScore{name: "a-node", scoreMicros: 100, switchAway: 3}
+	b := vaneCandidateScore{name: "b-node", scoreMicros: 100, switchAway: 2}
+	c := vaneCandidateScore{name: "c-node", scoreMicros: 100, switchAway: 1}
+	fresh := vaneCandidateScore{name: "z-node", scoreMicros: 100, switchAway: 0}
+	require.Greater(t, compareVaneCandidateScores(a, b), 0, "more switches rank later")
+	require.Greater(t, compareVaneCandidateScores(b, c), 0)
+	require.Greater(t, compareVaneCandidateScores(a, c), 0, "the relation must be transitive")
+	require.Greater(t, compareVaneCandidateScores(a, fresh), 0, "SWITCH-SCORE: a chronic offender loses the tie")
 }

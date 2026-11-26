@@ -457,7 +457,7 @@ func TestVaneHashPinDoesNotWriteAnchor(t *testing.T) {
 func TestVaneHashPinSkipsMediaCooledNode(t *testing.T) {
 	group, clock, byName := newVaneHashPinGroup(t, "a", "b", "c", "d")
 	group.mu.Lock()
-	group.coolNodeLocked("a", clock.Now().Add(time.Hour))
+	group.coolNodeLocked("a", clock.Now().Add(time.Hour), true)
 	group.mu.Unlock()
 
 	cand := &vaneRankedProxy{proxy: byName["a"]}

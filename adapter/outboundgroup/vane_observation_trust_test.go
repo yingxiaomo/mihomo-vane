@@ -474,6 +474,42 @@ func TestVaneUnscopedSmallFlowIsNotSwitched(t *testing.T) {
 	require.Zero(t, signals, "an unconfigured flow must not be switched on a few hundred KiB")
 }
 
+func TestVaneSmallFlowSyntheticWindowBelowLongAgeIsNotStalled(t *testing.T) {
+	// SMALL-FLOW: the ordinary synthetic window is ten seconds of zero bytes,
+	// which is an idle keep-alive on a small flow rather than a stalled
+	// segment. A flow under min-bytes must stay quiet until the long window
+	// (vaneLowVolumeAge) has passed, so the two sides of that boundary are the
+	// behaviour that has to be pinned down.
+	cases := []struct {
+		name    string
+		age     time.Duration
+		wantAny bool
+	}{
+		{name: "twelve seconds is still an idle socket", age: 12 * time.Second, wantAny: false},
+		{name: "past the long window it is a stall", age: vaneLowVolumeAge + time.Second, wantAny: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
+			dropVaneRecordedEvents(group)
+			t.Cleanup(func() { dropVaneRecordedEvents(group) })
+			flow.mu.Lock()
+			flow.lowWindows = 4
+			flow.targetScoped = true
+			flow.mu.Unlock()
+			flow.observe(vaneThroughputObservation{
+				BitsPerSecond: 1,
+				synthetic:     true,
+				untrusted:     true,
+				TotalBytes:    512 * 1024,
+				Age:           tc.age,
+			})
+			signals := countVaneEvents(group, "race-scheduled", "") + countVaneEvents(group, "reconnect-suppressed", "")
+			require.Equal(t, tc.wantAny, signals > 0, "small flow at age %s", tc.age)
+		})
+	}
+}
+
 func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {
 	group, _, flow := newVaneObservationRig(t, vaneSwitchLive)
 	dropVaneRecordedEvents(group)

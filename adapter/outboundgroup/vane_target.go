@@ -635,7 +635,7 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	from := vaneMemberLease{name: plan.current, identity: plan.identity, epoch: plan.nodeEpoch}
 	// SWITCH-AWAY: the node we leave is not a candidate for five minutes on
 	// every target, which is what makes A->B->A impossible.
-	a.coolNodeLocked(plan.current, now.Add(vaneSwitchAwayCooldown))
+	a.coolNodeLocked(plan.current, now.Add(vaneSwitchAwayCooldown), true)
 	token := a.diagnostics.recordReconnectCommit(vaneDiagnosticRecord{
 		kind:       "handoff-committed",
 		handoffID:  plan.raceID,
@@ -762,7 +762,7 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 			candidate:   member.name,
 			identity:    member.identity,
 		}
-		a.coolNodeLocked(member.name, now.Add(a.flow.slowCooldown))
+		a.coolNodeLocked(member.name, now.Add(a.flow.slowCooldown), false)
 		// §D: the handoff did not help — clearing the ledger lets this target be
 		// re-evaluated at once instead of waiting out the throttle. The node
 		// cooldown above still keeps this same candidate out of the pool.

@@ -55,7 +55,7 @@ func TestVaneNodeCooldownDoesNotFreezeTheTarget(t *testing.T) {
 	now := clock.Now()
 
 	group.mu.Lock()
-	group.coolNodeLocked(alpha.Name(), now.Add(vaneSwitchAwayCooldown))
+	group.coolNodeLocked(alpha.Name(), now.Add(vaneSwitchAwayCooldown), true)
 	alphaCooling := group.nodeCoolingLocked(alpha.Name(), now)
 	betaCooling := group.nodeCoolingLocked(beta.Name(), now)
 	group.mu.Unlock()

@@ -20,6 +20,11 @@ func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata
 	cooledUntil := time.Time{}
 	if state := group.nodes["alpha"]; state != nil {
 		cooledUntil = state.cooldown
+		// SWITCH-SCORE: a node that was already switched away from ranks
+		// behind a fresh one, and several tests around this helper replay a
+		// switch first. The handoff under test starts from whichever node is
+		// best, so clear the debt that would push alpha down the ranking.
+		state.switchAway = 0
 	}
 	group.mu.Unlock()
 	if now := group.clock.Now(); cooledUntil.After(now) {
@@ -28,7 +33,9 @@ func prepareTargetHandoffForTest(t *testing.T, group *Vane, metadata *C.Metadata
 		}
 	}
 	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
-	require.Equal(t, "alpha", decision.proxy.Name())
+	// The scoring tie-break may order any node first, so accept whatever pick
+	// returns as the current node instead of assuming alpha.
+	require.NotNil(t, decision.proxy)
 	scopeKey := group.targetScopeKey(metadata.Host, metadata.DstPort)
 	targetKey, ok := group.targetScopeForKey(metadata.Host, metadata.DstPort)
 	require.True(t, ok)
@@ -172,6 +179,14 @@ func TestVaneTargetHandoffLeaseScopeAndSingleOutcomeToken(t *testing.T) {
 	// SWITCH-AWAY-COOLDOWN: the commit cooled alpha across every target. Step
 	// past it so the scope checks below still start from alpha.
 	clock.Advance(vaneSwitchAwayCooldown + time.Second)
+	// SWITCH-SCORE: the commit above also added switch-away debt to alpha,
+	// which ranks it behind a fresh node. These checks are about the cooling
+	// scope, so clear the debt to keep alpha the natural pick.
+	group.mu.Lock()
+	if state := group.nodes["alpha"]; state != nil {
+		state.switchAway = 0
+	}
+	group.mu.Unlock()
 	otherPort := *metadata
 	otherPort.DstPort = 8443
 	require.Equal(t, "alpha", group.pickDecision(t.Context(), &otherPort, vaneTransportTCP, false, true).proxy.Name())

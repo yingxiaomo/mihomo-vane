@@ -985,7 +985,7 @@ func TestVaneSwitchAwayCoolingBlocksBacktracking(t *testing.T) {
 		}
 		metadata := &C.Metadata{Host: "rr1.googlevideo.com", DstPort: 443, NetWork: C.TCP}
 		key := group.targetScopeKey(metadata.Host, metadata.DstPort)
-		group.coolNodeLocked(alpha.Name(), now.Add(vaneSwitchAwayCooldown))
+		group.coolNodeLocked(alpha.Name(), now.Add(vaneSwitchAwayCooldown), true)
 		group.learning.mu.Unlock()
 		group.mu.Unlock()
 		return group, clock, metadata, key, beta

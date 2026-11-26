@@ -132,7 +132,7 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 			name: "challenger slow cooldown",
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, plan *vaneReconnectPlan, alpha, beta *vaneTestProxy) {
 				group.mu.Lock()
-				group.coolNodeLocked(plan.challenger, clock.Now().Add(time.Minute))
+				group.coolNodeLocked(plan.challenger, clock.Now().Add(time.Minute), true)
 				group.mu.Unlock()
 			},
 			want: "challenger-slow-cooldown",
@@ -188,7 +188,7 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 		{
 			name: "slow cooldown blocks preference",
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease) {
-				group.coolNodeLocked(lease.name, clock.Now().Add(time.Minute))
+				group.coolNodeLocked(lease.name, clock.Now().Add(time.Minute), true)
 			},
 		},
 	}
@@ -566,7 +566,7 @@ func TestVaneRaceSnapshotBlockedCandidates(t *testing.T) {
 		lease := group.memberLeaseLocked(beta.Name(), beta.identity)
 		failure := group.recordTargetFailureLocked(request.targetKey, lease, clock.Now())
 		cooldown := clock.Now().Add(2 * time.Hour)
-		group.coolNodeLocked(beta.Name(), cooldown)
+		group.coolNodeLocked(beta.Name(), cooldown, true)
 		group.mu.Unlock()
 
 		candidates, reason := group.snapshotRaceCandidates(request)

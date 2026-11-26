@@ -100,7 +100,8 @@ type vaneNodeState struct {
 	switchAway int
 	// cooldown is the single node-level penalty of the simplified kernel (v3).
 	// It replaces slowCooldowns and the per-target reconnects: when a
-	// flow is switched away from this node, the node rests for 30 minutes.
+	// flow is switched away from this node, the node rests for at least
+	// vaneSwitchAwayCooldown, and longer once the debt grows.
 	cooldown time.Time
 }
 
@@ -1352,9 +1353,10 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	if pinned != nil {
 		chosen = *pinned
 	} else if stickyName, stickyIdentity, ok := a.stickyChoiceLocked(target, port, now); ok {
-		// STICKY: a host keeps one exit for 60s so a burst of connections to the
-		// same site does not fan out across the pool. This replaces the old
-		// per-scene anchor, which made every site share one sticky slot.
+		// STICKY: a host keeps one exit for vaneStickyTTL so a burst of
+		// connections to the same site does not fan out across the pool. This
+		// replaces the old per-scene anchor, which made every site share one
+		// sticky slot.
 		// STICKY-IDENTITY: the name alone is not enough — a provider reload can
 		// reuse it for a different endpoint, and the sticky record remembers
 		// which endpoint it meant.
