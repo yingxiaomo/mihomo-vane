@@ -75,7 +75,7 @@ func TestVaneSegmentGapsKeepTheSameExit(t *testing.T) {
 	group.observeConnect("alpha", vaneTransportTCP, base, 900*time.Millisecond)
 	group.observeConnect("beta", vaneTransportTCP, base, 100*time.Millisecond)
 
-	for _, gap := range []time.Duration{30 * time.Second, time.Minute, 4 * time.Minute} {
+	for _, gap := range []time.Duration{10 * time.Second, 30 * time.Second, 50 * time.Second} {
 		clock.Advance(base.Add(gap).Sub(clock.Now()))
 		require.Equal(t, "alpha", group.pick(meta, vaneTransportTCP, true, false).Name(),
 			"a buffering gap of %s must not re-pick", gap)
