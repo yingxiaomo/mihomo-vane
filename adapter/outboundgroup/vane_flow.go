@@ -858,10 +858,12 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// VERIFY-STALL: a flow that goes silent right after a switch is evidence about
 	// the node it landed on, even though the synthetic window itself cannot be used
 	// as throughput evidence. Without this a landing that returns zero bytes was
-	// never cooled, so the next connection was steered onto it again.
+	// never cooled, so the next connection was steered onto it again. Synthetic
+	// only: a recently-fast graced window says nothing about the node — the
+	// client was reading fast 30 seconds ago.
 	landingPenaltyEligible := (sample.TotalBytes >= config.minBytes && (sample.synthetic || vaneVerdictWindow(sample) >= vaneMinVerdictWindow)) ||
 		(sample.synthetic && sample.silence >= vaneLowVolumeAge)
-	if untrusted && landingPenaltyEligible && stateScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.switchMode == vaneSwitchLive {
+	if sample.synthetic && landingPenaltyEligible && stateScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.switchMode == vaneSwitchLive {
 		f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
 	}
 	// Client throttling and synthetic windows trigger policy, never node-health writes.

@@ -56,7 +56,10 @@ func parseVaneBandwidth(text string) (float64, error) {
 		return 0, fmt.Errorf("invalid bandwidth value %q: must be a non-negative number with an optional K/M/G suffix", text)
 	}
 	bits := number * multiplier
-	if math.IsNaN(bits) || math.IsInf(bits, 0) || bits > math.MaxInt64 {
+	// math.MaxInt64 rounds to 2^63 in float64 context, so the previous
+	// `bits > math.MaxInt64` never fired: values from 2^63-1024 up parsed to
+	// exactly 2^63 and amd64's int64 conversion made them negative.
+	if math.IsNaN(bits) || math.IsInf(bits, 0) || bits >= 9223372036854775808.0 {
 		return 0, fmt.Errorf("bandwidth value %q overflows the maximum", text)
 	}
 	return bits, nil

@@ -356,6 +356,7 @@ type Vane struct {
 	mu                sync.Mutex
 	nodes             map[string]*vaneNodeState
 	stickiness        map[vaneTargetKey]vaneStickyChoice
+	stickySweptAt     time.Time
 	nodeControls      map[string]*vaneNodeControlState
 	nodeIdentities    map[string]string
 	anchors           map[vaneAnchorKey]vaneAnchor

@@ -631,13 +631,20 @@ func TestVaneHandoffFailureKeepsForeignPreference(t *testing.T) {
 // int64-overflowing values instead of relying on architecture-dependent
 // float→int64 conversion.
 func TestVaneBandwidthRejectsNonFinite(t *testing.T) {
-	for _, text := range []string{"NaN", "nan", "Inf", "+Inf", "-Inf", "infinity", "1e30", "1e309"} {
+	for _, text := range []string{"NaN", "nan", "Inf", "+Inf", "-Inf", "infinity", "1e30", "1e309",
+		// 2026-11-28 audit: math.MaxInt64 rounds to 2^63 in float64 context, so
+		// the old `bits > math.MaxInt64` never fired and amd64 turned the whole
+		// (2^63-1024, 2^63] band into a negative int64.
+		"9223372036854775806", "9223372036854775807", "9223372036854775808"} {
 		_, err := parseVaneBandwidth(text)
 		require.Error(t, err, text)
 	}
 	got, err := parseVaneBandwidth("500")
 	require.NoError(t, err)
 	require.Equal(t, float64(500), got)
+	big, err := parseVaneBandwidth("9223372036854")
+	require.NoError(t, err)
+	require.Equal(t, float64(9_223_372_036_854), big)
 }
 
 // P2 (audit 2026-11-22): writes through the unwrapped writer drain the queued

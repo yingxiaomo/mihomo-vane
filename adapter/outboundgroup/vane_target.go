@@ -154,6 +154,11 @@ func (a *Vane) flowStateKeyForTarget(target string, port uint16) vaneTargetKey {
 // bad has to lose the host on the next pick, not after a five minute wait.
 const vaneStickyTTL = 60 * time.Second
 
+// vaneStickySweepInterval bounds how often the write path sweeps expired
+// sticky entries. The other prune points sit on reconnect paths, so without
+// this the map grew with every distinct host ever dialed.
+const vaneStickySweepInterval = time.Minute
+
 // vaneStickyScoreMargin is how far the sticky node may fall behind the best
 // candidate before a pick follows the fastest node instead. The score is in
 // micro-units (1.0 = 1_000_000), so this is a 5% gap.
@@ -201,6 +206,16 @@ func (a *Vane) stickyChoiceLocked(target string, port uint16, now time.Time) (st
 func (a *Vane) rememberStickyLocked(target string, port uint16, name string, now time.Time) {
 	if name == "" {
 		return
+	}
+	// STICKY-SWEEP: entries live one TTL; sweep at most once per interval so
+	// the per-pick write path never pays a full-map pass on every dial.
+	if now.Sub(a.stickySweptAt) >= vaneStickySweepInterval {
+		for key, choice := range a.stickiness {
+			if !choice.expiresAt.After(now) {
+				delete(a.stickiness, key)
+			}
+		}
+		a.stickySweptAt = now
 	}
 	identity := ""
 	if st := a.nodes[name]; st != nil {
