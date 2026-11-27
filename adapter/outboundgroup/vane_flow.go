@@ -852,7 +852,7 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	landingPenaltyEligible := (sample.TotalBytes >= config.minBytes && (sample.synthetic || vaneVerdictWindow(sample) >= vaneMinVerdictWindow)) ||
 		(sample.synthetic && sample.silence >= vaneLowVolumeAge)
 	if sample.synthetic && landingPenaltyEligible && stateScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.switchMode == vaneSwitchLive {
-		f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
+		f.group.penalizeSlowLanding(f.targetKey, f.candidate, now, "stall-landing", sample.BitsPerSecond, lowWindows)
 	}
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
 	if !untrusted && stateScopedFlow {
@@ -860,7 +860,7 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 		// the counter is cooled down; synthetic/graced windows never count.
 		if low && landingPenaltyEligible &&
 			lowWindows >= vaneVerifyPenaltyLowWindows {
-			f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
+			f.group.penalizeSlowLanding(f.targetKey, f.candidate, now, "slow-landing", sample.BitsPerSecond, lowWindows)
 		}
 		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond, lowLoss || lowLatency)
 		if low {
@@ -1566,7 +1566,7 @@ func (a *Vane) coolNodeLocked(name string, until time.Time, switched bool) {
 // optimistic (a free node measured 18Mbps to dl.google.com yet delivered only
 // 4Mbps of googlevideo), so a bad landing is judged on real bytes. The penalty
 // lands on the node, not on the target, because the node is what failed.
-func (a *Vane) penalizeSlowLanding(targetKey vaneFlowKey, candidate string, now time.Time) {
+func (a *Vane) penalizeSlowLanding(targetKey vaneFlowKey, candidate string, now time.Time, reason string, bps float64, lowWindows int) {
 	a.mu.Lock()
 	ledger, ok := a.ledger[targetKey]
 	if !ok || ledger.verifyNode != candidate || now.Sub(ledger.verifyAt) > vaneVerifyPenaltyWindow {
@@ -1580,11 +1580,13 @@ func (a *Vane) penalizeSlowLanding(targetKey vaneFlowKey, candidate string, now 
 	a.coolNodeLocked(candidate, now.Add(vaneVerifyPenaltyCooldown), false)
 	a.mu.Unlock()
 	a.diagnostics.record(vaneDiagnosticRecord{
-		kind:   "verify-penalty",
-		target: targetKey.target,
-		port:   targetKey.port,
-		to:     candidate,
-		reason: "slow-landing",
+		kind:       "verify-penalty",
+		target:     targetKey.target,
+		port:       targetKey.port,
+		to:         candidate,
+		reason:     reason,
+		bps:        bps,
+		lowWindows: lowWindows,
 	})
 }
 

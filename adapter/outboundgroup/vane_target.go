@@ -411,6 +411,7 @@ func (a *Vane) recordStall(flow *vaneFlow, observation vaneConnectionCloseObserv
 	a.diagnostics.record(vaneDiagnosticRecord{
 		kind: "stall-attempt", target: flow.target, bucket: flow.targetKey.target,
 		port: flow.port, from: flow.candidate,
+		totalBytes: observation.TotalReadBytes, age: observation.Age,
 	})
 	if stalled {
 		a.diagnostics.record(vaneDiagnosticRecord{

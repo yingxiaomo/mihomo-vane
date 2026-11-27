@@ -1018,13 +1018,13 @@ func TestVaneVerifyPenaltyCoolsSlowLanding(t *testing.T) {
 	group.mu.Unlock()
 
 	// A node we did not land on must not be cooled by this target's landing.
-	group.penalizeSlowLanding(key, "alpha", now.Add(10*time.Second))
+	group.penalizeSlowLanding(key, "alpha", now.Add(10*time.Second), "slow-landing", 0, 0)
 	group.mu.Lock()
 	require.Empty(t, vaneCooledNodesLocked(group))
 	group.mu.Unlock()
 
 	// The node we did land on is cooled for the penalty duration.
-	group.penalizeSlowLanding(key, "beta", now.Add(10*time.Second))
+	group.penalizeSlowLanding(key, "beta", now.Add(10*time.Second), "slow-landing", 0, 0)
 	group.mu.Lock()
 	cooled := len(vaneCooledNodesLocked(group))
 	group.mu.Unlock()
@@ -1035,7 +1035,7 @@ func TestVaneVerifyPenaltyCoolsSlowLanding(t *testing.T) {
 	group.mu.Lock()
 	group.noteSwitchLocked(other, "beta", now)
 	group.mu.Unlock()
-	group.penalizeSlowLanding(other, "beta", now.Add(vaneSwitchThrottle+time.Second))
+	group.penalizeSlowLanding(other, "beta", now.Add(vaneSwitchThrottle+time.Second), "slow-landing", 0, 0)
 	group.mu.Lock()
 	stillOne := len(vaneCooledNodesLocked(group))
 	group.mu.Unlock()
