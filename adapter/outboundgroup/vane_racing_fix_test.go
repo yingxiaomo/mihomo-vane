@@ -216,7 +216,10 @@ func TestVaneRacingProbeCursorExpiryAndMembership(t *testing.T) {
 		{name: "before idle expiry", elapsed: vaneRacingProbeCursorTTL - time.Nanosecond, expected: []string{"delta", "echo"}},
 		{name: "idle expiry", elapsed: vaneRacingProbeCursorTTL, expected: []string{"beta", "charlie"}},
 		{name: "new identity", elapsed: 31 * time.Second, change: "identity", expected: []string{"beta", "charlie"}},
-		{name: "new epoch", elapsed: 31 * time.Second, change: "epoch", expected: []string{"beta", "charlie"}},
+		// AUDIT-2026-11-28: an innocent epoch bump (ranking selected the node
+		// between rounds) no longer resets the rotation — only a real identity
+		// replacement does.
+		{name: "new epoch", elapsed: 31 * time.Second, change: "epoch", expected: []string{"delta", "echo"}},
 		{name: "removed member", elapsed: 31 * time.Second, change: "removed", expected: []string{"beta", "delta"}},
 		{name: "fresh slow cache", elapsed: 31 * time.Second, change: "capability", expected: []string{"beta", "delta"}},
 	} {
@@ -446,4 +449,67 @@ func TestVaneRacingNoWinnerStateBounded(t *testing.T) {
 	count = len(group.racingRuntime.noWinnerUntil)
 	group.racingRuntime.mu.Unlock()
 	require.Equal(t, 1, count, "all expired entries must be reclaimed before installing the current target cooldown")
+}
+
+// TEST-RACE-DRAIN-SURPLUS-01 (audit 2026-11-28): a probe that completed
+// (cap-hit) before the winner fired is a paid measurement — its capability
+// must be banked so the next round does not re-probe the same node, and the
+// diagnostic must not label it canceled.
+func TestVaneRacingDrainedProbeBanksCapability(t *testing.T) {
+	group, _, _, _, request := newVaneRacingFixGroup(t)
+	var mu sync.Mutex
+	var calls []string
+	winnerDone := make(chan struct{})
+	group.racing.probe = func(_ context.Context, proxy C.Proxy, _ *url.URL, _ int64) vaneProbeResult {
+		mu.Lock()
+		calls = append(calls, proxy.Name())
+		name := proxy.Name()
+		mu.Unlock()
+		if name == "beta" {
+			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: 4 << 20, lowerBoundBPS: 40_000_000}
+		}
+		if name == "charlie" {
+			// Stay in flight until the winner callback runs, then complete —
+			// its outcome can only land in the winner's drain loop.
+			<-winnerDone
+			return vaneProbeResult{valid: true, reason: "cap-hit", bytes: 4 << 20, lowerBoundBPS: 1_500_000}
+		}
+		return vaneProbeResult{reason: "response-error", bytes: 1024}
+	}
+
+	var result vaneRaceResult
+	done := make(chan struct{})
+	scheduled, reason := group.scheduleReconnectRace(request, func(winner vaneRaceResult) {
+		// Close the gate before taking mu: the gated probe may still hold mu
+		// until its result returns, and locking first would deadlock the round.
+		close(winnerDone)
+		mu.Lock()
+		result = winner
+		mu.Unlock()
+	}, func() { close(done) })
+	require.True(t, scheduled, reason)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("race did not finish")
+	}
+	mu.Lock()
+	winnerName := result.winner.name
+	mu.Unlock()
+	require.Equal(t, "beta", winnerName)
+	require.ElementsMatch(t, []string{"beta", "charlie"}, calls)
+
+	group.racingRuntime.mu.Lock()
+	var charlieBPS float64
+	var charlieFound bool
+	for lease, record := range group.racingRuntime.capabilities {
+		if lease.name == "charlie" {
+			charlieFound, charlieBPS = true, record.lowerBoundBPS
+		}
+	}
+	group.racingRuntime.mu.Unlock()
+	require.True(t, charlieFound, "the drained probe's capability must be banked")
+	require.Equal(t, 1_500_000.0, charlieBPS)
+	require.Equal(t, 1, countVaneEvents(group, "race-probe-surplus", "cap-hit"))
+	require.Zero(t, countVaneEvents(group, "race-probe-canceled", "cap-hit"))
 }

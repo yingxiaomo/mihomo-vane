@@ -808,7 +808,11 @@ func (c *vaneObservedConn) requestAbort(action vanePolicyAction) {
 	c.lifecycle = vaneConnectionClosed
 	c.lifecycleMu.Unlock()
 	if observation, ready := c.closeObservation(closedAt); ready {
-		c.emitNativeCloseObservation(observation)
+		// POLICY-CLOSE-OBSERVE: the churn/gray callbacks fire here too — a
+		// policy close before relay start used to vanish from churn and gray
+		// accounting, while the same close after relay start was recorded by
+		// RelayFinished. The once guards keep both paths single-fire.
+		c.emitCloseObservation(observation)
 	}
 }
 

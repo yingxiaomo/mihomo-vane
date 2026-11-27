@@ -169,10 +169,16 @@ func TestVaneTargetCommitRejectionsLeaveNoState(t *testing.T) {
 }
 
 // RACE-IDENTITY-001 + TARGET-COOLDOWN-001: selection skips stale identities and cooldown-bound members.
-func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
+// AUDIT-2026-11-28 (PREFERENCE-KEEP): a preference whose member is only
+// transiently unavailable (target block or node cooldown) survives the pick
+// and works again once the block expires — a 30s cooldown must not erase a
+// 10-minute preference. Permanent misses (stale identity, missing proxy) and
+// expired records still drop it.
+func TestVaneTargetSelectionSkipsUnusableAndKeepsTransientlyBlocked(t *testing.T) {
 	cases := []struct {
 		name     string
 		identity string
+		keep     bool
 		mutate   func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease)
 	}{
 		{
@@ -181,12 +187,14 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 		},
 		{
 			name: "target cooldown blocks preference",
+			keep: true,
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease) {
 				group.recordTargetFailureLocked(key, lease, clock.Now())
 			},
 		},
 		{
 			name: "slow cooldown blocks preference",
+			keep: true,
 			mutate: func(t *testing.T, group *Vane, clock *vaneConnTestClock, key vaneTargetKey, lease vaneMemberLease) {
 				group.coolNodeLocked(lease.name, clock.Now().Add(time.Minute), true)
 			},
@@ -215,7 +223,19 @@ func TestVaneTargetSelectionSkipsStaleBlockedAndCooldownMembers(t *testing.T) {
 			group.mu.Lock()
 			_, preferred := group.targetPreferences[key]
 			group.mu.Unlock()
-			require.False(t, preferred, "an unusable preference must be dropped")
+			if testCase.keep {
+				require.True(t, preferred, "a transiently blocked preference survives the pick")
+			} else {
+				require.False(t, preferred, "a permanently unusable preference must be dropped")
+			}
+			if testCase.keep {
+				later := clock.Now().Add(2 * time.Minute)
+				group.mu.Lock()
+				selected, _, source := group.takeTargetSelectionLocked(key, []C.Proxy{beta}, later, true)
+				group.mu.Unlock()
+				require.NotNil(t, selected, "the preference works again once the block expires")
+				require.Equal(t, "preference", source)
+			}
 		})
 	}
 

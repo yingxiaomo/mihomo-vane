@@ -258,7 +258,11 @@ func TestVaneObservedConnRelayFenceIncludesLateDeliveredBytes(t *testing.T) {
 	require.Len(t, observations, 1)
 }
 
-func TestVaneObservedConnPolicyCloseDoesNotFeedChurn(t *testing.T) {
+// POLICY-CLOSE-OBSERVE (audit 2026-11-28): a policy close feeds the churn/gray
+// close callbacks exactly once, whether it lands before or after relay start.
+// The old behavior dropped it entirely when relay had not started, so gray's
+// policy-close exclusion was only reachable on the RelayFinished path.
+func TestVaneObservedConnPolicyCloseFeedsChurnOnce(t *testing.T) {
 	clock := newVaneConnTestClock()
 	underlying := &vaneConnTestConn{reads: []vaneConnTestRead{{payload: make([]byte, vaneThroughputMinPayload)}}}
 	var callbacks int
@@ -272,6 +276,7 @@ func TestVaneObservedConnPolicyCloseDoesNotFeedChurn(t *testing.T) {
 	require.NoError(t, err)
 	observed := wrapped.(*vaneObservedConn)
 	observed.requestAbort(func() bool { return true })
+	require.Equal(t, 1, callbacks, "the policy close itself feeds the close observation")
 	require.NoError(t, wrapped.Close())
-	require.Zero(t, callbacks)
+	require.Equal(t, 1, callbacks, "the natural close must not double-fire after a policy close")
 }

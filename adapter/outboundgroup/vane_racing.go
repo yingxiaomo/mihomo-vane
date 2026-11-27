@@ -461,14 +461,32 @@ func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, 
 			a.recordRaceQualified(request, taskID, outcome.candidate.member, result.lowerBoundBPS, "probe")
 			callback(vaneRaceResult{request: request, taskID: taskID, winner: outcome.candidate.member, lowerBoundBPS: result.lowerBoundBPS, source: "probe"})
 			for remaining > 0 {
-				canceledOutcome := <-outcomes
+				drained := <-outcomes
 				remaining--
+				drainedKind := "race-probe-invalid"
+				if drained.result.valid {
+					// A probe that completed (cap-hit) before the winner fired
+					// is a paid measurement: bank its capability instead of
+					// re-probing the same node next round.
+					drainedKind = "race-probe-surplus"
+				} else if errors.Is(probeCtx.Err(), context.Canceled) && drained.result.reason == "canceled" {
+					drainedKind = "race-probe-canceled"
+				}
 				a.diagnostics.record(vaneDiagnosticRecord{
-					kind: "race-probe-canceled", reason: canceledOutcome.result.reason, handoffID: taskID,
+					kind: drainedKind, reason: drained.result.reason, handoffID: taskID,
 					target: request.target, bucket: request.targetKey.targetScope, port: request.port,
-					from: request.current.name, to: canceledOutcome.candidate.member.name,
-					totalBytes: canceledOutcome.result.bytes, age: canceledOutcome.result.duration,
+					from: request.current.name, to: drained.candidate.member.name,
+					bps:        drained.result.lowerBoundBPS,
+					totalBytes: drained.result.bytes, age: drained.result.duration,
 				})
+				if drained.result.valid && a.validateRaceWinner(request, drained.candidate.member) {
+					a.racingRuntime.mu.Lock()
+					a.racingRuntime.capabilities[drained.candidate.member] = vaneCapabilityRecord{
+						member: drained.candidate.member, lowerBoundBPS: drained.result.lowerBoundBPS, bytes: drained.result.bytes, observedAt: a.clock.Now(),
+					}
+					a.pruneCapabilitiesLocked(a.clock.Now())
+					a.racingRuntime.mu.Unlock()
+				}
 			}
 			return
 		}
@@ -478,7 +496,7 @@ func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, 
 
 // selectRaceProbeCandidates rotates only paid probes, after real-target and
 // capability proofs have had their chance. Each target keeps its own bounded,
-// identity/epoch-bound cursor because target evidence can filter different
+// identity-bound cursor because target evidence can filter different
 // candidate pools. Probe failures never become business-health evidence.
 func (a *Vane) selectRaceProbeCandidates(target vaneTargetKey, candidates []vaneRaceCandidate, now time.Time) []vaneRaceCandidate {
 	a.racingRuntime.mu.Lock()
@@ -487,8 +505,12 @@ func (a *Vane) selectRaceProbeCandidates(target vaneTargetKey, candidates []vane
 	a.racingRuntime.mu.Unlock()
 	start := 0
 	if ok {
+		// Match by name+identity, not the full lease: an innocent epoch bump
+		// (ranking selected the node between rounds) must not reset the
+		// rotation and re-probe the candidates that just failed. A real
+		// replacement changes the identity and misses on purpose.
 		for index, candidate := range candidates {
-			if candidate.member == cursor.member {
+			if candidate.member.name == cursor.member.name && candidate.member.identity == cursor.member.identity {
 				start = index + 1
 				break
 			}

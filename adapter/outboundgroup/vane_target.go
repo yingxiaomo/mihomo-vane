@@ -521,28 +521,32 @@ func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, n
 	if a.switchMode != vaneSwitchLive {
 		return nil, nil, ""
 	}
-	find := func(member vaneMemberLease) C.Proxy {
+	// find reports whether the miss is transient (target block or node
+	// cooldown — both expire) or permanent (lease stale, node gone). Only a
+	// permanent miss or an expired record drops the target memory: a 30s
+	// node cooldown must not erase a 10-minute preference or a 15s handoff.
+	find := func(member vaneMemberLease) (C.Proxy, bool) {
 		if !a.memberLeaseCurrentLocked(member) {
-			return nil
+			return nil, false
 		}
 		if _, blocked := a.targetMemberBlockedLocked(key, member, now); blocked {
-			return nil
+			return nil, true
 		}
 		for _, proxy := range proxies {
 			if proxy.Name() != member.name || vaneProxyPersistentIdentity(proxy) != member.identity {
 				continue
 			}
 			if a.nodeCoolingLocked(member.name, now) {
-				return nil
+				return nil, true
 			}
-			return proxy
+			return proxy, false
 		}
-		return nil
+		return nil, false
 	}
 
 	if lease, ok := a.targetHandoffs[key]; ok {
 		if lease.expiresAt.After(now) {
-			if proxy := find(lease.to); proxy != nil {
+			if proxy, transient := find(lease.to); proxy != nil {
 				var token *vaneHandoffToken
 				if claimHandoff && !lease.claimed {
 					lease.claimed = true
@@ -550,17 +554,23 @@ func (a *Vane) takeTargetSelectionLocked(key vaneTargetKey, proxies []C.Proxy, n
 					token = lease.token
 				}
 				return proxy, token, "handoff"
+			} else if !transient {
+				delete(a.targetHandoffs, key)
 			}
+		} else {
+			delete(a.targetHandoffs, key)
 		}
-		delete(a.targetHandoffs, key)
 	}
 	if preference, ok := a.targetPreferences[key]; ok {
 		if preference.expiresAt.After(now) {
-			if proxy := find(preference.to); proxy != nil {
+			if proxy, transient := find(preference.to); proxy != nil {
 				return proxy, nil, "preference"
+			} else if !transient {
+				delete(a.targetPreferences, key)
 			}
+		} else {
+			delete(a.targetPreferences, key)
 		}
-		delete(a.targetPreferences, key)
 	}
 	return nil, nil, ""
 }
