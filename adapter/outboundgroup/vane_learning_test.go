@@ -945,25 +945,35 @@ func TestVaneLearningSaveFailureRetriesAndPersistsLatestRevision(t *testing.T) {
 	require.True(t, metrics.response.valid)
 }
 
-func TestVaneLearningCASConflictPermanentlyFencesOldWriter(t *testing.T) {
+// AUDIT-2026-11-28: a CAS conflict means another writer now holds the fencing
+// lease. The old behavior flipped writeBlocked — a never-reset state that kept
+// persistence dead until restart. The writer now degrades to memory-only: no
+// rebase, no clobber of the current owner, learning continues in RAM.
+func TestVaneLearningCASConflictDegradesToMemoryOnly(t *testing.T) {
 	clock := newVaneConnTestClock()
 	store := newVaneLearningTestStore()
 	store.fail = cachefile.ErrVaneStateConflict
-	state := newVaneLearningState("cas-fenced", clock, store, time.Hour, 16)
+	state := newVaneLearningState("cas-degrade", clock, store, time.Hour, 16)
 	group, _ := newVaneGroupForTest(clock, 16, time.Hour, newVaneTestProxy("alpha", true, true))
 	attachVaneLearningForTest(group, state, state.generation)
 	group.observeConnect("alpha", vaneTransportTCP, clock.Now(), 10*time.Millisecond)
 	require.ErrorContains(t, state.flush(), cachefile.ErrVaneStateConflict.Error())
 
 	state.mu.Lock()
-	require.True(t, state.writeBlocked)
+	require.False(t, state.writeBlocked, "the conflict must not enter the never-reset blocked state")
+	require.Nil(t, state.store, "the degraded writer stops attempting persistence")
 	require.Zero(t, state.pending.revision)
 	require.Nil(t, state.persistTimer)
+	alphaNode := state.nodes[vaneLearningTestNodeKey("alpha")]
 	state.mu.Unlock()
+	require.NotNil(t, alphaNode, "in-memory learning survives the degrade")
+
+	// The degraded writer never rebases onto the fresh lease, so the current
+	// owner's payload is untouched and no write reaches the store again.
 	store.fail = nil
 	group.observeResponse("alpha", vaneTransportTCP, clock.Now(), 20*time.Millisecond)
 	require.ErrorContains(t, state.flush(), cachefile.ErrVaneStateConflict.Error())
-	require.Nil(t, store.payload(state.storageKey), "a fenced writer must never rebase and overwrite the current owner")
+	require.Nil(t, store.payload(state.storageKey), "a degraded writer must never overwrite the current owner")
 }
 
 func TestVaneLearningDebouncedWriterAndFlushEdgeCases(t *testing.T) {
@@ -1103,4 +1113,42 @@ func TestFlushVaneLearningStatesDrainsAllAndAggregatesFailure(t *testing.T) {
 
 	require.ErrorContains(t, FlushVaneLearningStates(), "global flush failed")
 	require.NotEmpty(t, goodStore.payload(good.storageKey))
+}
+
+// AUDIT-2026-11-28: an acquire for a key whose entry is mid-eviction (flush
+// running outside the registry lock) must not build a replacement candidate —
+// it would load the pre-flush token and conflict with the victim's flush.
+// The acquire degrades to memory-only; the registry entry is untouched.
+func TestVaneLearningEvictingKeyAcquireDegradesWithoutReplacement(t *testing.T) {
+	clock := newVaneConnTestClock()
+	const groupName = "vane-learning-evict-guard"
+	key := vaneLearningStorageKey(groupName)
+	vaneLearningRegistry.Lock()
+	for len(vaneLearningRegistry.entries) < vaneLearningRegistryLimit {
+		fill := fmt.Sprintf("evict-guard-fill-%d", len(vaneLearningRegistry.entries))
+		vaneLearningRegistry.entries[vaneLearningStorageKey(fill)] = vaneLearningNoStoreCandidate(fill, clock, time.Hour, 16, "fill")
+	}
+	victim := vaneLearningNoStoreCandidate(groupName, clock, time.Hour, 16, "")
+	victim.evicting = true
+	vaneLearningRegistry.entries[key] = victim
+	vaneLearningRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneLearningRegistry.Lock()
+		delete(vaneLearningRegistry.entries, key)
+		for k := range vaneLearningRegistry.entries {
+			if len(k) > len(vaneLearningStorageKey("evict-guard-fill")) && k[:len(vaneLearningStorageKey("evict-guard-fill"))] == vaneLearningStorageKey("evict-guard-fill") {
+				delete(vaneLearningRegistry.entries, k)
+			}
+		}
+		vaneLearningRegistry.Unlock()
+	})
+
+	got := acquireVaneLearningState(groupName, clock, time.Hour, 16)
+	require.NotSame(t, victim, got, "the acquire must not hand out the evicting entry")
+	require.Nil(t, got.store, "the acquire degrades to memory-only")
+	require.Contains(t, got.status().LastError, "evicting")
+
+	vaneLearningRegistry.Lock()
+	require.Same(t, victim, vaneLearningRegistry.entries[key], "the victim stays in place mid-eviction")
+	vaneLearningRegistry.Unlock()
 }

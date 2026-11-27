@@ -27,10 +27,10 @@ func TestVaneNamespacePreservesPreviousBuckets(t *testing.T) {
 		return nil
 	}))
 	cache := &CacheFile{DB: db}
-	state, err := cache.GetVaneState(key)
+	state, err := cache.GetVaneState(key, 1)
 	require.NoError(t, err)
 	require.Nil(t, state)
-	_, lease, err := cache.GetVaneStateWithToken(key)
+	_, lease, err := cache.GetVaneStateWithToken(key, 1)
 	require.NoError(t, err)
 	require.Len(t, lease, 16)
 	payload := []byte(`{"schemaVersion":1,"updatedAt":"2026-11-15T00:00:00Z"}`)

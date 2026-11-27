@@ -16,21 +16,21 @@ func TestVaneStateStoreIsDedicatedAndDurable(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	cache := &CacheFile{DB: db}
 
-	missing, err := cache.GetVaneState("missing")
+	missing, err := cache.GetVaneState("missing", 1)
 	require.NoError(t, err)
 	require.Nil(t, missing)
 
 	payload := []byte(`{"schemaVersion":1,"group":"vane","updatedAt":"2026-11-14T00:00:00Z"}`)
 	require.NoError(t, cache.SetVaneState("vane-state-v1:key", payload))
 
-	actual, err := cache.GetVaneState("vane-state-v1:key")
+	actual, err := cache.GetVaneState("vane-state-v1:key", 1)
 	require.NoError(t, err)
 	require.Equal(t, payload, actual)
 }
 
 func TestVaneStateStoreReportsUnavailableAndOversize(t *testing.T) {
 	cache := &CacheFile{}
-	_, err := cache.GetVaneState("key")
+	_, err := cache.GetVaneState("key", 1)
 	require.ErrorIs(t, err, ErrCacheUnavailable)
 	require.ErrorIs(t, cache.SetVaneState("key", []byte("value")), ErrCacheUnavailable)
 
@@ -46,13 +46,13 @@ func TestVaneStateStoreReportsUnavailableAndOversize(t *testing.T) {
 		}
 		return bucket.Put([]byte("legacy-oversize"), make([]byte, vaneStatePayloadLimit+1))
 	}))
-	_, token, err := cache.GetVaneStateWithToken("legacy-oversize")
+	_, token, err := cache.GetVaneStateWithToken("legacy-oversize", 1)
 	require.ErrorIs(t, err, ErrVaneStatePayloadTooLarge)
 	require.Len(t, token, vaneStateTokenSize)
 	replacement := []byte(`{"updatedAt":"2026-11-14T00:00:00Z","revision":1}`)
 	_, err = cache.CompareAndSwapVaneState("legacy-oversize", token, replacement)
 	require.NoError(t, err)
-	actual, err := cache.GetVaneState("legacy-oversize")
+	actual, err := cache.GetVaneState("legacy-oversize", 1)
 	require.NoError(t, err)
 	require.Equal(t, replacement, actual)
 }
@@ -72,7 +72,7 @@ func TestVaneStateOversizedFutureSchemaCannotBeDowngraded(t *testing.T) {
 		return bucket.Put([]byte("future"), payload)
 	}))
 
-	_, token, err := cache.GetVaneStateWithToken("future")
+	_, token, err := cache.GetVaneStateWithToken("future", 1)
 	require.ErrorIs(t, err, ErrVaneStateIncompatibleSchema)
 	require.Len(t, token, vaneStateTokenSize)
 	require.NoError(t, db.View(func(tx *bbolt.Tx) error {
@@ -99,9 +99,9 @@ func TestVaneStateFreshLeasesOutliveLegacyRetentionEntries(t *testing.T) {
 		return nil
 	}))
 
-	_, tokenA, err := cache.GetVaneStateWithToken("vane-state-v1:--fresh-a")
+	_, tokenA, err := cache.GetVaneStateWithToken("vane-state-v1:--fresh-a", 1)
 	require.NoError(t, err)
-	_, tokenB, err := cache.GetVaneStateWithToken("vane-state-v1:--fresh-b")
+	_, tokenB, err := cache.GetVaneStateWithToken("vane-state-v1:--fresh-b", 1)
 	require.NoError(t, err)
 	_, err = cache.CompareAndSwapVaneState("vane-state-v1:--fresh-a", tokenA, []byte(`{"schemaVersion":1,"updatedAt":"2026-11-15T00:00:00Z"}`))
 	require.NoError(t, err, "a fresh active lease must be retained ahead of legacy zero-time leases")
@@ -149,7 +149,7 @@ func TestVaneStateCompareAndSwapRejectsStaleAndAbsentRace(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	cache := &CacheFile{DB: db}
 
-	missing, absentToken, err := cache.GetVaneStateWithToken("key")
+	missing, absentToken, err := cache.GetVaneStateWithToken("key", 1)
 	require.NoError(t, err)
 	require.Nil(t, missing)
 	require.Len(t, absentToken, vaneStateTokenSize)
@@ -169,7 +169,7 @@ func TestVaneStateCompareAndSwapRejectsStaleAndAbsentRace(t *testing.T) {
 
 	_, err = cache.CompareAndSwapVaneState("key", firstToken, []byte(`{"revision":1}`))
 	require.ErrorIs(t, err, ErrVaneStateConflict, "a delayed old writer must not replace the newer revision")
-	actual, actualToken, err := cache.GetVaneStateWithToken("key")
+	actual, actualToken, err := cache.GetVaneStateWithToken("key", 1)
 	require.NoError(t, err)
 	require.Equal(t, second, actual)
 	require.NotEqual(t, secondToken, actualToken, "opening a new writer lease must fence the previous writer")
@@ -235,7 +235,7 @@ func TestVaneStateWriterLeasesAreBoundedBeforeFirstPayload(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	cache := &CacheFile{DB: db}
 	for i := 0; i < vaneStateEntryLimit+44; i++ {
-		_, token, err := cache.GetVaneStateWithToken(fmt.Sprintf("lease-%03d", i))
+		_, token, err := cache.GetVaneStateWithToken(fmt.Sprintf("lease-%03d", i), 1)
 		require.NoError(t, err)
 		require.Len(t, token, vaneStateTokenSize)
 	}
@@ -246,4 +246,31 @@ func TestVaneStateWriterLeasesAreBoundedBeforeFirstPayload(t *testing.T) {
 		require.NotNil(t, meta.Get([]byte(fmt.Sprintf("lease-%03d", vaneStateEntryLimit+43))), "current lease must be protected from its own retention pass")
 		return nil
 	}))
+}
+
+// AUDIT-2026-11-28: the oversized-row schema gate follows the writer's schema
+// version, passed in by the caller — not a pinned constant. A row at the
+// writer's own schema stays recoverable through the replacement path; only a
+// genuinely newer declaration is protected from downgrade.
+func TestVaneStateOversizedGateFollowsWriterSchema(t *testing.T) {
+	db, err := bbolt.Open(t.TempDir()+"/cache.db", 0o600, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	cache := &CacheFile{DB: db}
+	payload := append([]byte(`{"schemaVersion":3,"padding":"`), bytes.Repeat([]byte{'x'}, vaneStatePayloadLimit)...)
+	payload = append(payload, []byte(`"}`)...)
+	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
+		bucket, createErr := tx.CreateBucketIfNotExists(bucketVaneState)
+		if createErr != nil {
+			return createErr
+		}
+		return bucket.Put([]byte("writer-schema"), payload)
+	}))
+
+	_, _, err = cache.GetVaneStateWithToken("writer-schema", 3)
+	require.ErrorIs(t, err, ErrVaneStatePayloadTooLarge,
+		"a row at the writer's schema stays recoverable for replacement")
+	_, _, err = cache.GetVaneStateWithToken("writer-schema", 2)
+	require.ErrorIs(t, err, ErrVaneStateIncompatibleSchema,
+		"a row above the writer's schema is protected from downgrade")
 }

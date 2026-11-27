@@ -20,13 +20,16 @@ var (
 )
 
 const (
-	vaneStatePayloadLimit           = 2 * 1024 * 1024
-	vaneStateEntryLimit             = 256
-	vaneStateTokenSize              = 16
-	vaneStateSupportedSchemaVersion = 1
+	vaneStatePayloadLimit = 2 * 1024 * 1024
+	vaneStateEntryLimit   = 256
+	vaneStateTokenSize    = 16
 )
 
-func vaneOversizedStateError(value []byte) error {
+// supportedSchema is the schema version THIS binary writes, passed in from the
+// caller (cachefile cannot import the learning layer). Rows declaring a newer
+// schema are protected from downgrade; rows at or below it stay recoverable
+// through the payload-too-large replacement path.
+func vaneOversizedStateError(value []byte, supportedSchema int) error {
 	var header struct {
 		SchemaVersion int `json:"schemaVersion"`
 	}
@@ -35,7 +38,7 @@ func vaneOversizedStateError(value []byte) error {
 		// newer schema is protected from downgrade.
 		return fmt.Errorf("%w: exceeds %d bytes", ErrVaneStatePayloadTooLarge, vaneStatePayloadLimit)
 	}
-	if header.SchemaVersion > vaneStateSupportedSchemaVersion {
+	if header.SchemaVersion > supportedSchema {
 		return fmt.Errorf("%w: schema %d", ErrVaneStateIncompatibleSchema, header.SchemaVersion)
 	}
 	return fmt.Errorf("%w: exceeds %d bytes", ErrVaneStatePayloadTooLarge, vaneStatePayloadLimit)
@@ -78,7 +81,7 @@ func newVaneStateToken() ([]byte, error) {
 	return token, nil
 }
 
-func (c *CacheFile) GetVaneState(key string) ([]byte, error) {
+func (c *CacheFile) GetVaneState(key string, supportedSchema int) ([]byte, error) {
 	if c == nil || c.DB == nil {
 		return nil, ErrCacheUnavailable
 	}
@@ -90,7 +93,7 @@ func (c *CacheFile) GetVaneState(key string) ([]byte, error) {
 		}
 		if value := bucket.Get([]byte(key)); value != nil {
 			if len(value) > vaneStatePayloadLimit {
-				return vaneOversizedStateError(value)
+				return vaneOversizedStateError(value, supportedSchema)
 			}
 			data = append([]byte(nil), value...)
 		}
@@ -105,7 +108,7 @@ func (c *CacheFile) GetVaneState(key string) ([]byte, error) {
 // GetVaneStateWithToken opens a fenced writer lease for key. The opaque
 // random token is durable even while the payload is absent, so delete/recreate
 // and A->B->A content cycles cannot make an old writer current again.
-func (c *CacheFile) GetVaneStateWithToken(key string) ([]byte, []byte, error) {
+func (c *CacheFile) GetVaneStateWithToken(key string, supportedSchema int) ([]byte, []byte, error) {
 	if c == nil || c.DB == nil {
 		return nil, nil, ErrCacheUnavailable
 	}
@@ -138,7 +141,7 @@ func (c *CacheFile) GetVaneStateWithToken(key string) ([]byte, []byte, error) {
 		}
 		if value := bucket.Get(keyBytes); value != nil {
 			if len(value) > vaneStatePayloadLimit {
-				oversizedErr = vaneOversizedStateError(value)
+				oversizedErr = vaneOversizedStateError(value, supportedSchema)
 				return nil
 			}
 			data = append([]byte(nil), value...)

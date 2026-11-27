@@ -743,7 +743,11 @@ func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
 	clock := newVaneConnTestClock()
 
 	// Phase 1: the hit path must not hand an evicting victim out — the
-	// acquire falls through and builds a fresh state that replaces it.
+	// acquire degrades to memory-only instead of building a replacement whose
+	// pre-flush lease would conflict with the victim's flush.
+	// Assertions run outside the registry lock: a require failure exits the
+	// goroutine without unwinding, and a lock held across it deadlocks the
+	// cleanup (found by the 2026-11-28 audit round).
 	victim := acquireVaneLearningState("evicting-group", clock, time.Hour, 64)
 	require.NotNil(t, victim.store)
 	vaneLearningRegistry.Lock()
@@ -752,9 +756,11 @@ func TestVaneLearningRegistryEvictingVictimNotHandedOut(t *testing.T) {
 	fresh := acquireVaneLearningState("evicting-group", clock, time.Hour, 64)
 	require.NotNil(t, fresh)
 	require.NotSame(t, victim, fresh, "an evicting victim must not be adopted mid-flush")
+	require.Nil(t, fresh.store, "the mid-eviction acquire degrades to memory-only")
 	vaneLearningRegistry.Lock()
-	require.Same(t, fresh, vaneLearningRegistry.entries[vaneLearningStorageKey("evicting-group")])
+	registered := vaneLearningRegistry.entries[vaneLearningStorageKey("evicting-group")]
 	vaneLearningRegistry.Unlock()
+	require.Same(t, victim, registered, "the victim stays in place mid-eviction")
 
 	// Phase 2: a failed eviction keeps the victim, clears the flag, and the
 	// survivor is handed out again by the next acquire of its group.

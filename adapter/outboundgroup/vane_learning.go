@@ -36,7 +36,7 @@ type vaneLearningStore interface {
 type vaneCacheLearningStore struct{}
 
 func (vaneCacheLearningStore) Load(key string) ([]byte, []byte, error) {
-	return cachefile.Cache().GetVaneStateWithToken(key)
+	return cachefile.Cache().GetVaneStateWithToken(key, VaneLearningSchemaVersion)
 }
 
 func (vaneCacheLearningStore) Save(key string, expectedToken, payload []byte) ([]byte, error) {
@@ -296,11 +296,20 @@ func vaneLearningNoStoreCandidate(group string, clock vaneClock, stateTTL time.D
 func acquireVaneLearningState(group string, clock vaneClock, stateTTL time.Duration, maxStates int) *vaneLearningState {
 	key := vaneLearningStorageKey(group)
 	vaneLearningRegistry.Lock()
-	if current := vaneLearningRegistry.entries[key]; current != nil && !current.evicting {
-		vaneLearningRegistry.access++
-		current.lastAccess = vaneLearningRegistry.access
+	if current := vaneLearningRegistry.entries[key]; current != nil {
+		if !current.evicting {
+			vaneLearningRegistry.access++
+			current.lastAccess = vaneLearningRegistry.access
+			vaneLearningRegistry.Unlock()
+			return current
+		}
+		// AUDIT-2026-11-28: the entry is mid-eviction — its flush runs outside
+		// the registry lock. Building a replacement here would load the
+		// pre-flush token and then conflict with the victim's flush, so this
+		// one acquire degrades to memory-only; the next acquire or reload
+		// reopens persistence.
 		vaneLearningRegistry.Unlock()
-		return current
+		return vaneLearningNoStoreCandidate(group, clock, stateTTL, maxStates, "node-state evicting")
 	}
 	if len(vaneLearningRegistry.entries) >= vaneLearningRegistryLimit {
 		// §H: the registry used to degrade straight to a store-less state,
@@ -944,7 +953,16 @@ func (s *vaneLearningState) persistLoop() {
 			s.available = false
 			s.lastError = err.Error()
 			if conflict {
-				s.writeBlocked = true
+				// AUDIT-2026-11-28: a conflict means another writer now holds
+				// the fencing lease (eviction rebuild, stale registration).
+				// Rebasing onto the fresh token would clobber that owner, and
+				// the old writeBlocked state had no reset path — the group's
+				// persistence died until restart. Degrade to memory-only
+				// instead: learning continues, whoever holds the lease keeps
+				// writing, and the next reload reopens persistence.
+				s.available = false
+				s.store = nil
+				s.lastError = err.Error()
 				s.pending = vaneLearningPending{}
 				s.persistRetryAt = time.Time{}
 			} else {
@@ -1012,7 +1030,7 @@ func (s *vaneLearningState) flush() error {
 		if s.lastError != "" {
 			err := errors.New(s.lastError)
 			s.retiring = false
-			if !s.writeBlocked && s.persistTimer == nil {
+			if s.store != nil && !s.writeBlocked && s.persistTimer == nil {
 				interval := s.persistInterval
 				if interval <= 0 {
 					interval = vaneLearningPersistInterval
