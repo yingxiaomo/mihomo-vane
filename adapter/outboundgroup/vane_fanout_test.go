@@ -80,7 +80,7 @@ func TestVaneProbeCapabilityDemotedByRealTraffic(t *testing.T) {
 	lease := vaneMemberLease{name: beta.Name(), identity: beta.identity, epoch: 1}
 	now := clock.Now()
 	group.racingRuntime.mu.Lock()
-	group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{member: lease, lowerBoundBPS: 38_000_000, bytes: 4 << 20, observedAt: now}
+	group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{lowerBoundBPS: 38_000_000, bytes: 4 << 20, observedAt: now}
 	group.racingRuntime.mu.Unlock()
 
 	group.observeThroughputEpochIdentity(beta.Name(), beta.identity, 1, vaneTransportTCP, now, 1_000_000)
@@ -91,7 +91,7 @@ func TestVaneProbeCapabilityDemotedByRealTraffic(t *testing.T) {
 	require.Equal(t, float64(1_000_000), got, "a probe far above reality must be lowered to the real rate")
 
 	group.racingRuntime.mu.Lock()
-	group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{member: lease, lowerBoundBPS: 38_000_000, bytes: 4 << 20, observedAt: now}
+	group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{lowerBoundBPS: 38_000_000, bytes: 4 << 20, observedAt: now}
 	group.racingRuntime.mu.Unlock()
 	group.observeThroughputEpochIdentity(beta.Name(), beta.identity, 1, vaneTransportTCP, now.Add(time.Second), 20_000_000)
 	group.racingRuntime.mu.Lock()

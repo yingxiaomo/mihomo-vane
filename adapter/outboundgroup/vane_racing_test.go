@@ -364,7 +364,6 @@ func newVaneRaceRequestForTest(t *testing.T, group *Vane, metadata *C.Metadata) 
 	require.True(t, ok)
 	return vaneRaceRequest{
 		targetKey: key,
-		scopeKey:  group.targetScopeKey(metadata.Host, metadata.DstPort),
 		target:    metadata.Host,
 		port:      metadata.DstPort,
 		current: vaneMemberLease{
@@ -656,7 +655,7 @@ func TestVaneRacingCapabilityPrune(t *testing.T) {
 		lease := vaneMemberLease{name: "stale", identity: "stale-id", epoch: 1}
 		group.racingRuntime.mu.Lock()
 		group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{
-			member: lease, lowerBoundBPS: 1000, bytes: 1000,
+			lowerBoundBPS: 1000, bytes: 1000,
 			observedAt: clock.Now().Add(-vaneRacingCapabilityTTL - time.Minute),
 		}
 		group.pruneCapabilitiesLocked(clock.Now())
@@ -669,7 +668,7 @@ func TestVaneRacingCapabilityPrune(t *testing.T) {
 		lease := vaneMemberLease{name: "fresh", identity: "fresh-id", epoch: 1}
 		group.racingRuntime.mu.Lock()
 		group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{
-			member: lease, lowerBoundBPS: 1000, bytes: 1000, observedAt: clock.Now(),
+			lowerBoundBPS: 1000, bytes: 1000, observedAt: clock.Now(),
 		}
 		group.pruneCapabilitiesLocked(clock.Now())
 		_, ok := group.racingRuntime.capabilities[lease]
@@ -680,7 +679,7 @@ func TestVaneRacingCapabilityPrune(t *testing.T) {
 	t.Run("zero observedAt removed", func(t *testing.T) {
 		lease := vaneMemberLease{name: "zero", identity: "zero-id", epoch: 1}
 		group.racingRuntime.mu.Lock()
-		group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{member: lease}
+		group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{}
 		group.pruneCapabilitiesLocked(clock.Now())
 		_, ok := group.racingRuntime.capabilities[lease]
 		group.racingRuntime.mu.Unlock()
@@ -694,7 +693,7 @@ func TestVaneRacingCapabilityPrune(t *testing.T) {
 			lease := vaneMemberLease{name: fmt.Sprintf("n%d", i), identity: fmt.Sprintf("i%d", i), epoch: uint64(i)}
 			// 全部新鲜（TTL 内），仅 observedAt 错开——触发 LRU 而非 TTL 分支
 			group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{
-				member: lease, lowerBoundBPS: float64(i), bytes: 1, observedAt: base.Add(-time.Duration(i) * time.Millisecond),
+				lowerBoundBPS: float64(i), bytes: 1, observedAt: base.Add(-time.Duration(i) * time.Millisecond),
 			}
 		}
 		before := len(group.racingRuntime.capabilities)

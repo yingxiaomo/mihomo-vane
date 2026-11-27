@@ -41,7 +41,7 @@ func seedChain01Capability(t *testing.T, group *Vane, member vaneMemberLease, bp
 	t.Helper()
 	group.racingRuntime.mu.Lock()
 	group.racingRuntime.capabilities[member] = vaneCapabilityRecord{
-		member: member, lowerBoundBPS: bps, bytes: vaneRacingProbeByteCap, observedAt: observedAt,
+		lowerBoundBPS: bps, bytes: vaneRacingProbeByteCap, observedAt: observedAt,
 	}
 	group.racingRuntime.mu.Unlock()
 }

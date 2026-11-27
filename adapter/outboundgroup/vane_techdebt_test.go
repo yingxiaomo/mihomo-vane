@@ -684,7 +684,6 @@ func TestVaneRaceQualifiesNodeWithoutLiveState(t *testing.T) {
 	plan := prepareTargetHandoffForTest(t, group, metadata, alpha)
 	request := vaneRaceRequest{
 		targetKey:   plan.targetStateKey,
-		scopeKey:    plan.targetKey,
 		target:      plan.target,
 		port:        plan.port,
 		current:     vaneMemberLease{name: alpha.Name(), identity: alpha.identity, epoch: plan.nodeEpoch},

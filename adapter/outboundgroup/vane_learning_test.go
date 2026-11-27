@@ -1111,7 +1111,7 @@ func TestFlushVaneLearningStatesDrainsAllAndAggregatesFailure(t *testing.T) {
 		bad.mu.Unlock()
 	})
 
-	require.ErrorContains(t, FlushVaneLearningStates(), "global flush failed")
+	require.ErrorContains(t, FlushVaneLearningStatesContext(context.Background()), "global flush failed")
 	require.NotEmpty(t, goodStore.payload(good.storageKey))
 }
 

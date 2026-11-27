@@ -278,7 +278,9 @@ func newVaneLearningState(group string, clock vaneClock, store vaneLearningStore
 	}
 	if err := state.restore(payload); err != nil {
 		state.lastError = err.Error()
-		log.Warnln("Vane: ignore invalid node state for group %s: %s", group, err.Error())
+		// AUDIT-2026-11-28: valid entries were already adopted into the state,
+		// so "ignored" was misleading — say what actually happened.
+		log.Warnln("Vane: node state for group %s partially restored with %s", group, err.Error())
 	}
 	return state
 }
@@ -399,12 +401,6 @@ func sharedVaneLearningState(group string, clock vaneClock, stateTTL time.Durati
 	return state, activateVaneLearningState(state, stateTTL, maxStates)
 }
 
-// FlushVaneLearningStates drains the latest durable revision for every
-// registered Vane group. It is called during process shutdown; reloads use
-// the shared owner and therefore do not require a load/save handoff.
-func FlushVaneLearningStates() error {
-	return FlushVaneLearningStatesContext(context.Background())
-}
 
 func FlushVaneLearningStatesContext(ctx context.Context) error {
 	vaneLearningRegistry.Lock()
@@ -575,7 +571,10 @@ func restoreVaneProfile(state *vaneNodeState, node vanePersistedNode, now time.T
 		case node.TotalDuration < 0:
 			invalid = true
 		default:
-			if node.TotalDuration > 0 && node.DurationCount > 0 {
+			// AUDIT-2026-11-28: cap the milliseconds before the time.Duration
+			// multiply — an int64 ms value above ~9.2e12 (292 years) overflowed
+			// into a negative duration and cost the node its duration score.
+			if node.TotalDuration > 0 && node.DurationCount > 0 && node.TotalDuration <= int64(math.MaxInt64)/int64(time.Millisecond) {
 				state.totalDuration = time.Duration(node.TotalDuration) * time.Millisecond
 				state.durationCount = node.DurationCount
 			}

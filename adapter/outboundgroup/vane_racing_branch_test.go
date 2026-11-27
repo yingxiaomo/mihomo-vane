@@ -736,12 +736,11 @@ func TestVaneRaceCandidateOrderingTieBreaks(t *testing.T) {
 
 	// Two fresh capability proofs with different rates.
 	group.racingRuntime.mu.Lock()
-	group.racingRuntime.capabilities[betaLease] = vaneCapabilityRecord{member: betaLease, lowerBoundBPS: 2_000_000, observedAt: clock.Now()}
-	group.racingRuntime.capabilities[gammaLease] = vaneCapabilityRecord{member: gammaLease, lowerBoundBPS: 8_000_000, observedAt: clock.Now()}
+	group.racingRuntime.capabilities[betaLease] = vaneCapabilityRecord{lowerBoundBPS: 2_000_000, observedAt: clock.Now()}
+	group.racingRuntime.capabilities[gammaLease] = vaneCapabilityRecord{lowerBoundBPS: 8_000_000, observedAt: clock.Now()}
 	group.racingRuntime.mu.Unlock()
 	otherKey := request
 	otherKey.targetKey = vaneTargetKey{transport: vaneTransportTCP, targetScope: "googlevideo.com", port: 8443}
-	otherKey.scopeKey = vaneFlowKey{target: "googlevideo.com", port: 8443}
 	candidates, reason = group.snapshotRaceCandidates(otherKey)
 	require.Empty(t, reason)
 	require.Equal(t, "gamma", candidates[0].member.name)

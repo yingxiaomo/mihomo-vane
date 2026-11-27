@@ -89,7 +89,6 @@ type vaneRacingConfig struct {
 type vaneProbeFunc func(context.Context, C.Proxy, *url.URL, int64) vaneProbeResult
 
 type vaneCapabilityRecord struct {
-	member        vaneMemberLease
 	lowerBoundBPS float64
 	bytes         int64
 	observedAt    time.Time
@@ -97,7 +96,6 @@ type vaneCapabilityRecord struct {
 
 type vaneRaceRequest struct {
 	targetKey   vaneTargetKey
-	scopeKey    vaneFlowKey
 	target      string
 	port        uint16
 	current     vaneMemberLease
@@ -443,7 +441,7 @@ func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, 
 			if result.valid && a.validateRaceWinner(request, outcome.candidate.member) {
 				a.racingRuntime.mu.Lock()
 				a.racingRuntime.capabilities[outcome.candidate.member] = vaneCapabilityRecord{
-					member: outcome.candidate.member, lowerBoundBPS: result.lowerBoundBPS, bytes: result.bytes, observedAt: a.clock.Now(),
+					lowerBoundBPS: result.lowerBoundBPS, bytes: result.bytes, observedAt: a.clock.Now(),
 				}
 				a.pruneCapabilitiesLocked(a.clock.Now())
 				a.racingRuntime.mu.Unlock()
@@ -482,7 +480,7 @@ func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, 
 				if drained.result.valid && a.validateRaceWinner(request, drained.candidate.member) {
 					a.racingRuntime.mu.Lock()
 					a.racingRuntime.capabilities[drained.candidate.member] = vaneCapabilityRecord{
-						member: drained.candidate.member, lowerBoundBPS: drained.result.lowerBoundBPS, bytes: drained.result.bytes, observedAt: a.clock.Now(),
+						lowerBoundBPS: drained.result.lowerBoundBPS, bytes: drained.result.bytes, observedAt: a.clock.Now(),
 					}
 					a.pruneCapabilitiesLocked(a.clock.Now())
 					a.racingRuntime.mu.Unlock()

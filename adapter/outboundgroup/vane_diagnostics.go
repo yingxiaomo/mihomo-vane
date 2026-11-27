@@ -104,7 +104,6 @@ type VaneDiagnosticConfig struct {
 
 type VaneDiagnosticExplorationScope struct {
 	Transport             string `json:"transport"`
-	Scene                 string `json:"scene"`
 	EligibleSelections    uint64 `json:"eligibleSelections"`
 	ExplorationSelections uint64 `json:"explorationSelections"`
 	SinceLastExploration  uint64 `json:"sinceLastExploration"`
@@ -303,7 +302,6 @@ type vaneDiagnosticRecord struct {
 	leaseID                string
 	explorationID          uint64
 	transport              string
-	scene                  string
 	bps                    float64
 	previousBPS            float64
 	totalBytes             int64

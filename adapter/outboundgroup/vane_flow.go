@@ -238,18 +238,6 @@ type vaneCandidateKey struct {
 	identity  string
 }
 
-func vaneSameOrigin(a, b string) bool {
-	if a == "" || b == "" || a == b {
-		return false
-	}
-	pa := strings.SplitN(a, "-", 4)
-	pb := strings.SplitN(b, "-", 4)
-	if len(pa) < 3 || len(pb) < 3 {
-		return false
-	}
-	return pa[0] == pb[0] && pa[1] == pb[1] && pa[2] == pb[2]
-}
-
 // reconnectFloorLocked is the absolute floor a rescue candidate must clear.
 // It follows the configured low line, so a pool tuned with
 // low-throughput-bps: 10M does not hand a stalled flow to a 5M node and let it
@@ -1073,7 +1061,7 @@ func (f *vaneFlow) raceRequest(sample vaneThroughputObservation, lowWindows int)
 	f.group.learning.mu.Unlock()
 	f.group.mu.Unlock()
 	return vaneRaceRequest{
-		targetKey: f.targetStateKey, scopeKey: f.targetKey, target: f.target, port: f.port,
+		targetKey: f.targetStateKey, target: f.target, port: f.port,
 		current:    vaneMemberLease{name: f.candidate, identity: f.identity, epoch: f.nodeEpoch},
 		currentBPS: sample.BitsPerSecond, requiredBPS: required, totalBytes: sample.TotalBytes,
 		age: sample.Age, lowWindows: lowWindows, generation: generation, requestedAt: f.group.clock.Now(),

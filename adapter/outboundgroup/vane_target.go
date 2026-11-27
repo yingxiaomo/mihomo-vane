@@ -159,13 +159,6 @@ const vaneStickyTTL = 60 * time.Second
 // this the map grew with every distinct host ever dialed.
 const vaneStickySweepInterval = time.Minute
 
-// vaneStickyScoreMargin is how far the sticky node may fall behind the best
-// candidate before a pick follows the fastest node instead. The score is in
-// micro-units (1.0 = 1_000_000), so this is a 5% gap.
-const vaneStickyScoreMargin = 50_000
-
-// vaneStickySwitchWindow is the sliding window that bounds switchCount.
-const vaneStickySwitchWindow = 30 * time.Minute
 
 // vaneStickyKeyFor builds the per-host stickiness key. Unlike targetScopeForKey
 // it does not require a family rule: every TCP host gets its own 60s slot, which
@@ -224,11 +217,6 @@ func (a *Vane) rememberStickyLocked(target string, port uint16, name string, now
 	key := a.stickyKeyFor(target, port)
 	choice := a.stickiness[key]
 	if choice.name != name || choice.identity != identity {
-		if now.Sub(choice.switchWindowFrom) > vaneStickySwitchWindow {
-			choice.switchCount = 0
-			choice.switchWindowFrom = now
-		}
-		choice.switchCount++
 		choice.lastSwitch = now
 		// STICKY-RENEW: only a real change of exit renews the window. Renewing
 		// on every hit pinned the host forever — each new connection pushed

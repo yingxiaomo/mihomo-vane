@@ -44,7 +44,7 @@ func seedVaneCapability(group *Vane, clock *vaneConnTestClock, proxy *vaneTestPr
 	group.mu.Unlock()
 	group.racingRuntime.mu.Lock()
 	group.racingRuntime.capabilities[lease] = vaneCapabilityRecord{
-		member: lease, lowerBoundBPS: bps, bytes: 4096, observedAt: clock.Now(),
+		lowerBoundBPS: bps, bytes: 4096, observedAt: clock.Now(),
 	}
 	group.racingRuntime.mu.Unlock()
 }

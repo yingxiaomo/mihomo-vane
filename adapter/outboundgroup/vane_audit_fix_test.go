@@ -2,9 +2,13 @@ package outboundgroup
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	A "github.com/metacubex/mihomo/adapter"
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,4 +57,86 @@ func TestVaneStickySweepExpiresWithoutReconnect(t *testing.T) {
 	later := now.Add(vaneStickyTTL + vaneStickySweepInterval)
 	group.rememberStickyLocked("host-0.example.com", 443, alpha.Name(), later)
 	require.Len(t, group.stickiness, 1, "expired stickies are swept by the write path alone")
+}
+
+// AUDIT-2026-11-28 opt-in fixes: a broken collector must degrade (native
+// events off), not fail the whole config apply; orphan event directories get
+// swept on activation; rotated files are bounded; a stuck release cannot hold
+// the config mux forever.
+func TestVaneNativeCollectorFailureDegradesActivation(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(blocked, []byte("file"), 0o600))
+	// Built directly: the constructor would reject the non-home path before
+	// the acquire could exercise its own directory failure.
+	spec := &vaneNativeCollectorSpec{directory: blocked, queueSize: 8, maxFileSize: 1 << 20, maxFileAge: time.Minute, flushInterval: 5 * time.Second}
+	_, err := acquireVaneNativeCollector(spec)
+	require.Error(t, err, "a file in place of the directory must fail the acquire")
+
+	clock := newVaneConnTestClock()
+	group, _ := newVaneGroupForTest(clock, 16, time.Hour, newVaneTestProxy("alpha", true, true))
+	group.collectorSpec = spec
+	batch := PrepareVaneLearningStates(map[string]C.Proxy{"vane": A.NewProxy(group)})
+	require.NoError(t, batch.Err(), "the activation must not fail on a broken collector")
+	require.Len(t, batch.entries, 1)
+	require.Nil(t, batch.entries[0].collector, "the group runs with events disabled")
+	require.NotNil(t, batch.entries[0].owner, "learning activation is unaffected")
+	batch.Commit()
+	group.Close()
+}
+
+func TestVaneNativeSweepRemovesOrphanDirsOnly(t *testing.T) {
+	parent := t.TempDir()
+	live := filepath.Join(parent, "g-live")
+	orphan := filepath.Join(parent, "g-orphan")
+	foreign := filepath.Join(parent, "unrelated")
+	for _, dir := range []string{live, orphan, foreign} {
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+	}
+	sweepVaneNativeOrphanDirs(parent, map[string]struct{}{live: {}})
+	_, err := os.Stat(live)
+	require.NoError(t, err, "the live directory stays")
+	_, err = os.Stat(orphan)
+	require.True(t, os.IsNotExist(err), "the orphan directory is removed")
+	_, err = os.Stat(foreign)
+	require.NoError(t, err, "non g-* directories are never touched")
+}
+
+func TestVaneNativeRotatedFilesAreBounded(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < vaneNativeRetainedFiles+4; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("vane-native-v1.run.%d.%d.jsonl.ready", base.Add(time.Duration(i)*time.Second).Unix(), i))
+		require.NoError(t, os.WriteFile(name, []byte("{}\n"), 0o600))
+		stamp := base.Add(time.Duration(i) * time.Second)
+		require.NoError(t, os.Chtimes(name, stamp, stamp))
+	}
+	pruneVaneNativeFiles(dir)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, vaneNativeRetainedFiles, "rotated files are capped")
+	_, err = os.Stat(filepath.Join(dir, "vane-native-v1.run.0.0.jsonl.ready"))
+	require.True(t, os.IsNotExist(err), "the oldest files go first")
+}
+
+func TestVaneNativeReleaseDeadlineContinuesReload(t *testing.T) {
+	previous := vaneNativeReleaseDeadline
+	vaneNativeReleaseDeadline = 30 * time.Millisecond
+	t.Cleanup(func() { vaneNativeReleaseDeadline = previous })
+	collector := &vaneNativeCollector{
+		registryKey: "deadline-test", references: 1,
+		stop: make(chan struct{}), done: make(chan struct{}), started: make(chan error, 1),
+	}
+	vaneNativeCollectorRegistry.Lock()
+	vaneNativeCollectorRegistry.entries["deadline-test"] = collector
+	vaneNativeCollectorRegistry.Unlock()
+	t.Cleanup(func() {
+		vaneNativeCollectorRegistry.Lock()
+		delete(vaneNativeCollectorRegistry.entries, "deadline-test")
+		vaneNativeCollectorRegistry.Unlock()
+	})
+
+	start := time.Now()
+	releaseVaneNativeCollector(collector)
+	require.Less(t, time.Since(start), time.Second, "the reload must not wait forever for a stuck collector")
+	require.True(t, collector.stopped, "the stop signal was still delivered")
 }

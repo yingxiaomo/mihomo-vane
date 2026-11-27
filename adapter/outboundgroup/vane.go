@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
 )
 
 const (
@@ -286,16 +288,13 @@ type vaneAnchor struct {
 }
 
 // vaneStickyChoice is the single per-target state of the simplified kernel
-// (v3). It replaces the anchor + preferences + handoffs + hints stack: one 60s
-// stickiness so a burst of connections to the same host keeps one exit, plus a
-// sliding 30-minute switch counter that throttles flapping.
+// (v3): one 60s stickiness so a burst of connections to the same host keeps
+// one exit. Switch throttling lives in the ledger, not here.
 type vaneStickyChoice struct {
-	name             string
-	identity         string
-	expiresAt        time.Time
-	lastSwitch       time.Time
-	switchCount      int
-	switchWindowFrom time.Time
+	name       string
+	identity   string
+	expiresAt  time.Time
+	lastSwitch time.Time
 }
 
 type vaneCooldownKey struct {
@@ -409,7 +408,7 @@ func NewVane(option GroupCommonOption, vaneOption VaneOption, emptyFallback C.Pr
 	if switchMargin == 0 {
 		switchMargin = vaneDefaultSwitchMargin
 	}
-	if switchMargin < 0 || switchMargin > 1 {
+	if switchMargin < 0 || switchMargin > 1 || math.IsNaN(switchMargin) {
 		return nil, fmt.Errorf("switch-margin must be between 0 and 1")
 	}
 
@@ -568,18 +567,31 @@ func PrepareVaneLearningStates(proxies map[string]C.Proxy) *VaneLearningActivati
 				owner := acquireVaneLearningState(vane.Name(), vane.clock, vane.stateTTL, vane.maxStates)
 				collector, err := acquireVaneNativeCollector(vane.collectorSpec)
 				if err != nil {
-					batch.err = errors.Join(batch.err, fmt.Errorf("vane %q native collector: %w", vane.Name(), err))
-					continue
+					// AUDIT-2026-11-28: native events are opt-in observability —
+					// an unwritable event directory or a broken key file must
+					// not keep the whole config from applying. The group runs
+					// with events disabled; a later reload retries.
+					log.Warnln("Vane: native event collector for group %s disabled: %s", vane.Name(), err.Error())
+					collector = nil
 				}
 				batch.entries = append(batch.entries, vaneLearningActivationEntry{group: vane, owner: owner, collector: collector})
 			}
 		}
 	}
-	if batch.err != nil {
-		for _, entry := range batch.entries {
-			releaseVaneNativeCollector(entry.collector)
+	// AUDIT-2026-11-28: a changed collector spec abandons its g-* event
+	// directory forever. Sweep the parents of successfully acquired specs for
+	// subdirectories no live spec owns. Parents of failed acquires are left
+	// alone — their data may still matter to a later reload.
+	liveDirs := map[string]struct{}{}
+	parents := map[string]struct{}{}
+	for _, entry := range batch.entries {
+		if entry.collector != nil {
+			liveDirs[entry.collector.spec.directory] = struct{}{}
+			parents[filepath.Dir(entry.collector.spec.directory)] = struct{}{}
 		}
-		batch.entries = nil
+	}
+	for parent := range parents {
+		sweepVaneNativeOrphanDirs(parent, liveDirs)
 	}
 	return batch
 }
@@ -1373,7 +1385,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				// than the margin, this pick follows the fastest node instead —
 				// "last successful" alone would let a slow-but-alive node keep
 				// the stream indefinitely.
-				if candidate.scoreMicros-ranked[0].scoreMicros <= vaneStickyScoreMargin {
+				if candidate.scoreMicros-ranked[0].scoreMicros <= a.switchMargin {
 					chosen = candidate
 				}
 				break

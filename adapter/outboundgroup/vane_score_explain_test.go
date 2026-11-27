@@ -44,7 +44,7 @@ func TestVaneScorePartsExplain(t *testing.T) {
 func TestVanePickScoredLogLine(t *testing.T) {
 	line := vaneLogLine(vaneDiagnosticRecord{
 		kind: "pick-scored", target: "rr1---sn-x.googlevideo.com", port: 443,
-		to: "node-a", scene: "media", transport: "tcp",
+		to: "node-a", transport: "tcp",
 		scoreMicros: 712345, bestMicros: 800000,
 		scoreParts: "tp=0.24 rtt=0.18 loss=0.00 fail=0.00 resp=0.03 jit=0.01 conn=0.02 succ=0.03 peak=0.02 dur=0.01 vol=0.01",
 	})

@@ -623,7 +623,7 @@ func TestVaneTargetPruneEqualTimestampsIsDeterministic(t *testing.T) {
 			group.racingRuntime.capabilities = make(map[vaneMemberLease]vaneCapabilityRecord, vaneTargetStateLimit+8)
 			for index := 0; index < vaneTargetStateLimit+8; index++ {
 				member := vaneMemberLease{name: fmt.Sprintf("node%04d", index), identity: fmt.Sprintf("identity-node%04d", index), epoch: 1}
-				group.racingRuntime.capabilities[member] = vaneCapabilityRecord{member: member, lowerBoundBPS: float64(index), observedAt: now}
+				group.racingRuntime.capabilities[member] = vaneCapabilityRecord{lowerBoundBPS: float64(index), observedAt: now}
 			}
 			group.pruneCapabilitiesLocked(now)
 			survivors := make([]string, 0, vaneTargetStateLimit)

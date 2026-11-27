@@ -60,7 +60,6 @@ type vaneNativeEvent struct {
 	NodeID             string     `json:"node_id,omitempty"`
 	NodeIDStable       bool       `json:"node_id_stable,omitempty"`
 	Transport          string     `json:"transport,omitempty"`
-	Scene              string     `json:"scene,omitempty"`
 	Features           [8]float64 `json:"features,omitempty"`
 	Exploration        bool       `json:"exploration,omitempty"`
 	Handoff            bool       `json:"handoff,omitempty"`
@@ -245,7 +244,14 @@ func releaseVaneNativeCollector(collector *vaneNativeCollector) {
 		close(collector.stop)
 		collector.ingressMu.Unlock()
 	})
-	<-collector.done
+	select {
+	case <-collector.done:
+	case <-time.After(vaneNativeReleaseDeadline):
+		// AUDIT-2026-11-28: a hung disk must not hold the config mux forever —
+		// the writer goroutine finishes on its own or the process is wedged
+		// anyway.
+		log.Warnln("Vane native collector for %s did not drain within %s; reload continues", collector.registryKey, vaneNativeReleaseDeadline)
+	}
 }
 
 func vaneNativeRandomID(size int) string {
@@ -386,6 +392,7 @@ func (c *vaneNativeCollector) run() {
 		if renameErr := os.Rename(path, target); renameErr != nil {
 			fileFailed = true
 		}
+		pruneVaneNativeFiles(c.spec.directory)
 		file, writer, path = nil, nil, ""
 		bytesWritten, firstSeq, lastSeq, fileEvents, fileFailed = 0, 0, 0, 0, false
 	}
@@ -639,7 +646,6 @@ type vaneNativeAttempt struct {
 	nodeID           string
 	nodeIDStable     bool
 	transport        string
-	scene            string
 	features         [8]float64
 	exploration      bool
 	handoff          bool
@@ -799,4 +805,71 @@ func vaneNativeErrorClass(err error) string {
 		return "closed"
 	}
 	return "other"
+}
+
+// AUDIT-2026-11-28 retention: rotated event files used to be kept forever
+// (~1.5GB/day at default rates) and a changed spec abandoned its whole g-*
+// directory. The writer prunes its own directory after each rotate; the
+// activation sweeps parent directories of live specs for orphans.
+const vaneNativeRetainedFiles = 48
+
+// vaneNativeReleaseDeadline bounds how long a reload waits for a collector to
+// drain and sync before giving up on it. A hung disk must not hold the config
+// mux forever.
+var vaneNativeReleaseDeadline = 2 * time.Second
+
+func vaneNativeRotatedName(name string) bool {
+	return strings.HasSuffix(name, ".ready") || strings.HasSuffix(name, ".failed") || strings.HasSuffix(name, ".recovered")
+}
+
+func pruneVaneNativeFiles(directory string) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return
+	}
+	type rotatedFile struct {
+		name    string
+		modTime time.Time
+	}
+	var rotated []rotatedFile
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "vane-native-v1.") || !vaneNativeRotatedName(entry.Name()) {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		rotated = append(rotated, rotatedFile{entry.Name(), info.ModTime()})
+	}
+	if len(rotated) <= vaneNativeRetainedFiles {
+		return
+	}
+	sort.Slice(rotated, func(i, j int) bool { return rotated[i].modTime.Before(rotated[j].modTime) })
+	for _, item := range rotated[:len(rotated)-vaneNativeRetainedFiles] {
+		if removeErr := os.Remove(filepath.Join(directory, item.name)); removeErr != nil {
+			log.Warnln("Vane native collector cannot prune %s: %s", item.name, removeErr.Error())
+		}
+	}
+}
+
+func sweepVaneNativeOrphanDirs(parent string, live map[string]struct{}) {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "g-") {
+			continue
+		}
+		full := filepath.Join(parent, entry.Name())
+		if _, ok := live[full]; ok {
+			continue
+		}
+		if removeErr := os.RemoveAll(full); removeErr != nil {
+			log.Warnln("Vane native collector cannot remove orphan directory %s: %s", full, removeErr.Error())
+		} else {
+			log.Infoln("Vane native collector removed orphan event directory %s", full)
+		}
+	}
 }
