@@ -54,7 +54,7 @@ func applyVaneRestartConfig(t *testing.T, group string) {
 	t.Helper()
 	cfg, err := ParseWithBytes(vaneRestartConfig(group))
 	require.NoError(t, err)
-	ApplyConfig(cfg, true)
+	require.NoError(t, ApplyConfig(cfg, true))
 }
 
 func runVaneRestartChild(t *testing.T, mode, home string) {

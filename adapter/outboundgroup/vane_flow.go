@@ -370,23 +370,15 @@ func newVaneFlow(group *Vane, candidate string, metadata *C.Metadata, handoff ..
 	if target == "" {
 		return nil
 	}
-	// PHASE2: every TCP flow gets a target scope so a stalled download can be
-	// rescued the same way a video flow is. A target scope keeps its
-	// rule-derived scope and its target state; any other host gets a per-host
-	// scope and skips the target-evidence writes (it has no rule identity).
+	// Every TCP flow has a rescue scope; configured families keep sharing theirs,
+	// while other hosts keep the separate small-flow protection below.
 	scopeKey := group.targetScopeKey(target, port)
 	targetScoped := scopeKey.target != ""
 	targetKey := scopeKey
 	if !targetScoped {
 		targetKey = vaneFlowKey{target: target, port: port}
 	}
-	targetStateKey, stateOK := group.targetScopeForKey(target, port)
-	if !stateOK {
-		// PHASE2: every TCP flow is switchable, so a host without a target scope still needs
-		// a concrete state scope; without it the commit path answered
-		// "invalid-target" and burned the race budget.
-		targetStateKey = vaneTargetKey{transport: vaneTransportTCP, targetScope: target, port: port}
-	}
+	targetStateKey := group.flowStateKeyForTarget(target, port)
 	flow := &vaneFlow{group: group, candidate: candidate, target: target, port: port, targetKey: targetKey, targetStateKey: targetStateKey, targetScoped: targetScoped, createdAt: group.clock.Now()}
 	if len(handoff) > 0 && handoff[0] != nil {
 		flow.handoff = handoff[0]
@@ -523,6 +515,7 @@ func (f *vaneFlow) observeSyntheticStall(now time.Time) {
 			BitsPerSecond: 1,
 			untrusted:     true,
 			synthetic:     true,
+			silence:       now.Sub(since),
 			TotalBytes:    0,
 			Age:           now.Sub(started),
 		}
@@ -556,6 +549,7 @@ func (f *vaneFlow) observeSyntheticStall(now time.Time) {
 		BitsPerSecond: 1,
 		untrusted:     true,
 		synthetic:     true,
+		silence:       silence,
 		TotalBytes:    last.TotalBytes,
 		Age:           last.Age + silence,
 	}
@@ -796,10 +790,13 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	}
 	// §E: a qualified sample resets the valve's empty-window streak.
 	f.valveEmptyWindows = 0
-	// §2.4: the flow is alive; the stall watchdog counts silence from here.
-	f.lastSampleAt = now
-	f.lastSample = sample
-	f.hasSample = true
+	// Only real samples advance the watchdog clock; a synthetic tick must not
+	// restart the actual silence while the small-flow gate is still waiting.
+	if !sample.synthetic {
+		f.lastSampleAt = now
+		f.lastSample = sample
+		f.hasSample = true
+	}
 	lowWindows := f.lowWindows
 	// BACKLOG-FIRST: a synthetic window that the backlog branch excused
 	// (graceReason == "client-backlog") must not drag the streak to the
@@ -815,15 +812,18 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 		// and then never switched. Still inside the flow lock here.
 		f.lowWindows = lowWindows
 	}
-	handoff := f.handoff
-	f.handoff = nil
+	untrusted := sample.untrusted || graceReason != ""
+	var handoff *vaneHandoffToken
+	if !untrusted && !sample.synthetic && vaneVerdictWindow(sample) >= vaneMinVerdictWindow {
+		handoff = f.handoff
+		f.handoff = nil
+	}
 	f.mu.Unlock()
 
-	// PHASE1: every TCP flow is observed, but only a configured target scope
-	// owns target state, may arm a switch, and emits per-sample diagnostics.
-	// A flow with an empty targetKey still counts low windows so the phase-2
-	// rollout has data, without flooding the log with one record per window.
+	// Family rules still control per-sample diagnostics. Host-scoped rescue
+	// leases and preferences use the same evidence and settlement path.
 	targetScopedFlow := f.targetScoped
+	stateScopedFlow := f.targetStateKey.targetScope != ""
 	if targetScopedFlow {
 		f.group.diagnostics.record(vaneDiagnosticRecord{
 			kind:          "throughput-sample",
@@ -855,19 +855,21 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 			})
 		}
 	}
-	untrusted := sample.untrusted || graceReason != ""
 	// VERIFY-STALL: a flow that goes silent right after a switch is evidence about
 	// the node it landed on, even though the synthetic window itself cannot be used
 	// as throughput evidence. Without this a landing that returns zero bytes was
 	// never cooled, so the next connection was steered onto it again.
-	if untrusted && targetScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.switchMode == vaneSwitchLive {
+	landingPenaltyEligible := (sample.TotalBytes >= config.minBytes && (sample.synthetic || vaneVerdictWindow(sample) >= vaneMinVerdictWindow)) ||
+		(sample.synthetic && sample.silence >= vaneLowVolumeAge)
+	if untrusted && landingPenaltyEligible && stateScopedFlow && lowWindows >= vaneVerifyPenaltyLowWindows && f.group.switchMode == vaneSwitchLive {
 		f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
 	}
 	// Client throttling and synthetic windows trigger policy, never node-health writes.
-	if !untrusted && targetScopedFlow {
+	if !untrusted && stateScopedFlow {
 		// VERIFY: real bytes only. A node we just landed on that keeps tripping
 		// the counter is cooled down; synthetic/graced windows never count.
-		if lowWindows >= vaneVerifyPenaltyLowWindows {
+		if low && landingPenaltyEligible &&
+			lowWindows >= vaneVerifyPenaltyLowWindows {
 			f.group.penalizeSlowLanding(f.targetKey, f.candidate, now)
 		}
 		f.group.recordTargetEvidence(f.targetStateKey, member, sample.BitsPerSecond, lowLoss || lowLatency)
@@ -916,7 +918,7 @@ func (f *vaneFlow) observe(sample vaneThroughputObservation) vanePolicyAction {
 	// ordinary synthetic window is ten seconds of zero bytes, which is a
 	// keep-alive going idle, not a stall - judging a telegram API socket or a
 	// thumbnail request on it switched those flows every dozen seconds.
-	stalledSmallFlow := sample.synthetic && sample.Age >= vaneLowVolumeAge
+	stalledSmallFlow := sample.synthetic && sample.silence >= vaneLowVolumeAge
 	if sample.TotalBytes < config.minBytes && !stalledSmallFlow {
 		return nil
 	}
@@ -1722,7 +1724,7 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 	// BASELINE-COOLDOWN-001: the progressive target backoff gates the baseline
 	// path too — a challenger parked by a failed handoff for this target must
 	// not come back through the baseline snapshot.
-	stateKey, _ := a.targetScopeForKey(target, port)
+	stateKey := a.flowStateKeyForTarget(target, port)
 
 	candidates := make([]vaneChallenger, 0, len(health))
 	sawEvidenceFiltered := false

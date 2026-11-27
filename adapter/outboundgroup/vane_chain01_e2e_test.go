@@ -86,7 +86,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	// This test is about the CHAIN-01 evidence gate on the slow-flow path, not
 	// about the cold-pick probe: suppress the pick probe so the flow starts on
 	// alpha (the ranking choice) and the story stays gate-centric.
-	first, err := group.DialContext(t.Context(), metadata)
+	first, err := group.DialContext(context.Background(), metadata)
 	require.NoError(t, err)
 	observed := first.(*vaneObservedConn)
 	reader, counters := observed.UnwrapReader()
@@ -158,7 +158,7 @@ func TestVaneChain01E2ESlowFlowThroughEvidenceGate(t *testing.T) {
 	require.True(t, policyClosed)
 
 	// The reconnect claims the handoff lease and dials the challenger.
-	second, err := group.DialContext(t.Context(), metadata)
+	second, err := group.DialContext(context.Background(), metadata)
 	require.NoError(t, err)
 	require.Equal(t, int32(1), betaDials.Load(), "the reconnect must land on beta via the hint")
 
@@ -234,7 +234,7 @@ func TestVaneChain01E2ERescueBeatsDemand(t *testing.T) {
 	}
 
 	metadata := &C.Metadata{Host: "rr-demand.googlevideo.com", DstPort: 443, NetWork: C.TCP}
-	first, err := group.DialContext(t.Context(), metadata)
+	first, err := group.DialContext(context.Background(), metadata)
 	require.NoError(t, err)
 	observed := first.(*vaneObservedConn)
 	reader, counters := observed.UnwrapReader()
@@ -263,24 +263,20 @@ func TestVaneChain01E2ERescueBeatsDemand(t *testing.T) {
 			break
 		}
 	}
+	require.Eventually(t, func() bool {
+		return group.VaneDiagnostics().Counters.HandoffCommitted > 0
+	}, 5*time.Second, time.Millisecond,
+		"the asynchronous race callback must commit the 6 Mbps rescue")
 
-	// PENDING-ACTION: a committed handoff arms the close as a pending action on
-	// the victim connection, and that action is only flushed by the next read or
-	// write. Drive one more read so the close assertion below does not race the
-	// flush.
-	for i := 0; i < 4; i++ {
-		if group.VaneDiagnostics().Counters.HandoffCommitted == 0 {
-			break
-		}
+	// The delivered race result executes its close action immediately on the
+	// callback goroutine. Wait for that callback to finish instead of driving
+	// the underlying count reader, which bypasses the policy-action drain path.
+	require.Eventually(t, func() bool {
 		slowConn.mu.Lock()
-		closed := slowConn.closeCalls > 0
-		slowConn.mu.Unlock()
-		if closed {
-			break
-		}
-		clock.Advance(time.Second)
-		_, _ = reader.Read(payload)
-	}
+		defer slowConn.mu.Unlock()
+		return slowConn.closeCalls > 0
+	}, 5*time.Second, time.Millisecond,
+		"the committed handoff must close the starving flow")
 
 	snapshot := group.VaneDiagnostics()
 	require.GreaterOrEqual(t, snapshot.Counters.HandoffCommitted, uint64(1),

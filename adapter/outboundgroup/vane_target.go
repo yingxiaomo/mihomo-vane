@@ -137,6 +137,15 @@ func (a *Vane) targetScopeForKey(target string, port uint16) (vaneTargetKey, boo
 	}, true
 }
 
+// flowStateKeyForTarget keeps rescue preparation, reconnect selection and landing
+// settlement in one scope. Hosts outside configured families still need a lease.
+func (a *Vane) flowStateKeyForTarget(target string, port uint16) vaneTargetKey {
+	if key, ok := a.targetScopeForKey(target, port); ok {
+		return key
+	}
+	return vaneTargetKey{transport: vaneTransportTCP, targetScope: target, port: port}
+}
+
 // vaneStickyTTL is how long a host stays on one exit after a pick.
 // It only spans the gap between two segments of the same stream: a player that
 // rebuilds its connection while the buffer refills lands on the exit the host
@@ -682,8 +691,20 @@ func (a *Vane) commitTargetHandoff(plan vaneReconnectPlan) string {
 	return ""
 }
 
+// vaneVerdictWindow uses the measured segment, not the connection lifetime.
+// Observations without a segment duration are internal aggregate observations.
+func vaneVerdictWindow(sample vaneThroughputObservation) time.Duration {
+	if sample.Duration > 0 {
+		return sample.Duration
+	}
+	return sample.Age
+}
+
 func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLease, sample vaneThroughputObservation) {
-	if token == nil || token.targetKey.targetScope == "" || sample.BitsPerSecond <= 0 {
+	// Inconclusive windows must leave the lease available for the first real
+	// verdict, just as observe retains its flow token until then.
+	if token == nil || token.targetKey.targetScope == "" || sample.BitsPerSecond <= 0 ||
+		sample.untrusted || sample.synthetic || vaneVerdictWindow(sample) < vaneMinVerdictWindow {
 		return
 	}
 	now := a.clock.Now()
@@ -725,16 +746,6 @@ func (a *Vane) settleTargetHandoff(token *vaneHandoffToken, member vaneMemberLea
 	// cumulative retransmission ratio is noise, and no-gain writes a 30-minute
 	// slow cooldown for the very node we just switched to.
 	signalOK := sample.TotalBytes >= a.flow.minBytes && sample.Delivered
-	// STABLE-WINDOW (audit 2026-11-26): a verdict must not rest on a short
-	// burst. A 200 ms window can report 50 Mbps from a few hundred kilobytes;
-	// that is not evidence of sustained bandwidth. A window that is too short
-	// is not a verdict in EITHER direction — it must not pin a preference and
-	// must not cool the node — so it returns before the improved/no-gain split
-	// instead of falling into no-gain, which cools the node for 30 minutes.
-	if sample.Age < vaneMinVerdictWindow {
-		a.mu.Unlock()
-		return
-	}
 	improved := sample.BitsPerSecond >= required &&
 		(!signalOK || !sample.LossSupported || sample.LossRate <= vaneDefaultHighLossRate) &&
 		(!signalOK || !sample.LatencySupported || sample.Latency <= vaneDefaultHighLatency)

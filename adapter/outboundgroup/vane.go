@@ -959,6 +959,8 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 
 	now := a.clock.Now()
 	a.mu.Lock()
+	// Reload generations share canonical node profiles and cooldowns.
+	a.learning.mu.Lock()
 	for _, hint := range a.hints {
 		if hint.expiresAt.After(now) {
 			snapshot.Runtime.ActiveHints++
@@ -1058,6 +1060,7 @@ func (a *Vane) VaneDiagnostics() VaneDiagnosticsSnapshot {
 			})
 		}
 	}
+	a.learning.mu.Unlock()
 	a.mu.Unlock()
 	a.racingRuntime.mu.Lock()
 	for _, capability := range a.racingRuntime.capabilities {
@@ -1293,11 +1296,13 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	// has not pinned this scope; otherwise the flow path would silently
 	// override the pin on every reconnect inside the pinned rule set.
 	if pinned == nil && commit && transport == vaneTransportTCP {
-		if targetKey, ok := a.targetScopeForKey(target, port); ok {
+		if targetKey := a.flowStateKeyForTarget(target, port); targetKey.targetScope != "" {
 			if selected, handoff, source := a.takeTargetSelectionLocked(targetKey, compatible, now, claimHandoff); selected != nil {
 				state := a.ensureProxyNodeLocked(selected, now)
 				a.pruneLocked(now, proxies)
 				a.learning.markDirtyLocked(now)
+				snapshot := state.snapshot(transport, now)
+				decision := vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 				a.learning.mu.Unlock()
 				a.mu.Unlock()
 				record := vaneDiagnosticRecord{
@@ -1316,14 +1321,16 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 					record.previousBPS = handoff.previousBPS
 				}
 				a.diagnostics.record(record)
-				a.recordPickScoredSnapshot("target-hint", transport, target, port, selected.Name(), state.snapshot(transport, now))
-				return vanePickDecision{proxy: selected, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
+				a.recordPickScoredSnapshot("target-hint", transport, target, port, selected.Name(), snapshot)
+				return decision
 			}
 		}
 		if hinted, handoff := a.takeHintLocked(target, port, compatible, now, claimHandoff); hinted != nil {
 			state := a.ensureProxyNodeLocked(hinted, now)
 			a.pruneLocked(now, proxies)
 			a.learning.markDirtyLocked(now)
+			snapshot := state.snapshot(transport, now)
+			decision := vanePickDecision{proxy: hinted, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
 			a.learning.mu.Unlock()
 			a.mu.Unlock()
 			targetKey := a.targetScopeKey(target, port)
@@ -1341,8 +1348,8 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 				record.previousBPS = handoff.previousBPS
 			}
 			a.diagnostics.record(record)
-			a.recordPickScoredSnapshot("hint", transport, target, port, hinted.Name(), state.snapshot(transport, now))
-			return vanePickDecision{proxy: hinted, identity: state.identity, nodeEpoch: state.epoch, reportedAliveAtSelection: hasAlive, handoff: handoff}
+			a.recordPickScoredSnapshot("hint", transport, target, port, hinted.Name(), snapshot)
+			return decision
 		}
 	}
 
@@ -1392,6 +1399,7 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 
 	var selectedState *vaneNodeState
 	if commit {
+		selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 		// A target-scoped failure is a one-off bypass, not evidence that the
 		// scene's healthy global preference should change for every target. An
 		// explicit exploration is an observation allocation, not an anchor vote.
@@ -1399,7 +1407,6 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 			a.anchors[anchorKey] = vaneAnchor{name: chosen.name, scoreMicros: chosen.scoreMicros}
 			a.rememberStickyLocked(target, port, chosen.name, now)
 		}
-		selectedState = a.ensureProxyNodeLocked(chosen.proxy, now)
 		// State liveness follows provider membership, not this selection's
 		// temporary health or transport-compatible subset.
 		a.pruneLocked(now, proxies)

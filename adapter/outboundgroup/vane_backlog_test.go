@@ -42,7 +42,9 @@ func TestVaneBacklogStampSuppressesSyntheticWindow(t *testing.T) {
 			dropVaneRecordedEvents(group)
 		}
 	})
-	require.Nil(t, flow.observe(vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}))
+	realSample := vaneThroughputObservation{BitsPerSecond: 6_000_000, TotalBytes: 8 * 1024 * 1024, Age: 20 * time.Second}
+	require.Nil(t, flow.observe(realSample))
+	realSampleAt := clock.Now()
 	clock.Advance(stallToleranceForTest(t, flow) + 5*time.Second)
 
 	flow.mu.Lock()
@@ -52,7 +54,8 @@ func TestVaneBacklogStampSuppressesSyntheticWindow(t *testing.T) {
 	flow.observeSyntheticStall(clock.Now())
 	flow.mu.Lock()
 	require.Equal(t, before, flow.lowWindows, "a stalled-but-backlogged flow gains no low window")
-	require.Equal(t, float64(1), flow.lastSample.BitsPerSecond, "the watchdog still synthesises its sample")
+	require.Equal(t, realSample, flow.lastSample, "the watchdog must not replace measured throughput with a synthetic window")
+	require.Equal(t, realSampleAt, flow.lastSampleAt, "a backlogged synthetic window must not restart the real sample clock")
 	flow.mu.Unlock()
 }
 

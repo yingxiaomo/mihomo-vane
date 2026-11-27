@@ -82,15 +82,14 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 }
 
 // ApplyConfig dispatch configure to all parts without ExternalController
-func ApplyConfig(cfg *config.Config, force bool) {
+func ApplyConfig(cfg *config.Config, force bool) error {
 	mux.Lock()
 	defer mux.Unlock()
-	log.SetLevel(cfg.General.LogLevel)
 	vaneActivation := outboundgroup.PrepareVaneLearningStates(cfg.Proxies)
 	if err := vaneActivation.Err(); err != nil {
-		log.Errorln("prepare Vane learning state failed: %s", err.Error())
-		return
+		return fmt.Errorf("prepare vane learning state: %w", err)
 	}
+	log.SetLevel(cfg.General.LogLevel)
 
 	tunnel.OnSuspend()
 
@@ -127,6 +126,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateUpdater(cfg)
 
 	resolver.ResetConnection()
+	return nil
 }
 
 func initInnerTcp() {

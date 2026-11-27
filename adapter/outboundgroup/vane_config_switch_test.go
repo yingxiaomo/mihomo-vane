@@ -221,7 +221,7 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 					fast.BitsPerSecond = 2_000_000
 				}
 				require.Nil(t, flow.observe(fast))
-				// A just-claimed token waits for the next sample; it must be detached, not settled.
+				// An inconclusive window must retain the claimed token for a real verdict.
 				flow.handoff = decision.handoff
 				configureVaneSwitchForTest(t, group, mode)
 				member := decision.handoff.toLease
@@ -256,9 +256,9 @@ func TestVaneUntrustedObservationPreservesHealthAndHandoff(t *testing.T) {
 				} else {
 					// A tolerated stall promotes the streak to the trigger line.
 					require.Equal(t, group.flow.lowWindows, flow.lowWindows)
-					require.Equal(t, float64(1), flow.lastSample.BitsPerSecond)
+					require.Equal(t, fast, flow.lastSample, "synthetic windows must preserve real throughput evidence")
 				}
-				require.Nil(t, flow.handoff, "摘取/清空仍执行；lease留到TTL")
+				require.Same(t, decision.handoff, flow.handoff, "不可信窗口必须保留token，等待真实落地判定")
 				flow.mu.Unlock()
 				group.mu.Lock()
 				require.Equal(t, evidence, group.targetEvidence[vaneTargetEvidenceKey{target: key, member: member}])

@@ -128,10 +128,8 @@ func TestVaneStallWatchdogSynthesizesWindows(t *testing.T) {
 			group.runFlowWatchdogTick(clock.Now())
 			flow.mu.Lock()
 			require.Equal(t, group.flow.lowWindows, flow.lowWindows, "a tolerated stall promotes the streak to the trigger line")
-			require.Equal(t, float64(1), flow.lastSample.BitsPerSecond)
-			require.True(t, flow.lastSample.untrusted)
-			require.Equal(t, vaneObservationLowSample().TotalBytes, flow.lastSample.TotalBytes)
-			require.Equal(t, 20*time.Second+tol+time.Second, flow.lastSample.Age)
+			require.Equal(t, vaneObservationLowSample(), flow.lastSample, "synthetic policy must preserve the last real sample")
+			require.Equal(t, clock.Now().Add(-tol-time.Second), flow.lastSampleAt, "synthetic policy must not refresh the real sample clock")
 			flow.mu.Unlock()
 			require.Equal(t, 1, countVaneEvents(group, "race-scheduled", ""))
 		})
@@ -223,7 +221,14 @@ func TestVaneStallWatchdogRealTickerLifecycle(t *testing.T) {
 			require.Eventually(t, watching, time.Second, time.Millisecond)
 			require.Nil(t, flow.observe(vaneObservationLowSample()))
 			clock.Advance(stallToleranceForTest(t, flow) + time.Second)
-			require.Eventually(t, func() bool { flow.mu.Lock(); defer flow.mu.Unlock(); return flow.lastSample.BitsPerSecond == 1 }, vaneWatchdogTick+2*time.Second, 10*time.Millisecond, "real ticker must synthesize a window")
+			require.Eventually(t, func() bool {
+				flow.mu.Lock()
+				defer flow.mu.Unlock()
+				return flow.lowWindows >= group.flow.lowWindows
+			}, vaneWatchdogTick+2*time.Second, 10*time.Millisecond, "real ticker must synthesize a policy window")
+			flow.mu.Lock()
+			require.Equal(t, vaneObservationLowSample(), flow.lastSample, "the actual ticker must not overwrite real throughput evidence")
+			flow.mu.Unlock()
 			flow.markClosed()
 			flow.releaseActiveFlowCount()
 			group.flowsMu.Lock()
@@ -443,6 +448,7 @@ func TestVaneSmallFlowStallStillSwitches(t *testing.T) {
 	flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 1,
 		synthetic:     true,
+		silence:       60 * time.Second,
 		untrusted:     true,
 		TotalBytes:    64 * 1024,
 		Age:           60 * time.Second,
@@ -465,6 +471,7 @@ func TestVaneUnscopedSmallFlowIsNotSwitched(t *testing.T) {
 	flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 1,
 		synthetic:     true,
+		silence:       200 * time.Second,
 		untrusted:     true,
 		TotalBytes:    512 * 1024,
 		Age:           200 * time.Second,
@@ -499,6 +506,7 @@ func TestVaneSmallFlowSyntheticWindowBelowLongAgeIsNotStalled(t *testing.T) {
 			flow.observe(vaneThroughputObservation{
 				BitsPerSecond: 1,
 				synthetic:     true,
+				silence:       tc.age,
 				untrusted:     true,
 				TotalBytes:    512 * 1024,
 				Age:           tc.age,
@@ -518,6 +526,7 @@ func TestVaneZeroSampleFlowJudgedAfterSilence(t *testing.T) {
 	flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 1,
 		synthetic:     true,
+		silence:       vaneZeroSampleSilence + time.Second,
 		untrusted:     true,
 		TotalBytes:    0,
 		Age:           vaneZeroSampleSilence + time.Second,
@@ -556,6 +565,7 @@ func TestVaneSyntheticStallPenalizesLanding(t *testing.T) {
 	flow.observe(vaneThroughputObservation{
 		BitsPerSecond: 1,
 		synthetic:     true,
+		silence:       2 * time.Minute,
 		untrusted:     true,
 		TotalBytes:    0,
 		Age:           2 * time.Minute,
@@ -568,8 +578,8 @@ func TestVaneSyntheticStallPenalizesLanding(t *testing.T) {
 }
 
 // PARTIAL-SILENCE: a connection that delivered a few hundred bytes and then
-// went quiet used to sit untouched for the full zero-sample patience. A player
-// staring at a spinner is exactly that shape, so it is judged much sooner.
+// stayed quiet through the small-flow patience must be judged before the full
+// zero-sample timeout. Shorter idle intervals are covered by the boundary tests.
 func TestVanePartialSilenceJudgesStalledRead(t *testing.T) {
 	group, clock, flow := newVaneObservationRig(t, vaneSwitchLive)
 	t.Cleanup(func() { dropVaneRecordedEvents(group) })
@@ -579,7 +589,7 @@ func TestVanePartialSilenceJudgesStalledRead(t *testing.T) {
 	flow.createdAt = now.Add(-3 * time.Minute)
 	flow.lowWindows = 2
 	flow.mu.Unlock()
-	flow.setLastReadFunc(func() time.Time { return now.Add(-vanePartialSilence - time.Second) })
+	flow.setLastReadFunc(func() time.Time { return now.Add(-vaneLowVolumeAge - time.Second) })
 
 	group.runFlowWatchdogTick(now)
 

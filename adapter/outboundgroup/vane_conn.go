@@ -227,6 +227,9 @@ type vaneThroughputObservation struct {
 	// synthetic marks a window the watchdog invented for a stalled flow, not one
 	// the connection measured.
 	synthetic bool
+	// silence is the time since the last byte (or connection start when no
+	// byte arrived), not the connection's lifetime in Age.
+	silence time.Duration
 }
 
 // vaneConnectionCloseObservation describes only locally observable

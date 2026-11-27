@@ -1119,6 +1119,7 @@ func TestVaneLowVolumeStallStillJudged(t *testing.T) {
 		BitsPerSecond: 1,
 		untrusted:     true,
 		synthetic:     true,
+		silence:       60 * time.Second,
 		TotalBytes:    512 * 1024,
 		Age:           60 * time.Second,
 	})
@@ -1273,9 +1274,9 @@ func TestVaneSmallFlowDoesNotPayForAProbe(t *testing.T) {
 			counter(int64(n))
 		}
 	}
-	// The flow also has to outlive its buffered playback before the watchdog
-	// may synthesize a silent window: 30 s of silence at demand 10M.
-	clock.Advance(vaneStallToleranceMin)
+	// The flow must pass both buffered-playback patience and the small-flow
+	// threshold before policy runs; 30 s alone is not 45 s of actual silence.
+	clock.Advance(vaneLowVolumeAge)
 	group.runFlowWatchdogTick(clock.Now())
 
 	require.Zero(t, countVaneEvents(group, "race-scheduled", ""),
@@ -1389,7 +1390,7 @@ func TestVaneSmallFlowSkipsTheProbeInObserveMode(t *testing.T) {
 			counter(int64(n))
 		}
 	}
-	clock.Advance(vaneStallToleranceMin)
+	clock.Advance(vaneLowVolumeAge)
 	group.runFlowWatchdogTick(clock.Now())
 
 	require.Zero(t, probes, "observe mode must not spend a probe on a small flow")

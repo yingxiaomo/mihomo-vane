@@ -32,6 +32,7 @@ const (
 	vaneRacingProbeTimeout       = 8 * time.Second
 	vaneRacingMaxChallengers     = 2
 	vaneRacingCapabilityTTL      = 10 * time.Minute
+	vaneRacingProbeCursorTTL     = 10 * time.Minute // idle expiry, not a per-candidate failure ban
 	vaneRacingNoWinnerCooldown   = 30 * time.Second
 	vaneRacingMinimumReservation = int64(64 * 1024)
 	// vaneRacingProbeMinDuration is the measurement floor for a proven
@@ -144,6 +145,11 @@ type vaneRacingBudget struct {
 	reserved  int64
 }
 
+type vaneRaceProbeCursor struct {
+	member    vaneMemberLease
+	updatedAt time.Time
+}
+
 type vaneRacingRuntime struct {
 	mu            sync.Mutex
 	ctx           context.Context
@@ -153,6 +159,7 @@ type vaneRacingRuntime struct {
 	activeTasks   map[uint64]context.CancelFunc
 	capabilities  map[vaneMemberLease]vaneCapabilityRecord
 	noWinnerUntil map[vaneTargetKey]time.Time
+	probeCursors  map[vaneTargetKey]vaneRaceProbeCursor
 	budget        vaneRacingBudget
 	closed        bool
 }
@@ -183,6 +190,7 @@ func newVaneRacingRuntime() vaneRacingRuntime {
 		activeTasks:   make(map[uint64]context.CancelFunc),
 		capabilities:  make(map[vaneMemberLease]vaneCapabilityRecord),
 		noWinnerUntil: make(map[vaneTargetKey]time.Time),
+		probeCursors:  make(map[vaneTargetKey]vaneRaceProbeCursor),
 	}
 }
 
@@ -243,11 +251,11 @@ func (a *Vane) scheduleReconnectRace(request vaneRaceRequest, callback func(vane
 		a.racingRuntime.mu.Unlock()
 		return false, "race-in-flight"
 	}
+	a.pruneRaceStateLocked(now)
 	if until := a.racingRuntime.noWinnerUntil[request.targetKey]; until.After(now) {
 		a.racingRuntime.mu.Unlock()
 		return false, "no-winner-cooldown"
 	}
-	delete(a.racingRuntime.noWinnerUntil, request.targetKey)
 	a.racingRuntime.inFlight = true
 	a.racingRuntime.nextTaskID++
 	taskID := a.racingRuntime.nextTaskID
@@ -281,14 +289,41 @@ func (a *Vane) finishRaceTask(taskID uint64, request vaneRaceRequest, noWinner, 
 	if noWinner && !stale && !a.racingRuntime.closed {
 		a.racingRuntime.noWinnerUntil[request.targetKey] = now.Add(vaneRacingNoWinnerCooldown)
 	}
+	a.pruneRaceStateLocked(now)
 	a.racingRuntime.mu.Unlock()
+}
+
+func (a *Vane) pruneRaceStateLocked(now time.Time) {
+	for target, until := range a.racingRuntime.noWinnerUntil {
+		if !until.After(now) {
+			delete(a.racingRuntime.noWinnerUntil, target)
+		}
+	}
+	trimTargetMap(a.racingRuntime.noWinnerUntil, vaneTargetStateLimit, func(until time.Time) time.Time { return until })
+	for target, cursor := range a.racingRuntime.probeCursors {
+		if now.Before(cursor.updatedAt) || now.Sub(cursor.updatedAt) >= vaneRacingProbeCursorTTL {
+			delete(a.racingRuntime.probeCursors, target)
+		}
+	}
+	trimTargetMap(a.racingRuntime.probeCursors, vaneTargetStateLimit, func(cursor vaneRaceProbeCursor) time.Time { return cursor.updatedAt })
 }
 
 func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, taskID uint64, request vaneRaceRequest, callback func(vaneRaceResult), done func()) {
 	defer cancel()
 	noWinner := true
 	stale := false
+	var lastProbed vaneMemberLease
 	defer func() {
+		// Advance only a funded, completed round. Group cancellation and stale
+		// generations must not steer the next round; canceling a losing peer
+		// after finding a winner does not cancel the round itself.
+		if lastProbed.name != "" && !stale && ctx.Err() == nil && a.racingGenerationCurrent(request.generation) {
+			a.racingRuntime.mu.Lock()
+			if !a.racingRuntime.closed {
+				a.racingRuntime.probeCursors[request.targetKey] = vaneRaceProbeCursor{member: lastProbed, updatedAt: a.clock.Now()}
+			}
+			a.racingRuntime.mu.Unlock()
+		}
 		a.finishRaceTask(taskID, request, noWinner, stale)
 		if done != nil {
 			done()
@@ -341,16 +376,7 @@ func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, 
 		}
 	}
 
-	probeCandidates := make([]vaneRaceCandidate, 0, vaneRacingMaxChallengers)
-	for _, candidate := range candidates {
-		if candidate.capFresh {
-			continue
-		}
-		probeCandidates = append(probeCandidates, candidate)
-		if len(probeCandidates) == vaneRacingMaxChallengers {
-			break
-		}
-	}
+	probeCandidates := a.selectRaceProbeCandidates(request.targetKey, candidates, a.clock.Now())
 	if len(probeCandidates) == 0 {
 		a.recordRaceNoWinner(request, "cached-below-required", taskID)
 		return
@@ -363,6 +389,7 @@ func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, 
 		return
 	}
 	probeCandidates = probeCandidates[:len(limits)]
+	lastProbed = probeCandidates[len(probeCandidates)-1].member
 
 	type outcome struct {
 		candidate vaneRaceCandidate
@@ -447,6 +474,34 @@ func (a *Vane) runReconnectRace(ctx context.Context, cancel context.CancelFunc, 
 		}
 	}
 	a.recordRaceNoWinner(request, "no-qualified-challenger", taskID)
+}
+
+// selectRaceProbeCandidates rotates only paid probes, after real-target and
+// capability proofs have had their chance. Each target keeps its own bounded,
+// identity/epoch-bound cursor because target evidence can filter different
+// candidate pools. Probe failures never become business-health evidence.
+func (a *Vane) selectRaceProbeCandidates(target vaneTargetKey, candidates []vaneRaceCandidate, now time.Time) []vaneRaceCandidate {
+	a.racingRuntime.mu.Lock()
+	a.pruneRaceStateLocked(now)
+	cursor, ok := a.racingRuntime.probeCursors[target]
+	a.racingRuntime.mu.Unlock()
+	start := 0
+	if ok {
+		for index, candidate := range candidates {
+			if candidate.member == cursor.member {
+				start = index + 1
+				break
+			}
+		}
+	}
+	selected := make([]vaneRaceCandidate, 0, vaneRacingMaxChallengers)
+	for offset := 0; offset < len(candidates) && len(selected) < vaneRacingMaxChallengers; offset++ {
+		candidate := candidates[(start+offset)%len(candidates)]
+		if !candidate.capFresh {
+			selected = append(selected, candidate)
+		}
+	}
+	return selected
 }
 
 func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandidate, string) {
