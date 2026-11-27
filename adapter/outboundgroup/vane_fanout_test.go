@@ -1,6 +1,7 @@
 package outboundgroup
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,4 +98,58 @@ func TestVaneProbeCapabilityDemotedByRealTraffic(t *testing.T) {
 	got2 := group.racingRuntime.capabilities[lease].lowerBoundBPS
 	group.racingRuntime.mu.Unlock()
 	require.Equal(t, float64(38_000_000), got2, "a real rate near the probe claim keeps it")
+}
+
+// TEST-FANOUT-DEADLOCK-01: two sibling conns whose policy actions submit a
+// delivered policy action to each other must both complete. requestAbort used
+// to run the action while holding lifecycleMu, so two sibling commits that
+// fanned out to each other cross-waited on the two lifecycleMu locks forever.
+func TestVaneRequestAbortCrossFanoutCompletes(t *testing.T) {
+	clock := newVaneConnTestClock()
+	mkConn := func() *vaneObservedConn {
+		return newVaneControlledConnWithNative(&vaneConnTestConn{}, clock, nil, nil, nil, nil, nil, nil, nil).(*vaneObservedConn)
+	}
+	ca := mkConn()
+	cb := mkConn()
+
+	var aRuns, bRuns atomic.Int32
+	inside := make(chan struct{}, 2)
+	proceed := make(chan struct{})
+	doneA := make(chan struct{})
+	doneB := make(chan struct{})
+
+	actionA := func() bool {
+		aRuns.Add(1)
+		inside <- struct{}{}
+		<-proceed
+		cb.submitPolicyAction(func() bool { return true }, true)
+		return true
+	}
+	actionB := func() bool {
+		bRuns.Add(1)
+		inside <- struct{}{}
+		<-proceed
+		ca.submitPolicyAction(func() bool { return true }, true)
+		return true
+	}
+
+	go func() { ca.requestAbort(actionA); close(doneA) }()
+	go func() { cb.requestAbort(actionB); close(doneB) }()
+	<-inside
+	<-inside
+	close(proceed)
+
+	select {
+	case <-doneA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("requestAbort A never returned: cross-fanout deadlock")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("requestAbort B never returned: cross-fanout deadlock")
+	}
+	if aRuns.Load() != 1 || bRuns.Load() != 1 {
+		t.Fatalf("policy actions must run exactly once: a=%d b=%d", aRuns.Load(), bRuns.Load())
+	}
 }

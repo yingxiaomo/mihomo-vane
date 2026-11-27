@@ -769,13 +769,23 @@ func (c *vaneObservedConn) requestAbort(action vanePolicyAction) {
 		return
 	}
 	c.lifecycle = vaneConnectionPolicyClosing
+	c.lifecycleMu.Unlock()
+	// FANOUT-DEADLOCK: the action commits the switch and then fans out to
+	// sibling flows, whose submits re-enter requestAbort on their own conns.
+	// Running the action under lifecycleMu let two sibling commits cross-wait
+	// forever, so the lock now only reserves the one policy-close slot — the
+	// same reserve/work/finalize shape Close() already uses.
 	if !action() {
-		c.lifecycle = vaneConnectionOpen
+		c.mu.Lock()
+		alreadyClosing := c.closing
+		c.mu.Unlock()
+		c.lifecycleMu.Lock()
+		if !alreadyClosing && c.lifecycle == vaneConnectionPolicyClosing {
+			c.lifecycle = vaneConnectionOpen
+		}
 		c.lifecycleMu.Unlock()
 		return
 	}
-	c.lifecycleMu.Unlock()
-
 	closedAt := c.clock.Now()
 	c.mu.Lock()
 	c.closing = true
