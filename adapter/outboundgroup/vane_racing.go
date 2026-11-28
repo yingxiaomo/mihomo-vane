@@ -677,20 +677,28 @@ func (a *Vane) snapshotRaceCandidates(request vaneRaceRequest) ([]vaneRaceCandid
 	return candidates, ""
 }
 
+// vaneFreshCapability is one fresh probe measurement. capHit marks a probe
+// that filled the byte cap: its bps is a floor (more exists beyond it), not a
+// measured rate — usable as challenger evidence, never as a pick demotion.
+type vaneFreshCapability struct {
+	bps    float64
+	capHit bool
+}
+
 // snapshotFreshCapabilities copies the fresh capability records (TTL 10min).
 // It takes racingRuntime.mu only and MUST be called without holding a.mu or
 // learning.mu: no caller of prepare/commit may hold racingRuntime.mu when
 // calling in, and no path may ever take racingRuntime.mu before a.mu. The
 // order is racingRuntime.mu first (snapshot, released), then a.mu.
-func (a *Vane) snapshotFreshCapabilities(now time.Time) map[vaneMemberLease]float64 {
+func (a *Vane) snapshotFreshCapabilities(now time.Time) map[vaneMemberLease]vaneFreshCapability {
 	a.racingRuntime.mu.Lock()
 	defer a.racingRuntime.mu.Unlock()
-	fresh := make(map[vaneMemberLease]float64, len(a.racingRuntime.capabilities))
+	fresh := make(map[vaneMemberLease]vaneFreshCapability, len(a.racingRuntime.capabilities))
 	for member, record := range a.racingRuntime.capabilities {
 		if record.observedAt.IsZero() || now.Sub(record.observedAt) > vaneRacingCapabilityTTL {
 			continue
 		}
-		fresh[member] = record.lowerBoundBPS
+		fresh[member] = vaneFreshCapability{bps: record.lowerBoundBPS, capHit: record.bytes >= vaneRacingProbeByteCap}
 	}
 	return fresh
 }

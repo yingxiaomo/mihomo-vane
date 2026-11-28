@@ -1152,6 +1152,9 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 	now := a.clock.Now()
 	target, port := vaneTarget(metadata)
 
+	// PROBE-EVIDENCE-PICK: snapshot before a.mu — racingRuntime.mu must never
+	// be nested inside it (see snapshotFreshCapabilities).
+	capSnapshot := a.snapshotFreshCapabilities(now)
 	a.mu.Lock()
 	a.learning.mu.Lock()
 	ranked := make([]vaneRankedProxy, 0, len(compatible))
@@ -1186,6 +1189,22 @@ func (a *Vane) pickInternalDecision(ctx context.Context, metadata *C.Metadata, t
 		}
 		if state != nil {
 			snapshot = state.snapshot(transport, now)
+		}
+		// PROBE-EVIDENCE-PICK: a node that went bad keeps its 7-day learning
+		// score because every flow left it and no fresh samples arrive — the
+		// 2026-11-28 outage (probe 0.15Mbps, pick tp=0.42, twice in a row).
+		// A fresh non-cap-hit probe is the newest steady-rate measurement;
+		// cap the estimate at it. A cap-hit record only proves a floor, so it
+		// never demotes. Match by name+identity: the probed epoch goes stale
+		// after an innocent promotion.
+		for capLease, capRec := range capSnapshot {
+			if capLease.name != proxy.Name() || capLease.identity != identity || capRec.capHit {
+				continue
+			}
+			if !snapshot.throughput.valid || capRec.bps < snapshot.throughput.value {
+				snapshot.throughput = vaneMetricEstimate{value: capRec.bps, evidence: 1, confidence: 1, valid: true}
+			}
+			break
 		}
 		key := vaneCooldownKey{transport: transport, target: target, port: port, candidate: proxy.Name(), identity: identity}
 		until := a.cooldownUntilLocked(key, now, commit)

@@ -140,3 +140,36 @@ func TestVaneNativeReleaseDeadlineContinuesReload(t *testing.T) {
 	require.Less(t, time.Since(start), time.Second, "the reload must not wait forever for a stuck collector")
 	require.True(t, collector.stopped, "the stop signal was still delivered")
 }
+
+// TEST-PICK-PROBE-EVIDENCE-01 (2026-11-28 production incident): a node that
+// went bad keeps its 7-day learning score because all its flows left and no
+// fresh samples arrive — the pick then steers new flows onto it (probe said
+// 0.15Mbps, pick tp=0.42, twice in a row). A fresh non-cap-hit probe now caps
+// the candidate's throughput estimate; a cap-hit record is a floor and never
+// demotes.
+func TestVanePickUsesFreshProbeEvidence(t *testing.T) {
+	group, clock, alpha, beta, metadata := newTargetGroupForTest(t)
+	now := clock.Now()
+	group.observeThroughputEpochIdentity(alpha.Name(), alpha.identity, 1, vaneTransportTCP, now, 20_000_000)
+	group.observeThroughputEpochIdentity(alpha.Name(), alpha.identity, 1, vaneTransportTCP, now.Add(time.Second), 20_000_000)
+
+	lease := func(name, identity string) vaneMemberLease { return vaneMemberLease{name: name, identity: identity} }
+	group.racingRuntime.mu.Lock()
+	group.racingRuntime.capabilities[lease(alpha.Name(), alpha.identity)] = vaneCapabilityRecord{lowerBoundBPS: 150_000, bytes: 4096, observedAt: now}
+	group.racingRuntime.capabilities[lease(beta.Name(), beta.identity)] = vaneCapabilityRecord{lowerBoundBPS: 17_800_000, bytes: 1000, observedAt: now}
+	group.racingRuntime.mu.Unlock()
+
+	decision := group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, beta.Name(), decision.proxy.Name(),
+		"alpha's 20M learning score must be capped by its fresh 0.15M probe")
+
+	// Cap-hit records are floors: the same numbers with bytes at the cap must
+	// not demote anyone, so alpha's learning estimate stands.
+	group.racingRuntime.mu.Lock()
+	group.racingRuntime.capabilities[lease(alpha.Name(), alpha.identity)] = vaneCapabilityRecord{lowerBoundBPS: 150_000, bytes: 4 << 20, observedAt: now}
+	group.racingRuntime.capabilities[lease(beta.Name(), beta.identity)] = vaneCapabilityRecord{lowerBoundBPS: 17_800_000, bytes: 4 << 20, observedAt: now}
+	group.racingRuntime.mu.Unlock()
+	decision = group.pickDecision(t.Context(), metadata, vaneTransportTCP, false, true)
+	require.Equal(t, alpha.Name(), decision.proxy.Name(),
+		"a cap-hit probe proves a floor and must not cap the learning estimate")
+}

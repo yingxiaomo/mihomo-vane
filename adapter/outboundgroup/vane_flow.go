@@ -1778,13 +1778,13 @@ func (a *Vane) prepareReconnectForNodeDetailedSkipCooldown(targetKey vaneFlowKey
 			bestEvidence = targetBPS
 		} else if freshThroughput {
 			bestEvidence = recent.bitsPerSecond
-		} else if capBPS, ok := capSnapshot[member]; ok {
-			bestEvidence = capBPS
+		} else if capRec, ok := capSnapshot[member]; ok {
+			bestEvidence = capRec.bps
 		} else {
 			zeroEpoch := member
 			zeroEpoch.epoch = 0
-			if capBPS, ok := capSnapshot[zeroEpoch]; ok {
-				bestEvidence = capBPS
+			if capRec, ok := capSnapshot[zeroEpoch]; ok {
+				bestEvidence = capRec.bps
 			}
 		}
 		if bestEvidence < improvementBar {
@@ -2017,7 +2017,7 @@ func (a *Vane) commitReconnectDetailed(plan vaneReconnectPlan) string {
 // deliberately absent — it gates the current flow, not its rescue. KnownGood
 // plans are NOT exempt:
 // the target tier can still veto them (deliberate target-level strictness).
-func (a *Vane) checkChallengerEvidenceLocked(plan vaneReconnectPlan, caps map[vaneMemberLease]float64, now time.Time) string {
+func (a *Vane) checkChallengerEvidenceLocked(plan vaneReconnectPlan, caps map[vaneMemberLease]vaneFreshCapability, now time.Time) string {
 	lease := vaneMemberLease{name: plan.challenger, identity: plan.challengerIdentity, epoch: plan.challengerEpoch}
 	best := 0.0
 	if plan.targetStateKey.targetScope != "" {
@@ -2038,15 +2038,15 @@ func (a *Vane) checkChallengerEvidenceLocked(plan vaneReconnectPlan, caps map[va
 		}
 	}
 	if best <= 0 {
-		if bps, ok := caps[lease]; ok {
-			best = bps
+		if capRec, ok := caps[lease]; ok {
+			best = capRec.bps
 		} else {
 			// A never-selected challenger has no node state, so its plan may
 			// carry a zero epoch while the probe wrote its record under epoch 0.
 			zeroEpoch := lease
 			zeroEpoch.epoch = 0
-			if bps, ok := caps[zeroEpoch]; ok {
-				best = bps
+			if capRec, ok := caps[zeroEpoch]; ok {
+				best = capRec.bps
 			}
 		}
 	}
